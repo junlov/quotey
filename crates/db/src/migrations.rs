@@ -28,6 +28,9 @@ mod tests {
         "dialogue_turns",
         "policy_rules",
         "explanation_cache",
+        "quote_sessions",
+        "session_participants",
+        "session_operations",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -49,6 +52,11 @@ mod tests {
         "idx_policy_rules_rule_category",
         "idx_explanation_cache_rule_id",
         "idx_explanation_cache_quote_id",
+        "idx_quote_sessions_quote_id",
+        "idx_quote_sessions_status",
+        "idx_session_participants_user_id",
+        "idx_session_operations_session_id",
+        "idx_session_operations_timestamp",
     ];
 
     #[tokio::test]
@@ -144,6 +152,30 @@ mod tests {
         .expect("check explanation_cache table")
         .get::<i64, _>("count");
 
+        let quote_sessions_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'quote_sessions'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check quote_sessions table")
+        .get::<i64, _>("count");
+
+        let session_participants_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'session_participants'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check session_participants table")
+        .get::<i64, _>("count");
+
+        let session_operations_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'session_operations'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check session_operations table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -155,6 +187,9 @@ mod tests {
         assert_eq!(dialogue_turns_count, 1);
         assert_eq!(policy_rules_count, 1);
         assert_eq!(explanation_cache_count, 1);
+        assert_eq!(quote_sessions_count, 1);
+        assert_eq!(session_participants_count, 1);
+        assert_eq!(session_operations_count, 1);
     }
 
     #[tokio::test]
