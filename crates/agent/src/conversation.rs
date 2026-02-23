@@ -1,5 +1,11 @@
 use std::collections::BTreeSet;
 
+use quotey_core::cpq::constraints::{
+    ConstraintEngine, ConstraintInput, ConstraintResult, DeterministicConstraintEngine,
+};
+use quotey_core::domain::product::ProductId;
+use quotey_core::domain::quote::QuoteLine;
+
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ExtractedIntent {
     pub product_mentions: Vec<String>,
@@ -69,6 +75,234 @@ impl IntentExtractor {
             clarification_prompt,
         }
     }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CatalogItem {
+    pub product_id: ProductId,
+    pub display_name: String,
+    pub aliases: Vec<String>,
+    pub unit_price_cents: i64,
+    pub required: bool,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct ConstraintSet {
+    pub constraint_input: ConstraintInput,
+    pub matched_product_ids: Vec<ProductId>,
+    pub unresolved_product_mentions: Vec<String>,
+    pub estimated_total_cents: i64,
+    pub budget_cents: Option<i64>,
+    pub requested_discount_pct: Option<u8>,
+    pub constraints: Vec<String>,
+    pub validation: ConstraintResult,
+    pub clarification_prompt: Option<String>,
+}
+
+#[derive(Clone, Debug)]
+pub struct ConstraintMapper<E = DeterministicConstraintEngine> {
+    catalog: Vec<CatalogItem>,
+    constraint_engine: E,
+}
+
+impl ConstraintMapper<DeterministicConstraintEngine> {
+    pub fn with_catalog(catalog: Vec<CatalogItem>) -> Self {
+        Self::new(catalog, DeterministicConstraintEngine)
+    }
+}
+
+impl<E> ConstraintMapper<E>
+where
+    E: ConstraintEngine,
+{
+    pub fn new(catalog: Vec<CatalogItem>, constraint_engine: E) -> Self {
+        Self { catalog, constraint_engine }
+    }
+
+    pub fn map_intent(&self, intent: &ExtractedIntent) -> ConstraintSet {
+        let requested_quantity = intent.quantity_mentions.first().copied().unwrap_or(1);
+        let mut unresolved_product_mentions = Vec::new();
+        let mut mapped_lines = Vec::new();
+        let mut seen_product_ids = BTreeSet::new();
+
+        for product_mention in &intent.product_mentions {
+            if let Some(item) = self.match_catalog_item(product_mention) {
+                if seen_product_ids.insert(item.product_id.0.clone()) {
+                    mapped_lines.push(MappedLine {
+                        catalog_item: item.clone(),
+                        quantity: requested_quantity,
+                    });
+                }
+            } else {
+                unresolved_product_mentions.push(product_mention.clone());
+            }
+        }
+
+        let mut clarification_prompt =
+            self.clarification_for_unresolved_products(&unresolved_product_mentions);
+        if mapped_lines.is_empty() && clarification_prompt.is_none() {
+            clarification_prompt = Some(
+                "Please specify at least one known product to continue (starter, premium, enterprise)."
+                    .to_string(),
+            );
+        }
+
+        let budget_fit = enforce_budget(&mut mapped_lines, intent.budget_cents);
+        if !budget_fit {
+            clarification_prompt = Some(
+                "Budget cap cannot satisfy the requested configuration. Increase budget, reduce quantity, or choose a lower tier."
+                    .to_string(),
+            );
+        }
+
+        let quote_lines = mapped_lines.iter().map(MappedLine::as_quote_line).collect::<Vec<_>>();
+        let constraint_input = ConstraintInput { quote_lines };
+        let validation = self.constraint_engine.validate(&constraint_input);
+
+        if !validation.valid && clarification_prompt.is_none() {
+            clarification_prompt = validation.violations.first().and_then(|violation| {
+                violation.suggestion.clone().or_else(|| Some(violation.message.clone()))
+            });
+        }
+
+        let estimated_total_cents = mapped_lines.iter().map(MappedLine::line_total_cents).sum();
+        let matched_product_ids = mapped_lines
+            .iter()
+            .map(|line| line.catalog_item.product_id.clone())
+            .collect::<Vec<_>>();
+
+        ConstraintSet {
+            constraint_input,
+            matched_product_ids,
+            unresolved_product_mentions,
+            estimated_total_cents,
+            budget_cents: intent.budget_cents,
+            requested_discount_pct: intent.requested_discount_pct,
+            constraints: intent.constraints.clone(),
+            validation,
+            clarification_prompt,
+        }
+    }
+
+    fn match_catalog_item(&self, mention: &str) -> Option<&CatalogItem> {
+        let normalized_mention = normalize_text(mention);
+        self.catalog.iter().find(|item| {
+            normalize_text(&item.product_id.0) == normalized_mention
+                || normalize_text(&item.display_name).contains(&normalized_mention)
+                || item.aliases.iter().any(|alias| normalize_text(alias) == normalized_mention)
+        })
+    }
+
+    fn clarification_for_unresolved_products(
+        &self,
+        unresolved_mentions: &[String],
+    ) -> Option<String> {
+        if unresolved_mentions.is_empty() {
+            return None;
+        }
+
+        let available_products =
+            self.catalog.iter().map(|item| item.display_name.clone()).collect::<Vec<_>>();
+
+        Some(format!(
+            "I couldn't map these product mentions: {}. Available products: {}.",
+            unresolved_mentions.join(", "),
+            available_products.join(", ")
+        ))
+    }
+}
+
+#[derive(Clone, Debug)]
+struct MappedLine {
+    catalog_item: CatalogItem,
+    quantity: u32,
+}
+
+impl MappedLine {
+    fn line_total_cents(&self) -> i64 {
+        self.catalog_item.unit_price_cents.saturating_mul(i64::from(self.quantity))
+    }
+
+    fn as_quote_line(&self) -> QuoteLine {
+        let unit_price =
+            cents_to_decimal_string(self.catalog_item.unit_price_cents).parse().unwrap_or_else(
+                |_| "0.00".parse().expect("decimal parser must support literal fallback"),
+            );
+
+        QuoteLine {
+            product_id: self.catalog_item.product_id.clone(),
+            quantity: self.quantity,
+            unit_price,
+        }
+    }
+}
+
+fn enforce_budget(mapped_lines: &mut Vec<MappedLine>, budget_cents: Option<i64>) -> bool {
+    let Some(budget_limit_cents) = budget_cents else {
+        return true;
+    };
+    if mapped_lines.is_empty() {
+        return false;
+    }
+
+    if total_cents(mapped_lines) <= budget_limit_cents {
+        return true;
+    }
+
+    let mut optional_indexes = mapped_lines
+        .iter()
+        .enumerate()
+        .filter(|(_, line)| !line.catalog_item.required)
+        .map(|(index, _)| index)
+        .collect::<Vec<_>>();
+    optional_indexes.sort_by_key(|index| mapped_lines[*index].line_total_cents());
+    optional_indexes.reverse();
+
+    for index in optional_indexes {
+        if total_cents(mapped_lines) <= budget_limit_cents {
+            break;
+        }
+        mapped_lines.remove(index);
+        if mapped_lines.is_empty() {
+            return false;
+        }
+    }
+
+    if total_cents(mapped_lines) <= budget_limit_cents {
+        return true;
+    }
+
+    let target_line_index = mapped_lines
+        .iter()
+        .enumerate()
+        .find(|(_, line)| line.catalog_item.required)
+        .map(|(index, _)| index)
+        .unwrap_or(0);
+
+    let unit_price_cents = mapped_lines[target_line_index].catalog_item.unit_price_cents;
+    if unit_price_cents <= 0 {
+        return false;
+    }
+
+    let max_affordable_quantity = budget_limit_cents / unit_price_cents;
+    if max_affordable_quantity <= 0 {
+        return false;
+    }
+
+    mapped_lines[target_line_index].quantity =
+        mapped_lines[target_line_index].quantity.min(max_affordable_quantity as u32);
+
+    total_cents(mapped_lines) <= budget_limit_cents
+}
+
+fn total_cents(mapped_lines: &[MappedLine]) -> i64 {
+    mapped_lines.iter().map(MappedLine::line_total_cents).sum()
+}
+
+fn cents_to_decimal_string(cents: i64) -> String {
+    let sign = if cents < 0 { "-" } else { "" };
+    let absolute = cents.abs();
+    format!("{sign}{}.{:02}", absolute / 100, absolute % 100)
 }
 
 fn normalize_text(text: &str) -> String {
@@ -272,7 +506,9 @@ fn confidence_score(
 
 #[cfg(test)]
 mod tests {
-    use super::IntentExtractor;
+    use quotey_core::domain::product::ProductId;
+
+    use super::{CatalogItem, ConstraintMapper, ExtractedIntent, IntentExtractor};
 
     #[test]
     fn extracts_core_fields_from_rich_request() {
@@ -417,5 +653,120 @@ mod tests {
                 case.text
             );
         }
+    }
+
+    #[test]
+    fn maps_intent_to_constraint_set_for_solver() {
+        let mapper = ConstraintMapper::with_catalog(catalog_fixture());
+        let intent = ExtractedIntent {
+            product_mentions: vec!["enterprise".to_string(), "support".to_string()],
+            quantity_mentions: vec![5],
+            budget_cents: None,
+            timeline_hint: None,
+            requested_discount_pct: Some(10),
+            constraints: vec!["required_feature".to_string()],
+            confidence_score: 95,
+            clarification_prompt: None,
+        };
+
+        let constraint_set = mapper.map_intent(&intent);
+        assert_eq!(constraint_set.constraint_input.quote_lines.len(), 2);
+        assert!(constraint_set.validation.valid);
+        assert_eq!(constraint_set.matched_product_ids.len(), 2);
+        assert_eq!(constraint_set.estimated_total_cents, 8_500_000);
+        assert_eq!(constraint_set.requested_discount_pct, Some(10));
+        assert!(constraint_set.clarification_prompt.is_none());
+    }
+
+    #[test]
+    fn budget_mapping_drops_optional_items_to_fit_cap() {
+        let mapper = ConstraintMapper::with_catalog(catalog_fixture());
+        let intent = ExtractedIntent {
+            product_mentions: vec!["enterprise".to_string(), "support".to_string()],
+            quantity_mentions: vec![1],
+            budget_cents: Some(1_500_000),
+            timeline_hint: None,
+            requested_discount_pct: None,
+            constraints: vec!["budget_cap".to_string()],
+            confidence_score: 90,
+            clarification_prompt: None,
+        };
+
+        let constraint_set = mapper.map_intent(&intent);
+        assert!(constraint_set.validation.valid);
+        assert_eq!(constraint_set.constraint_input.quote_lines.len(), 1);
+        assert_eq!(
+            constraint_set.constraint_input.quote_lines[0].product_id,
+            ProductId("enterprise".to_string())
+        );
+        assert_eq!(constraint_set.estimated_total_cents, 1_500_000);
+        assert!(constraint_set.clarification_prompt.is_none());
+    }
+
+    #[test]
+    fn budget_mapping_reduces_quantity_when_single_line_exceeds_cap() {
+        let mapper = ConstraintMapper::with_catalog(catalog_fixture());
+        let intent = ExtractedIntent {
+            product_mentions: vec!["premium".to_string()],
+            quantity_mentions: vec![12],
+            budget_cents: Some(1_800_000),
+            timeline_hint: None,
+            requested_discount_pct: None,
+            constraints: vec!["budget_cap".to_string()],
+            confidence_score: 88,
+            clarification_prompt: None,
+        };
+
+        let constraint_set = mapper.map_intent(&intent);
+        assert!(constraint_set.validation.valid);
+        assert_eq!(constraint_set.constraint_input.quote_lines.len(), 1);
+        assert_eq!(constraint_set.constraint_input.quote_lines[0].quantity, 6);
+        assert_eq!(constraint_set.estimated_total_cents, 1_800_000);
+    }
+
+    #[test]
+    fn unresolved_product_mentions_trigger_clarifying_prompt() {
+        let mapper = ConstraintMapper::with_catalog(catalog_fixture());
+        let intent = ExtractedIntent {
+            product_mentions: vec!["platinum".to_string()],
+            quantity_mentions: vec![2],
+            budget_cents: None,
+            timeline_hint: None,
+            requested_discount_pct: None,
+            constraints: Vec::new(),
+            confidence_score: 40,
+            clarification_prompt: None,
+        };
+
+        let constraint_set = mapper.map_intent(&intent);
+        assert!(!constraint_set.validation.valid);
+        assert_eq!(constraint_set.unresolved_product_mentions, vec!["platinum".to_string()]);
+        assert!(constraint_set.clarification_prompt.is_some());
+    }
+
+    fn catalog_fixture() -> Vec<CatalogItem> {
+        vec![
+            CatalogItem {
+                product_id: ProductId("enterprise".to_string()),
+                display_name: "Enterprise".to_string(),
+                aliases: vec!["enterprise tier".to_string(), "ent".to_string()],
+                unit_price_cents: 1_500_000,
+                required: true,
+            },
+            CatalogItem {
+                product_id: ProductId("premium".to_string()),
+                display_name: "Premium".to_string(),
+                aliases: vec!["pro".to_string(), "premium tier".to_string()],
+                unit_price_cents: 300_000,
+                required: true,
+            },
+            CatalogItem {
+                product_id: ProductId("support".to_string()),
+                display_name: "Premium Support".to_string(),
+                aliases: vec!["support".to_string(), "support add-on".to_string()],
+                unit_price_cents: 200_000,
+                required: false,
+            },
+        ]
     }
 }
