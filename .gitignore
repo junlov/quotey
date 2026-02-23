@@ -31,3 +31,10 @@ venv/
 
 # bv (beads viewer) local config and caches
 .bv/
+
+# Rust build artifacts
+target/
+.sqlx/
+quotey_migration_check.db
+quotey_migration_check.db-shm
+quotey_migration_check.db-wal
