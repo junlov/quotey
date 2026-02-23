@@ -8,6 +8,7 @@ pub mod dna;
 pub mod domain;
 pub mod errors;
 pub mod flows;
+pub mod ghost;
 pub mod ledger;
 pub mod policy;
 
@@ -31,5 +32,6 @@ pub use domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
 pub use domain::product::{Product, ProductId};
 pub use domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
 pub use errors::{ApplicationError, DomainError, InterfaceError};
+pub use ghost::{Signal, SignalDetector, SignalDetectorConfig};
 pub use ledger::{LedgerAction, LedgerEntry, LedgerService, VerificationResult};
 pub use policy::{ExplanationGenerator, ExplanationTemplate, GeneratedExplanation};
