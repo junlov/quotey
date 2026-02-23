@@ -1,0 +1,23 @@
+[package]
+name = "quotey-server"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+authors.workspace = true
+
+[dependencies]
+anyhow.workspace = true
+quotey-agent = { path = "../agent" }
+quotey-core = { path = "../core" }
+quotey-db = { path = "../db" }
+quotey-slack = { path = "../slack" }
+sqlx.workspace = true
+thiserror.workspace = true
+tokio.workspace = true
+tracing.workspace = true
+tracing-subscriber.workspace = true
+
+[[bin]]
+name = "quotey-server"
+path = "src/main.rs"

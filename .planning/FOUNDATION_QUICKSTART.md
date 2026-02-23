@@ -16,23 +16,69 @@ br ready  # See what's unblocked
 br update <task-id> --status in_progress
 ```
 
+## Phase 0 Tooling Gate (`bd-3d8.12`)
+
+Run these before scaffold coding starts:
+
+```bash
+# Minimum compiler requirement: rustc >= 1.75
+rustc --version | awk '{split($2,v,"."); exit !((v[1] > 1) || (v[1] == 1 && v[2] >= 75))}'
+
+# Required tooling availability
+cargo fmt --version
+cargo clippy --version
+cargo sqlx --version
+cargo nextest --version
+cargo deny --version
+```
+
+If a command is missing:
+
+```bash
+cargo install --locked sqlx-cli --no-default-features --features rustls,sqlite
+cargo install --locked cargo-nextest
+cargo install --locked cargo-deny
+```
+
+Policy files now used by the repository:
+- `rust-toolchain.toml` for toolchain + rustfmt/clippy components
+- `rustfmt.toml` for formatter behavior
+- `.cargo/config.toml` for strict lint/test aliases
+- `deny.toml` for dependency auditing rules
+
+## Config Bootstrap Checks (`bd-3d8.2`)
+
+```bash
+# Validate typed config + fail-fast behavior from CLI
+cargo run -p quotey-cli -- config
+cargo run -p quotey-cli -- doctor
+```
+
+Useful env overrides:
+- `QUOTEY_DATABASE_URL`
+- `QUOTEY_SLACK_APP_TOKEN`
+- `QUOTEY_SLACK_BOT_TOKEN`
+- `QUOTEY_LLM_PROVIDER`
+- `QUOTEY_LOGGING_LEVEL`
+
 ## Daily Development Loop
 
 ```bash
 # 1. Verify clean state
-cargo fmt -- --check
-cargo clippy --workspace -- -D warnings
+cargo fmt-check
+cargo lint
 
 # 2. Run tests
-cargo test --workspace
+cargo test-all
 
 # 3. Make changes
 # ... edit files ...
 
 # 4. Verify again
-cargo fmt -- --check
-cargo clippy --workspace -- -D warnings
-cargo test --workspace
+cargo fmt-check
+cargo lint
+cargo test-all
+cargo deny check
 
 # 5. Commit
 git add .
@@ -47,6 +93,10 @@ git commit -m "<task-id>: <description>"
 | `cargo test --workspace` | Run all tests |
 | `cargo clippy --workspace -- -D warnings` | Lint (zero warnings policy) |
 | `cargo fmt` | Format code |
+| `cargo fmt-check` | Enforced formatter check (alias from `.cargo/config.toml`) |
+| `cargo lint` | Enforced clippy check (alias from `.cargo/config.toml`) |
+| `cargo test-all` | Run tests with nextest (alias from `.cargo/config.toml`) |
+| `cargo deny check` | Dependency/license/advisory audit |
 | `cargo sqlx migrate run` | Apply DB migrations |
 | `cargo sqlx prepare` | Prepare for offline builds |
 | `cargo doc --workspace` | Build documentation |
