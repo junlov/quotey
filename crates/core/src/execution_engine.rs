@@ -452,7 +452,7 @@ impl DeterministicExecutionEngine {
     }
 
     /// Hash payload for idempotency checking
-    fn hash_payload(payload: &str) -> String {
+    pub fn hash_payload(payload: &str) -> String {
         use sha2::{Digest, Sha256};
         let mut hasher = Sha256::new();
         hasher.update(payload.as_bytes());
@@ -870,5 +870,162 @@ mod tests {
         assert_eq!(completed.task.state, ExecutionTaskState::Completed);
 
         assert_eq!(engine.get_transitions().len(), 2);
+    }
+
+    #[test]
+    fn idempotency_record_tracks_payload_hash() {
+        let engine = DeterministicExecutionEngine::new();
+        let (task, idempotency) = engine.create_task(
+            test_quote_id(),
+            "crm_sync",
+            r#"{"account_id": "acc-123", "deal_id": "deal-456"}"#,
+            test_operation_key(),
+            "corr-hash-test",
+        );
+
+        // Hash should be deterministic for same payload
+        let expected_hash = DeterministicExecutionEngine::hash_payload(&task.payload_json);
+        assert_eq!(idempotency.payload_hash, expected_hash);
+        assert!(!idempotency.payload_hash.is_empty());
+    }
+
+    #[test]
+    fn claim_conflict_occurs_when_task_already_claimed() {
+        let mut engine = InMemoryExecutionEngine::new();
+
+        let task_id = engine.enqueue(
+            test_quote_id(),
+            "send_email",
+            r#"{"to": "test@example.com"}"#,
+            test_operation_key(),
+            "corr-002",
+        );
+
+        let claimed1 = engine.claim(&task_id, "worker-001");
+        assert!(claimed1.is_ok());
+
+        // Try to claim again immediately (within timeout)
+        let claimed2 = engine.claim(&task_id, "worker-002");
+        assert!(matches!(claimed2, Err(ExecutionError::ClaimConflict(_, _))));
+    }
+
+    #[test]
+    fn transition_events_contain_correlation_id() {
+        let engine = DeterministicExecutionEngine::new();
+        let (task, mut idempotency) = engine.create_task(
+            test_quote_id(),
+            "generate_pdf",
+            r#"{}"#,
+            test_operation_key(),
+            "corr-trace-001",
+        );
+
+        let result = engine.claim_task(task, "worker-001", &mut idempotency).unwrap();
+
+        assert_eq!(result.transition.correlation_id, "corr-trace-001");
+    }
+
+    #[test]
+    fn retry_backoff_increases_with_each_attempt() {
+        let config = ExecutionEngineConfig {
+            default_max_retries: 3,
+            retry_base_delay_seconds: 10,
+            retry_backoff_multiplier: 2,
+            ..Default::default()
+        };
+        let engine = DeterministicExecutionEngine::with_config(config);
+
+        let now = Utc::now();
+        let task = ExecutionTask {
+            id: ExecutionTaskId("backoff-test".to_string()),
+            quote_id: test_quote_id(),
+            operation_kind: "test".to_string(),
+            payload_json: "{}".to_string(),
+            idempotency_key: test_operation_key(),
+            state: ExecutionTaskState::Running,
+            retry_count: 2, // Already attempted twice
+            max_retries: 3,
+            available_at: now,
+            claimed_by: Some("worker".to_string()),
+            claimed_at: Some(now),
+            last_error: None,
+            result_fingerprint: None,
+            state_version: 1,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let mut idempotency = IdempotencyRecord {
+            operation_key: test_operation_key(),
+            quote_id: test_quote_id(),
+            operation_kind: "test".to_string(),
+            payload_hash: "hash".to_string(),
+            state: IdempotencyRecordState::Running,
+            attempt_count: 3,
+            first_seen_at: now,
+            last_seen_at: now,
+            result_snapshot_json: None,
+            error_snapshot_json: None,
+            expires_at: None,
+            correlation_id: "corr".to_string(),
+            created_by_component: "test".to_string(),
+            updated_by_component: "test".to_string(),
+        };
+
+        let result =
+            engine.fail_task(task, "error", "Error", RetryPolicy::Retry, &mut idempotency).unwrap();
+
+        // With retry_count=2, backoff = 10 * 2^2 = 40 seconds
+        let expected_available = result.task.available_at;
+        let backoff_seconds = (expected_available - now).num_seconds();
+        assert!(backoff_seconds >= 40, "expected backoff >= 40s, got {backoff_seconds}s");
+    }
+
+    #[test]
+    fn state_version_increments_on_each_transition() {
+        let engine = DeterministicExecutionEngine::new();
+        let (task, mut idempotency) = engine.create_task(
+            test_quote_id(),
+            "test_op",
+            r#"{}"#,
+            test_operation_key(),
+            "corr-version",
+        );
+
+        assert_eq!(task.state_version, 1);
+
+        let claimed = engine.claim_task(task, "worker-001", &mut idempotency).unwrap();
+        assert_eq!(claimed.task.state_version, 2);
+
+        let completed = engine.complete_task(claimed.task, "result", &mut idempotency).unwrap();
+        assert_eq!(completed.task.state_version, 3);
+    }
+
+    #[test]
+    fn deterministic_engine_produces_consistent_results() {
+        let engine1 = DeterministicExecutionEngine::new();
+        let engine2 = DeterministicExecutionEngine::new();
+
+        let (task1, _idempotency1) = engine1.create_task(
+            test_quote_id(),
+            "op",
+            r#"{"data": "value"}"#,
+            test_operation_key(),
+            "corr",
+        );
+        let (task2, _idempotency2) = engine2.create_task(
+            test_quote_id(),
+            "op",
+            r#"{"data": "value"}"#,
+            test_operation_key(),
+            "corr",
+        );
+
+        // Same inputs should produce same payload hash
+        assert_eq!(task1.payload_json, task2.payload_json);
+        assert_eq!(
+            DeterministicExecutionEngine::hash_payload(&task1.payload_json),
+            DeterministicExecutionEngine::hash_payload(&task2.payload_json)
+        );
     }
 }
