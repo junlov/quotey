@@ -66,7 +66,20 @@ pub async fn bootstrap(options: LoadOptions) -> Result<Application, BootstrapErr
 
 #[cfg(test)]
 mod tests {
+    use chrono::Utc;
     use quotey_core::config::{ConfigOverrides, LoadOptions};
+    use quotey_core::{
+        cpq::{policy::PolicyInput, DeterministicCpqRuntime},
+        domain::{
+            product::ProductId,
+            quote::{Quote, QuoteId, QuoteLine, QuoteStatus},
+        },
+        flows::{
+            engine::FlowEngine,
+            states::{FlowAction, FlowContext, FlowEvent, FlowState},
+        },
+    };
+    use rust_decimal::Decimal;
 
     use crate::bootstrap::bootstrap;
 
@@ -86,5 +99,96 @@ mod tests {
         assert!(result.is_err());
         let message = result.err().expect("error").to_string();
         assert!(message.contains("slack.app_token"));
+    }
+
+    #[tokio::test]
+    async fn integration_smoke_covers_startup_data_path_and_quote_checkpoints() {
+        let app = bootstrap(valid_overrides("sqlite::memory:?cache=shared"))
+            .await
+            .expect("bootstrap should succeed with valid overrides");
+
+        let (table_count,): (i64,) = sqlx::query_as(
+            "SELECT COUNT(*) FROM sqlite_master \
+             WHERE type = 'table' AND name IN ('quote', 'quote_line', 'flow_state', 'audit_event')",
+        )
+        .fetch_one(&app.db_pool)
+        .await
+        .expect("expected foundation tables to be available after bootstrap");
+        assert_eq!(table_count, 4, "bootstrap should expose baseline quote-path tables");
+
+        let flow_engine = FlowEngine::default();
+        let quote = quote_fixture();
+        let context = FlowContext::default();
+
+        let validated = flow_engine
+            .apply(&FlowState::Draft, &FlowEvent::RequiredFieldsCollected, &context)
+            .expect("draft -> validated should succeed");
+        assert_eq!(validated.to, FlowState::Validated);
+
+        let priced = flow_engine
+            .apply(&validated.to, &FlowEvent::PricingCalculated, &context)
+            .expect("validated -> priced should succeed");
+        assert_eq!(priced.to, FlowState::Priced);
+
+        let cpq_evaluation = flow_engine.evaluate_cpq(
+            &DeterministicCpqRuntime::default(),
+            &quote,
+            "USD",
+            PolicyInput {
+                requested_discount_pct: Decimal::new(1500, 2),
+                deal_value: Decimal::new(250_000, 2),
+                minimum_margin_pct: Decimal::new(4000, 2),
+            },
+        );
+        assert!(cpq_evaluation.constraints.valid, "quote fixture should pass constraints");
+        assert!(
+            cpq_evaluation.pricing.total > Decimal::ZERO,
+            "pricing checkpoint should produce positive total"
+        );
+        assert!(
+            !cpq_evaluation.policy.approval_required,
+            "policy checkpoint should allow auto-approval for baseline discount"
+        );
+
+        let finalized = flow_engine
+            .apply(&priced.to, &FlowEvent::PolicyClear, &context)
+            .expect("priced -> finalized should succeed");
+        assert_eq!(finalized.to, FlowState::Finalized);
+        assert!(
+            finalized.actions.contains(&FlowAction::GenerateDeliveryArtifacts),
+            "finalization should include delivery artifact generation"
+        );
+
+        let sent = flow_engine
+            .apply(&finalized.to, &FlowEvent::QuoteDelivered, &context)
+            .expect("finalized -> sent should succeed");
+        assert_eq!(sent.to, FlowState::Sent);
+
+        app.db_pool.close().await;
+    }
+
+    fn valid_overrides(database_url: &str) -> LoadOptions {
+        LoadOptions {
+            overrides: ConfigOverrides {
+                database_url: Some(database_url.to_string()),
+                slack_app_token: Some("xapp-test".to_string()),
+                slack_bot_token: Some("xoxb-test".to_string()),
+                ..ConfigOverrides::default()
+            },
+            ..LoadOptions::default()
+        }
+    }
+
+    fn quote_fixture() -> Quote {
+        Quote {
+            id: QuoteId("Q-INT-0001".to_string()),
+            status: QuoteStatus::Draft,
+            lines: vec![QuoteLine {
+                product_id: ProductId("plan-pro".to_string()),
+                quantity: 2,
+                unit_price: Decimal::new(25_000, 2),
+            }],
+            created_at: Utc::now(),
+        }
     }
 }

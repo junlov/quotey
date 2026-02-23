@@ -1,4 +1,5 @@
 mod bootstrap;
+mod health;
 
 use anyhow::Result;
 use quotey_core::config::{ConfigOverrides, LoadOptions};
@@ -18,6 +19,13 @@ pub async fn run() -> Result<()> {
         },
         ..LoadOptions::default()
     })
+    .await?;
+
+    health::spawn(
+        &app.config.server.bind_address,
+        app.config.server.health_check_port,
+        app.db_pool.clone(),
+    )
     .await?;
 
     let _ = &app.config;
