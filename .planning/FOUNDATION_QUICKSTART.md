@@ -61,6 +61,29 @@ Useful env overrides:
 - `QUOTEY_LLM_PROVIDER`
 - `QUOTEY_LOGGING_LEVEL`
 
+## Migration Reversibility Workflow (`bd-3d8.10.4`)
+
+Run these checks whenever a migration is added or modified:
+
+```bash
+# Contract test: validates up/down/up schema equivalence for migration-managed objects
+TMPDIR=/data/projects/quotey/.tmp CARGO_TARGET_DIR=target \
+  cargo test -p quotey-db migrations_up_down_up_preserves_schema_signature -- --exact
+
+# Safety test: validates full undo removes migration-managed tables
+TMPDIR=/data/projects/quotey/.tmp CARGO_TARGET_DIR=target \
+  cargo test -p quotey-db migrations_are_reversible -- --exact
+```
+
+Optional local DB drill for operator workflows:
+
+```bash
+export QUOTEY_DATABASE_URL="sqlite://quotey_migration_check.db"
+cargo run -p quotey-cli -- migrate
+cargo sqlx migrate revert --database-url "$QUOTEY_DATABASE_URL"
+cargo run -p quotey-cli -- migrate
+```
+
 ## Daily Development Loop
 
 ```bash
