@@ -1,4 +1,5 @@
 pub mod approvals;
+pub mod archaeology;
 pub mod audit;
 pub mod config;
 pub mod cpq;
@@ -10,6 +11,10 @@ pub mod flows;
 pub use approvals::{
     ApprovalValidationFailure, ApprovalValidationInput, ApprovalValidationResult,
     ApprovalValidator, ApproverAuthority,
+};
+pub use archaeology::{
+    CatalogConstraint, ConstraintEdgeType, DependencyEdge, DependencyGraph, DependencyGraphEngine,
+    DependencyNode, GraphAnalysis, GraphBlockage, ResolutionPath,
 };
 pub use dna::{
     ConfigurationFingerprint, DealOutcomeMetadata, DealOutcomeStatus, FingerprintGenerator,
