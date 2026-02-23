@@ -22,6 +22,8 @@ mod tests {
         "audit_event",
         "emoji_approvals",
         "approval_audit_log",
+        "configuration_fingerprints",
+        "similarity_cache",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -32,6 +34,11 @@ mod tests {
         "idx_emoji_approvals_quote_id",
         "idx_emoji_approvals_approver_user_id",
         "idx_approval_audit_log_quote_id",
+        "idx_configuration_fingerprints_quote_id",
+        "idx_configuration_fingerprints_fingerprint_hash",
+        "idx_similarity_cache_source_candidate_version",
+        "idx_similarity_cache_source_fingerprint_id",
+        "idx_similarity_cache_candidate_fingerprint_id",
     ];
 
     #[tokio::test]
@@ -79,11 +86,29 @@ mod tests {
         .expect("check approval_audit_log table")
         .get::<i64, _>("count");
 
+        let configuration_fingerprint_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'configuration_fingerprints'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check configuration_fingerprints table")
+        .get::<i64, _>("count");
+
+        let similarity_cache_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'similarity_cache'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check similarity_cache table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
         assert_eq!(emoji_approval_count, 1);
         assert_eq!(approval_audit_count, 1);
+        assert_eq!(configuration_fingerprint_count, 1);
+        assert_eq!(similarity_cache_count, 1);
     }
 
     #[tokio::test]
