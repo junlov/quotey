@@ -20,6 +20,8 @@ mod tests {
         "quote_line",
         "flow_state",
         "audit_event",
+        "emoji_approvals",
+        "approval_audit_log",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -27,6 +29,9 @@ mod tests {
         "idx_audit_event_quote_id",
         "idx_audit_event_timestamp",
         "idx_audit_event_type",
+        "idx_emoji_approvals_quote_id",
+        "idx_emoji_approvals_approver_user_id",
+        "idx_approval_audit_log_quote_id",
     ];
 
     #[tokio::test]
@@ -58,9 +63,27 @@ mod tests {
         .expect("check audit_event table")
         .get::<i64, _>("count");
 
+        let emoji_approval_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'emoji_approvals'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check emoji_approvals table")
+        .get::<i64, _>("count");
+
+        let approval_audit_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'approval_audit_log'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check approval_audit_log table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
+        assert_eq!(emoji_approval_count, 1);
+        assert_eq!(approval_audit_count, 1);
     }
 
     #[tokio::test]
