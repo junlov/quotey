@@ -1,3 +1,6 @@
+use std::cmp::Ordering;
+
+use rust_decimal::Decimal;
 use serde_json::{json, Value};
 
 use crate::domain::quote::{Quote, QuoteLine};
@@ -10,6 +13,34 @@ pub struct ConfigurationFingerprint {
     pub hash_hex: String,
     pub hash_bytes: [u8; FINGERPRINT_BYTES],
     pub vector: [u8; FINGERPRINT_BITS],
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum DealOutcomeStatus {
+    Won,
+    Lost,
+    Pending,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DealOutcomeMetadata {
+    pub quote_id: String,
+    pub outcome_status: DealOutcomeStatus,
+    pub final_price: Decimal,
+    pub close_date: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimilarityCandidate {
+    pub fingerprint: ConfigurationFingerprint,
+    pub outcome: DealOutcomeMetadata,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimilarDeal {
+    pub outcome: DealOutcomeMetadata,
+    pub similarity_score: f32,
+    pub hamming_distance: usize,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -81,6 +112,74 @@ impl FingerprintGenerator {
     ) -> f32 {
         let distance = self.hamming_distance(left, right) as f32;
         1.0 - distance / FINGERPRINT_BITS as f32
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct SimilarityEngine {
+    min_similarity: f32,
+    candidates: Vec<SimilarityCandidate>,
+}
+
+impl SimilarityEngine {
+    const DEFAULT_MIN_SIMILARITY: f32 = 0.8;
+
+    pub fn new(candidates: Vec<SimilarityCandidate>) -> Self {
+        Self { min_similarity: Self::DEFAULT_MIN_SIMILARITY, candidates }
+    }
+
+    pub fn with_min_similarity(mut self, min_similarity: f32) -> Self {
+        self.min_similarity = min_similarity.clamp(0.0, 1.0);
+        self
+    }
+
+    pub fn min_similarity(&self) -> f32 {
+        self.min_similarity
+    }
+
+    pub fn find_similar(
+        &self,
+        fingerprint: &ConfigurationFingerprint,
+        limit: usize,
+    ) -> Vec<SimilarDeal> {
+        if limit == 0 {
+            return Vec::new();
+        }
+
+        let generator = FingerprintGenerator::new();
+        let mut matches: Vec<SimilarDeal> = self
+            .candidates
+            .iter()
+            .filter_map(|candidate| {
+                let hamming_distance =
+                    generator.hamming_distance(fingerprint, &candidate.fingerprint);
+                let similarity_score = 1.0 - hamming_distance as f32 / FINGERPRINT_BITS as f32;
+                if similarity_score >= self.min_similarity {
+                    Some(SimilarDeal {
+                        outcome: candidate.outcome.clone(),
+                        similarity_score,
+                        hamming_distance,
+                    })
+                } else {
+                    None
+                }
+            })
+            .collect();
+
+        matches.sort_by(|left, right| {
+            right
+                .similarity_score
+                .partial_cmp(&left.similarity_score)
+                .unwrap_or(Ordering::Equal)
+                .then_with(|| left.hamming_distance.cmp(&right.hamming_distance))
+                .then_with(|| left.outcome.quote_id.cmp(&right.outcome.quote_id))
+        });
+
+        if matches.len() > limit {
+            matches.truncate(limit);
+        }
+
+        matches
     }
 }
 
@@ -157,6 +256,8 @@ fn bytes_to_hex(bytes: &[u8; FINGERPRINT_BYTES]) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::time::{Duration, Instant};
+
     use chrono::Utc;
     use rust_decimal::Decimal;
     use serde_json::json;
@@ -167,7 +268,8 @@ mod tests {
     };
 
     use super::{
-        configuration_from_lines, FingerprintGenerator, FINGERPRINT_BITS, FINGERPRINT_BYTES,
+        configuration_from_lines, DealOutcomeMetadata, DealOutcomeStatus, FingerprintGenerator,
+        SimilarityCandidate, SimilarityEngine, FINGERPRINT_BITS, FINGERPRINT_BYTES,
     };
 
     #[test]
@@ -314,12 +416,140 @@ mod tests {
         );
     }
 
+    #[test]
+    fn similarity_engine_default_threshold_is_point_eight() {
+        let engine = SimilarityEngine::new(Vec::new());
+        assert!((engine.min_similarity() - 0.8).abs() < f32::EPSILON);
+    }
+
+    #[test]
+    fn find_similar_returns_ranked_matches_by_similarity() {
+        let generator = FingerprintGenerator::new();
+        let target = generator.generate_from_json(&json!({
+            "account_tier": "enterprise",
+            "products": [{"id": "plan-enterprise", "qty": 100}],
+            "term_months": 24
+        }));
+        let near = generator.generate_from_json(&json!({
+            "account_tier": "enterprise",
+            "products": [{"id": "plan-enterprise", "qty": 102}],
+            "term_months": 24
+        }));
+        let far = generator.generate_from_json(&json!({
+            "account_tier": "smb",
+            "products": [{"id": "starter", "qty": 5}],
+            "term_months": 12
+        }));
+
+        let engine = SimilarityEngine::new(vec![
+            SimilarityCandidate {
+                fingerprint: target.clone(),
+                outcome: outcome("Q-EXACT", DealOutcomeStatus::Won, Decimal::new(120_000, 2)),
+            },
+            SimilarityCandidate {
+                fingerprint: near,
+                outcome: outcome("Q-NEAR", DealOutcomeStatus::Won, Decimal::new(118_000, 2)),
+            },
+            SimilarityCandidate {
+                fingerprint: far,
+                outcome: outcome("Q-FAR", DealOutcomeStatus::Lost, Decimal::new(9_500, 2)),
+            },
+        ])
+        .with_min_similarity(0.0);
+
+        let results = engine.find_similar(&target, 2);
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].outcome.quote_id, "Q-EXACT");
+        assert_eq!(results[1].outcome.quote_id, "Q-NEAR");
+        assert!(results[0].similarity_score >= results[1].similarity_score);
+    }
+
+    #[test]
+    fn find_similar_respects_threshold_filtering() {
+        let generator = FingerprintGenerator::new();
+        let target = generator.generate_from_json(&json!({
+            "account_tier": "enterprise",
+            "products": [{"id": "plan-enterprise", "qty": 100}],
+        }));
+        let far = generator.generate_from_json(&json!({
+            "account_tier": "smb",
+            "products": [{"id": "starter", "qty": 2}],
+        }));
+
+        let engine = SimilarityEngine::new(vec![
+            SimilarityCandidate {
+                fingerprint: target.clone(),
+                outcome: outcome("Q-EXACT", DealOutcomeStatus::Won, Decimal::new(150_000, 2)),
+            },
+            SimilarityCandidate {
+                fingerprint: far,
+                outcome: outcome("Q-FAR", DealOutcomeStatus::Lost, Decimal::new(5_000, 2)),
+            },
+        ])
+        .with_min_similarity(0.9);
+
+        let results = engine.find_similar(&target, 5);
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].outcome.quote_id, "Q-EXACT");
+    }
+
+    #[test]
+    fn similarity_query_scales_to_ten_thousand_candidates_under_budget() {
+        let generator = FingerprintGenerator::new();
+        let target = generator.generate_from_json(&json!({
+            "account_tier": "enterprise",
+            "products": [{"id": "plan-enterprise", "qty": 100}],
+            "term_months": 24
+        }));
+
+        let candidates = (0..10_000)
+            .map(|index| SimilarityCandidate {
+                fingerprint: generator.generate_from_json(&json!({
+                    "account_tier": "enterprise",
+                    "products": [{"id": "plan-enterprise", "qty": 100 + (index % 3)}],
+                    "term_months": 24
+                })),
+                outcome: outcome(
+                    &format!("Q-{index}"),
+                    DealOutcomeStatus::Pending,
+                    Decimal::new(100_000 + index as i64, 2),
+                ),
+            })
+            .collect();
+
+        let engine = SimilarityEngine::new(candidates).with_min_similarity(0.0);
+
+        let start = Instant::now();
+        let results = engine.find_similar(&target, 5);
+        let elapsed = start.elapsed();
+
+        assert_eq!(results.len(), 5);
+        assert!(
+            elapsed < Duration::from_millis(100),
+            "expected similarity lookup under 100ms for 10k candidates, got {:?}",
+            elapsed
+        );
+    }
+
     fn quote_fixture(lines: Vec<QuoteLine>) -> Quote {
         Quote {
             id: QuoteId("Q-2026-2001".to_owned()),
             status: QuoteStatus::Draft,
             lines,
             created_at: Utc::now(),
+        }
+    }
+
+    fn outcome(
+        quote_id: &str,
+        status: DealOutcomeStatus,
+        final_price: Decimal,
+    ) -> DealOutcomeMetadata {
+        DealOutcomeMetadata {
+            quote_id: quote_id.to_owned(),
+            outcome_status: status,
+            final_price,
+            close_date: None,
         }
     }
 }

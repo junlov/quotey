@@ -11,6 +11,10 @@ pub use approvals::{
     ApprovalValidationFailure, ApprovalValidationInput, ApprovalValidationResult,
     ApprovalValidator, ApproverAuthority,
 };
+pub use dna::{
+    ConfigurationFingerprint, DealOutcomeMetadata, DealOutcomeStatus, FingerprintGenerator,
+    SimilarDeal, SimilarityCandidate, SimilarityEngine,
+};
 pub use domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
 pub use domain::product::{Product, ProductId};
 pub use domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
