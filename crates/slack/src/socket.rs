@@ -201,7 +201,10 @@ fn correlation_fields(envelope: &SlackEnvelope) -> (Option<String>, Option<Strin
         SlackEvent::ThreadMessage(event) => {
             (quote_id_from_text(&event.text).map(str::to_owned), Some(event.thread_ts.clone()))
         }
-        SlackEvent::ReactionAdded(event) => (event.quote_id.clone(), event.thread_ts.clone()),
+        SlackEvent::ReactionAdded(event) => (
+            event.quote_id.clone(),
+            event.thread_ts.clone().or_else(|| Some(event.message_ts.clone())),
+        ),
         SlackEvent::SlashCommand(payload) => {
             (quote_id_from_text(&payload.text).map(str::to_owned), None)
         }
@@ -387,5 +390,25 @@ mod tests {
         let (quote_id, thread_id) = super::correlation_fields(&envelope);
         assert_eq!(quote_id.as_deref(), Some("Q-2026-0042"));
         assert_eq!(thread_id.as_deref(), Some("1730000000.1000"));
+    }
+
+    #[test]
+    fn reaction_correlation_falls_back_to_message_ts_when_thread_ts_missing() {
+        let envelope = SlackEnvelope {
+            envelope_id: "env-4".to_owned(),
+            event: SlackEvent::ReactionAdded(crate::events::ReactionAddedEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000000.2500".to_owned(),
+                thread_ts: None,
+                reactor_user_id: "U9".to_owned(),
+                reaction: "👍".to_owned(),
+                quote_id: Some("Q-2026-0043".to_owned()),
+                approval_type: "discount".to_owned(),
+            }),
+        };
+
+        let (quote_id, thread_id) = super::correlation_fields(&envelope);
+        assert_eq!(quote_id.as_deref(), Some("Q-2026-0043"));
+        assert_eq!(thread_id.as_deref(), Some("1730000000.2500"));
     }
 }
