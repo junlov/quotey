@@ -41,6 +41,9 @@ mod tests {
         "approval_authorities",
         "org_hierarchy",
         "routing_rules",
+        "deal_outcomes",
+        "win_probability_models",
+        "prediction_cache",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -80,6 +83,9 @@ mod tests {
         "idx_approval_authorities_role",
         "idx_org_hierarchy_manager_id",
         "idx_routing_rules_criteria",
+        "idx_deal_outcomes_quote_id",
+        "idx_deal_outcomes_outcome",
+        "idx_prediction_cache_quote_model",
     ];
 
     #[tokio::test]
@@ -279,6 +285,30 @@ mod tests {
         .expect("check routing_rules table")
         .get::<i64, _>("count");
 
+        let deal_outcomes_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'deal_outcomes'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check deal_outcomes table")
+        .get::<i64, _>("count");
+
+        let win_probability_models_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'win_probability_models'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check win_probability_models table")
+        .get::<i64, _>("count");
+
+        let prediction_cache_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'prediction_cache'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check prediction_cache table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -303,6 +333,9 @@ mod tests {
         assert_eq!(approval_authorities_count, 1);
         assert_eq!(org_hierarchy_count, 1);
         assert_eq!(routing_rules_count, 1);
+        assert_eq!(deal_outcomes_count, 1);
+        assert_eq!(win_probability_models_count, 1);
+        assert_eq!(prediction_cache_count, 1);
     }
 
     #[tokio::test]
