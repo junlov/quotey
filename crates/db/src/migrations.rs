@@ -38,6 +38,9 @@ mod tests {
         "archaeology_queries",
         "buying_signals",
         "ghost_quotes",
+        "approval_authorities",
+        "org_hierarchy",
+        "routing_rules",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -74,6 +77,9 @@ mod tests {
         "idx_buying_signals_matched_rep_id",
         "idx_buying_signals_status",
         "idx_ghost_quotes_signal_id",
+        "idx_approval_authorities_role",
+        "idx_org_hierarchy_manager_id",
+        "idx_routing_rules_criteria",
     ];
 
     #[tokio::test]
@@ -249,6 +255,30 @@ mod tests {
         .expect("check ghost_quotes table")
         .get::<i64, _>("count");
 
+        let approval_authorities_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'approval_authorities'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check approval_authorities table")
+        .get::<i64, _>("count");
+
+        let org_hierarchy_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'org_hierarchy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check org_hierarchy table")
+        .get::<i64, _>("count");
+
+        let routing_rules_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'routing_rules'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check routing_rules table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -270,6 +300,9 @@ mod tests {
         assert_eq!(archaeology_queries_count, 1);
         assert_eq!(buying_signals_count, 1);
         assert_eq!(ghost_quotes_count, 1);
+        assert_eq!(approval_authorities_count, 1);
+        assert_eq!(org_hierarchy_count, 1);
+        assert_eq!(routing_rules_count, 1);
     }
 
     #[tokio::test]
