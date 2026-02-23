@@ -24,6 +24,8 @@ mod tests {
         "approval_audit_log",
         "configuration_fingerprints",
         "similarity_cache",
+        "dialogue_sessions",
+        "dialogue_turns",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -39,6 +41,9 @@ mod tests {
         "idx_similarity_cache_source_candidate_version",
         "idx_similarity_cache_source_fingerprint_id",
         "idx_similarity_cache_candidate_fingerprint_id",
+        "idx_dialogue_sessions_slack_thread_id",
+        "idx_dialogue_sessions_user_id",
+        "idx_dialogue_turns_session_turn_number",
     ];
 
     #[tokio::test]
@@ -102,6 +107,22 @@ mod tests {
         .expect("check similarity_cache table")
         .get::<i64, _>("count");
 
+        let dialogue_sessions_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'dialogue_sessions'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check dialogue_sessions table")
+        .get::<i64, _>("count");
+
+        let dialogue_turns_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'dialogue_turns'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check dialogue_turns table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -109,6 +130,8 @@ mod tests {
         assert_eq!(approval_audit_count, 1);
         assert_eq!(configuration_fingerprint_count, 1);
         assert_eq!(similarity_cache_count, 1);
+        assert_eq!(dialogue_sessions_count, 1);
+        assert_eq!(dialogue_turns_count, 1);
     }
 
     #[tokio::test]
