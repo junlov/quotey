@@ -33,6 +33,9 @@ mod tests {
         "session_operations",
         "quote_ledger",
         "ledger_verifications",
+        "constraint_nodes",
+        "constraint_edges",
+        "archaeology_queries",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -62,6 +65,10 @@ mod tests {
         "idx_quote_ledger_quote_id",
         "idx_quote_ledger_content_hash",
         "idx_ledger_verifications_entry_id",
+        "idx_constraint_nodes_config_id",
+        "idx_constraint_nodes_node_key",
+        "idx_constraint_edges_config_id",
+        "idx_archaeology_queries_config_id",
     ];
 
     #[tokio::test]
@@ -197,6 +204,30 @@ mod tests {
         .expect("check ledger_verifications table")
         .get::<i64, _>("count");
 
+        let constraint_nodes_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'constraint_nodes'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check constraint_nodes table")
+        .get::<i64, _>("count");
+
+        let constraint_edges_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'constraint_edges'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check constraint_edges table")
+        .get::<i64, _>("count");
+
+        let archaeology_queries_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'archaeology_queries'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check archaeology_queries table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -213,6 +244,9 @@ mod tests {
         assert_eq!(session_operations_count, 1);
         assert_eq!(quote_ledger_count, 1);
         assert_eq!(ledger_verifications_count, 1);
+        assert_eq!(constraint_nodes_count, 1);
+        assert_eq!(constraint_edges_count, 1);
+        assert_eq!(archaeology_queries_count, 1);
     }
 
     #[tokio::test]
