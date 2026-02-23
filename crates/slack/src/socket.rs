@@ -201,6 +201,7 @@ fn correlation_fields(envelope: &SlackEnvelope) -> (Option<String>, Option<Strin
         SlackEvent::ThreadMessage(event) => {
             (quote_id_from_text(&event.text).map(str::to_owned), Some(event.thread_ts.clone()))
         }
+        SlackEvent::ReactionAdded(event) => (event.quote_id.clone(), event.thread_ts.clone()),
         SlackEvent::SlashCommand(payload) => {
             (quote_id_from_text(&payload.text).map(str::to_owned), None)
         }
@@ -365,6 +366,26 @@ mod tests {
 
         let (quote_id, thread_id) = super::correlation_fields(&envelope);
         assert_eq!(quote_id.as_deref(), Some("Q-2026-0032"));
+        assert_eq!(thread_id.as_deref(), Some("1730000000.1000"));
+    }
+
+    #[test]
+    fn extracts_quote_and_thread_correlation_fields_from_reactions() {
+        let envelope = SlackEnvelope {
+            envelope_id: "env-3".to_owned(),
+            event: SlackEvent::ReactionAdded(crate::events::ReactionAddedEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000000.2000".to_owned(),
+                thread_ts: Some("1730000000.1000".to_owned()),
+                reactor_user_id: "U9".to_owned(),
+                reaction: "👍".to_owned(),
+                quote_id: Some("Q-2026-0042".to_owned()),
+                approval_type: "discount".to_owned(),
+            }),
+        };
+
+        let (quote_id, thread_id) = super::correlation_fields(&envelope);
+        assert_eq!(quote_id.as_deref(), Some("Q-2026-0042"));
         assert_eq!(thread_id.as_deref(), Some("1730000000.1000"));
     }
 }
