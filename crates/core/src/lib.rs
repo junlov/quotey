@@ -29,6 +29,10 @@ pub use dna::{
     SimilarDeal, SimilarityCandidate, SimilarityEngine,
 };
 pub use domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
+pub use domain::execution::{
+    ExecutionTask, ExecutionTaskId, ExecutionTaskState, ExecutionTransitionEvent,
+    ExecutionTransitionId, IdempotencyRecord, IdempotencyRecordState, OperationKey,
+};
 pub use domain::product::{Product, ProductId};
 pub use domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
 pub use errors::{ApplicationError, DomainError, InterfaceError};

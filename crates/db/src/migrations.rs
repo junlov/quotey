@@ -44,6 +44,9 @@ mod tests {
         "deal_outcomes",
         "win_probability_models",
         "prediction_cache",
+        "execution_queue_task",
+        "execution_idempotency_ledger",
+        "execution_queue_transition_audit",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -86,6 +89,12 @@ mod tests {
         "idx_deal_outcomes_quote_id",
         "idx_deal_outcomes_outcome",
         "idx_prediction_cache_quote_model",
+        "idx_execution_queue_task_quote_state_available",
+        "idx_execution_queue_task_idempotency_key",
+        "idx_execution_idempotency_quote_state",
+        "idx_execution_idempotency_expires_at",
+        "idx_execution_queue_transition_task_occurred",
+        "idx_execution_queue_transition_quote_occurred",
     ];
 
     #[tokio::test]
@@ -309,6 +318,30 @@ mod tests {
         .expect("check prediction_cache table")
         .get::<i64, _>("count");
 
+        let execution_queue_task_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'execution_queue_task'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check execution_queue_task table")
+        .get::<i64, _>("count");
+
+        let execution_idempotency_ledger_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'execution_idempotency_ledger'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check execution_idempotency_ledger table")
+        .get::<i64, _>("count");
+
+        let execution_queue_transition_audit_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'execution_queue_transition_audit'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check execution_queue_transition_audit table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -336,6 +369,9 @@ mod tests {
         assert_eq!(deal_outcomes_count, 1);
         assert_eq!(win_probability_models_count, 1);
         assert_eq!(prediction_cache_count, 1);
+        assert_eq!(execution_queue_task_count, 1);
+        assert_eq!(execution_idempotency_ledger_count, 1);
+        assert_eq!(execution_queue_transition_audit_count, 1);
     }
 
     #[tokio::test]

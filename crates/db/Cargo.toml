@@ -8,11 +8,11 @@ authors.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+chrono.workspace = true
 quotey-core = { path = "../core" }
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 
 [dev-dependencies]
-chrono.workspace = true
 rust_decimal.workspace = true
