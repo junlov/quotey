@@ -2,6 +2,7 @@ pub mod approvals;
 pub mod audit;
 pub mod config;
 pub mod cpq;
+pub mod dna;
 pub mod domain;
 pub mod errors;
 pub mod flows;
