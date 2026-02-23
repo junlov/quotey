@@ -1,6 +1,7 @@
 pub mod approvals;
 pub mod archaeology;
 pub mod audit;
+pub mod collab;
 pub mod config;
 pub mod cpq;
 pub mod dna;
@@ -15,6 +16,10 @@ pub use approvals::{
 pub use archaeology::{
     CatalogConstraint, ConstraintEdgeType, DependencyEdge, DependencyGraph, DependencyGraphEngine,
     DependencyNode, GraphAnalysis, GraphBlockage, ResolutionPath,
+};
+pub use collab::{
+    OperationAuthority, OperationHistoryEntry, OperationStatus, OperationType,
+    OperationalTransform, QuoteOperation, TransformResult,
 };
 pub use dna::{
     ConfigurationFingerprint, DealOutcomeMetadata, DealOutcomeStatus, FingerprintGenerator,
