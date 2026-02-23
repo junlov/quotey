@@ -1373,10 +1373,12 @@ name = "quotey-core"
 version = "0.1.1"
 dependencies = [
  "chrono",
+ "hmac",
  "rust_decimal",
  "secrecy",
  "serde",
  "serde_json",
+ "sha2",
  "tempfile",
  "thiserror",
  "toml",
