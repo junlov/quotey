@@ -21,6 +21,7 @@ pub struct SlackEnvelope {
 pub enum SlackEvent {
     SlashCommand(SlashCommandPayload),
     ThreadMessage(ThreadMessageEvent),
+    ReactionAdded(ReactionAddedEvent),
     Unsupported { event_type: String },
 }
 
@@ -29,6 +30,7 @@ impl SlackEvent {
         match self {
             Self::SlashCommand(_) => SlackEventType::SlashCommand,
             Self::ThreadMessage(_) => SlackEventType::ThreadMessage,
+            Self::ReactionAdded(_) => SlackEventType::ReactionAdded,
             Self::Unsupported { .. } => SlackEventType::Unsupported,
         }
     }
@@ -38,6 +40,7 @@ impl SlackEvent {
 pub enum SlackEventType {
     SlashCommand,
     ThreadMessage,
+    ReactionAdded,
     Unsupported,
 }
 
@@ -47,6 +50,17 @@ pub struct ThreadMessageEvent {
     pub thread_ts: String,
     pub user_id: String,
     pub text: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReactionAddedEvent {
+    pub channel_id: String,
+    pub message_ts: String,
+    pub thread_ts: Option<String>,
+    pub reactor_user_id: String,
+    pub reaction: String,
+    pub quote_id: Option<String>,
+    pub approval_type: String,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -131,6 +145,7 @@ pub fn default_dispatcher() -> EventDispatcher {
     let mut dispatcher = EventDispatcher::new();
     dispatcher.register(SlashCommandHandler::new(NoopQuoteCommandService));
     dispatcher.register(ThreadMessageHandler::new(NoopThreadMessageService));
+    dispatcher.register(ReactionAddedHandler::new(NoopReactionApprovalService));
     dispatcher
 }
 
@@ -233,11 +248,112 @@ impl ThreadMessageService for NoopThreadMessageService {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ReactionApprovalOutcome {
+    pub quote_id: String,
+    pub database_recorded: bool,
+    pub state_transition_triggered: bool,
+    pub confirmation_dm_sent: bool,
+    pub undo_window_secs: u32,
+}
+
+#[async_trait]
+pub trait ReactionApprovalService: Send + Sync {
+    async fn process_reaction_approval(
+        &self,
+        event: &ReactionAddedEvent,
+        ctx: &EventContext,
+    ) -> Result<ReactionApprovalOutcome, EventHandlerError>;
+}
+
+pub struct ReactionAddedHandler<S> {
+    service: S,
+}
+
+impl<S> ReactionAddedHandler<S>
+where
+    S: ReactionApprovalService,
+{
+    pub fn new(service: S) -> Self {
+        Self { service }
+    }
+}
+
+#[async_trait]
+impl<S> EventHandler for ReactionAddedHandler<S>
+where
+    S: ReactionApprovalService + 'static,
+{
+    fn event_type(&self) -> SlackEventType {
+        SlackEventType::ReactionAdded
+    }
+
+    async fn handle(
+        &self,
+        envelope: &SlackEnvelope,
+        ctx: &EventContext,
+    ) -> Result<HandlerResult, EventHandlerError> {
+        let SlackEvent::ReactionAdded(event) = &envelope.event else {
+            return Ok(HandlerResult::Ignored);
+        };
+
+        if !is_supported_approval_reaction(&event.reaction) || event.quote_id.is_none() {
+            return Ok(HandlerResult::Processed);
+        }
+
+        let outcome = self.service.process_reaction_approval(event, ctx).await?;
+        let summary = format!(
+            "emoji approval captured ({}) · db={} state_transition={} dm={} undo={}s",
+            event.reaction,
+            outcome.database_recorded,
+            outcome.state_transition_triggered,
+            outcome.confirmation_dm_sent,
+            outcome.undo_window_secs,
+        );
+
+        Ok(HandlerResult::Responded(crate::blocks::quote_status_message(
+            &outcome.quote_id,
+            &summary,
+        )))
+    }
+}
+
+#[derive(Default)]
+pub struct NoopReactionApprovalService;
+
+#[async_trait]
+impl ReactionApprovalService for NoopReactionApprovalService {
+    async fn process_reaction_approval(
+        &self,
+        event: &ReactionAddedEvent,
+        _ctx: &EventContext,
+    ) -> Result<ReactionApprovalOutcome, EventHandlerError> {
+        let quote_id = event.quote_id.clone().ok_or_else(|| {
+            EventHandlerError::ThreadMessage("missing quote id for reaction approval".to_owned())
+        })?;
+
+        Ok(ReactionApprovalOutcome {
+            quote_id,
+            database_recorded: true,
+            state_transition_triggered: true,
+            confirmation_dm_sent: true,
+            undo_window_secs: 300,
+        })
+    }
+}
+
+fn is_supported_approval_reaction(reaction: &str) -> bool {
+    matches!(
+        reaction,
+        "👍" | "👎" | "💬" | "+1" | "-1" | "thumbsup" | "thumbsdown" | "speech_balloon"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        default_dispatcher, EventContext, EventDispatcher, HandlerResult, SlackEnvelope,
-        SlackEvent, ThreadMessageEvent,
+        default_dispatcher, EventContext, EventDispatcher, HandlerResult, ReactionAddedEvent,
+        SlackEnvelope, SlackEvent, ThreadMessageEvent,
     };
     use crate::commands::SlashCommandPayload;
 
@@ -284,6 +400,50 @@ mod tests {
     #[test]
     fn default_dispatcher_registers_handlers() {
         let dispatcher = default_dispatcher();
-        assert_eq!(dispatcher.handler_count(), 2);
+        assert_eq!(dispatcher.handler_count(), 3);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_routes_reaction_added_for_supported_emoji() {
+        let dispatcher = default_dispatcher();
+        let envelope = SlackEnvelope {
+            envelope_id: "env-3".to_owned(),
+            event: SlackEvent::ReactionAdded(ReactionAddedEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000000.2000".to_owned(),
+                thread_ts: Some("1730000000.1000".to_owned()),
+                reactor_user_id: "U3".to_owned(),
+                reaction: "👍".to_owned(),
+                quote_id: Some("Q-2026-1001".to_owned()),
+                approval_type: "discount".to_owned(),
+            }),
+        };
+
+        let result =
+            dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
+
+        assert!(matches!(result, HandlerResult::Responded(_)));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_processes_but_does_not_respond_for_non_approval_emoji() {
+        let dispatcher = default_dispatcher();
+        let envelope = SlackEnvelope {
+            envelope_id: "env-4".to_owned(),
+            event: SlackEvent::ReactionAdded(ReactionAddedEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000000.3000".to_owned(),
+                thread_ts: Some("1730000000.1000".to_owned()),
+                reactor_user_id: "U4".to_owned(),
+                reaction: "rocket".to_owned(),
+                quote_id: Some("Q-2026-1002".to_owned()),
+                approval_type: "discount".to_owned(),
+            }),
+        };
+
+        let result =
+            dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
+
+        assert_eq!(result, HandlerResult::Processed);
     }
 }
