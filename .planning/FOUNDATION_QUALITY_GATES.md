@@ -11,32 +11,48 @@ scripts/quality-gates.sh
 The script is deterministic and executes from repo root with:
 
 - `TMPDIR` defaulting to `.tmp`
-- `CARGO_TARGET_DIR` defaulting to `target`
+- `CARGO_TARGET_DIR` defaulting to `.tmp-target`
 
-This avoids failures caused by host-level `/tmp` pressure and keeps artifacts local to the workspace.
+By default, the script forces workspace-local temp/target paths so host-level `/tmp` pressure
+does not break gate execution.
+
+Explicit overrides are supported when needed:
+
+- `QUOTEY_TMPDIR_OVERRIDE`
+- `QUOTEY_CARGO_TARGET_DIR_OVERRIDE`
 
 ## Gate Matrix
 
-1. `fmt`
+1. `build`
+   - Command: `cargo build --workspace`
+   - Pass condition: workspace compiles
+   - Failure action: fix compile errors and rerun
+
+2. `fmt`
    - Command: `cargo fmt --all -- --check`
    - Pass condition: no formatting diffs
    - Failure action: run `cargo fmt --all` and recommit
 
-2. `lint`
+3. `clippy`
    - Preferred command: `cargo lint`
    - Fallback command: `cargo clippy --workspace --all-targets -- -D warnings`
    - Pass condition: zero warnings/errors
    - Failure action: fix lint findings and rerun
 
-3. `tests`
+4. `tests`
    - Command: `cargo test --workspace`
    - Pass condition: all unit/integration/doc tests pass
    - Failure action: fix regressions, rerun targeted tests, then rerun full matrix
 
-4. `deny`
+5. `deny`
    - Command: `cargo deny check`
    - Pass condition: dependency and policy checks pass
    - Failure action: remediate denied crate/license/advisory and rerun
+
+6. `doc`
+   - Command: `cargo doc --workspace --no-deps`
+   - Pass condition: docs build successfully for workspace crates
+   - Failure action: fix rustdoc/build issues and rerun
 
 ## Actionable Failure Output Contract
 
