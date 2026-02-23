@@ -31,6 +31,8 @@ mod tests {
         "quote_sessions",
         "session_participants",
         "session_operations",
+        "quote_ledger",
+        "ledger_verifications",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -57,6 +59,9 @@ mod tests {
         "idx_session_participants_user_id",
         "idx_session_operations_session_id",
         "idx_session_operations_timestamp",
+        "idx_quote_ledger_quote_id",
+        "idx_quote_ledger_content_hash",
+        "idx_ledger_verifications_entry_id",
     ];
 
     #[tokio::test]
@@ -176,6 +181,22 @@ mod tests {
         .expect("check session_operations table")
         .get::<i64, _>("count");
 
+        let quote_ledger_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'quote_ledger'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check quote_ledger table")
+        .get::<i64, _>("count");
+
+        let ledger_verifications_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'ledger_verifications'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check ledger_verifications table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -190,6 +211,8 @@ mod tests {
         assert_eq!(quote_sessions_count, 1);
         assert_eq!(session_participants_count, 1);
         assert_eq!(session_operations_count, 1);
+        assert_eq!(quote_ledger_count, 1);
+        assert_eq!(ledger_verifications_count, 1);
     }
 
     #[tokio::test]
