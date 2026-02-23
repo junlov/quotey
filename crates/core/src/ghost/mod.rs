@@ -1,6 +1,14 @@
 use std::collections::{BTreeSet, HashMap};
 
+use chrono::Utc;
+use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
+
+use crate::dna::{
+    DealOutcomeMetadata, DealOutcomeStatus, FingerprintGenerator, SimilarDeal, SimilarityCandidate,
+    SimilarityEngine,
+};
+use crate::domain::quote::{Quote, QuoteId, QuoteStatus};
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SignalDetectorConfig {
@@ -114,6 +122,183 @@ impl SignalDetector {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct GhostQuote {
+    pub company: String,
+    pub draft_quote: Quote,
+    pub confidence: u8,
+    pub suggested_discount_pct: u8,
+    pub similar_quote_id: Option<String>,
+}
+
+pub trait CustomerHistoryProvider {
+    fn history_for_company(&self, company: &str) -> Option<Vec<Quote>>;
+}
+
+pub trait GhostQuoteStore {
+    fn save_draft(&mut self, quote: Quote) -> Result<(), String>;
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InMemoryCustomerHistoryProvider {
+    histories: HashMap<String, Vec<Quote>>,
+}
+
+impl InMemoryCustomerHistoryProvider {
+    pub fn insert_history(&mut self, company: &str, history: Vec<Quote>) {
+        self.histories.insert(company.to_string(), history);
+    }
+}
+
+impl CustomerHistoryProvider for InMemoryCustomerHistoryProvider {
+    fn history_for_company(&self, company: &str) -> Option<Vec<Quote>> {
+        self.histories.get(company).cloned()
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct InMemoryGhostQuoteStore {
+    drafts: Vec<Quote>,
+}
+
+impl InMemoryGhostQuoteStore {
+    pub fn drafts(&self) -> &[Quote] {
+        &self.drafts
+    }
+}
+
+impl GhostQuoteStore for InMemoryGhostQuoteStore {
+    fn save_draft(&mut self, quote: Quote) -> Result<(), String> {
+        self.drafts.push(quote);
+        Ok(())
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct GhostQuoteGenerator {
+    min_signal_confidence: u8,
+    similarity_floor: f32,
+}
+
+impl Default for GhostQuoteGenerator {
+    fn default() -> Self {
+        Self { min_signal_confidence: 70, similarity_floor: 0.6 }
+    }
+}
+
+impl GhostQuoteGenerator {
+    pub fn new(min_signal_confidence: u8) -> Self {
+        Self { min_signal_confidence, ..Self::default() }
+    }
+
+    pub fn generate<P, S>(
+        &self,
+        quote_id: &str,
+        signal: &Signal,
+        history_provider: &P,
+        store: &mut S,
+    ) -> Result<Option<GhostQuote>, String>
+    where
+        P: CustomerHistoryProvider,
+        S: GhostQuoteStore,
+    {
+        if !signal.above_threshold || signal.confidence < self.min_signal_confidence {
+            return Ok(None);
+        }
+
+        let Some(company) = signal.companies.first() else {
+            return Ok(None);
+        };
+        let Some(history) = history_provider.history_for_company(company) else {
+            return Ok(None);
+        };
+        let Some(template_quote) = history.last() else {
+            return Ok(None);
+        };
+
+        let similar_deal = self.best_similar_deal(&history, template_quote);
+        let suggested_discount_pct = suggested_discount_pct(signal, similar_deal.as_ref());
+        let draft_quote = build_draft_quote(template_quote, quote_id, suggested_discount_pct);
+        store.save_draft(draft_quote.clone())?;
+
+        Ok(Some(GhostQuote {
+            company: company.clone(),
+            confidence: combined_confidence(signal.confidence, similar_deal.as_ref()),
+            suggested_discount_pct,
+            similar_quote_id: similar_deal.map(|deal| deal.outcome.quote_id),
+            draft_quote,
+        }))
+    }
+
+    fn best_similar_deal(&self, history: &[Quote], reference_quote: &Quote) -> Option<SimilarDeal> {
+        let fingerprint_generator = FingerprintGenerator::new();
+        let reference_fingerprint = fingerprint_generator.generate_from_quote(reference_quote);
+        let candidates = history
+            .iter()
+            .filter(|quote| quote.id != reference_quote.id)
+            .map(|quote| SimilarityCandidate {
+                fingerprint: fingerprint_generator.generate_from_quote(quote),
+                outcome: DealOutcomeMetadata {
+                    quote_id: quote.id.0.clone(),
+                    outcome_status: DealOutcomeStatus::Won,
+                    final_price: quote_total(quote),
+                    close_date: None,
+                },
+            })
+            .collect::<Vec<_>>();
+
+        let similarity_engine =
+            SimilarityEngine::new(candidates).with_min_similarity(self.similarity_floor);
+        similarity_engine.find_similar(&reference_fingerprint, 1).into_iter().next()
+    }
+}
+
+fn build_draft_quote(template_quote: &Quote, quote_id: &str, discount_pct: u8) -> Quote {
+    let discount_multiplier = Decimal::ONE - (Decimal::from(discount_pct) / Decimal::from(100u8));
+    let discounted_lines = template_quote
+        .lines
+        .iter()
+        .map(|line| {
+            let mut updated = line.clone();
+            updated.unit_price = (updated.unit_price * discount_multiplier).round_dp(2);
+            updated
+        })
+        .collect::<Vec<_>>();
+
+    Quote {
+        id: QuoteId(quote_id.to_string()),
+        status: QuoteStatus::Draft,
+        lines: discounted_lines,
+        created_at: Utc::now(),
+    }
+}
+
+fn suggested_discount_pct(signal: &Signal, similar_deal: Option<&SimilarDeal>) -> u8 {
+    let mut discount = 0u8;
+    if signal.keyword_matches.iter().any(|keyword| keyword == "expand" || keyword == "upgrade") {
+        discount = discount.saturating_add(10);
+    }
+    if !signal.competitors.is_empty() {
+        discount = discount.saturating_add(5);
+    }
+    if !signal.timelines.is_empty() {
+        discount = discount.saturating_add(3);
+    }
+    if similar_deal.is_some_and(|deal| deal.similarity_score >= 0.9) {
+        discount = discount.saturating_add(5);
+    }
+    discount.min(25)
+}
+
+fn combined_confidence(base_confidence: u8, similar_deal: Option<&SimilarDeal>) -> u8 {
+    let boost = similar_deal.map(|deal| (deal.similarity_score * 20.0).round() as u8).unwrap_or(0);
+    base_confidence.saturating_add(boost).min(100)
+}
+
+fn quote_total(quote: &Quote) -> Decimal {
+    quote.lines.iter().map(|line| line.unit_price * Decimal::from(line.quantity)).sum()
+}
+
 fn score_confidence(
     keyword_count: usize,
     company_count: usize,
@@ -220,7 +405,18 @@ pub fn detect_signals(detector: &SignalDetector, messages: &[String]) -> HashMap
 
 #[cfg(test)]
 mod tests {
-    use super::{SignalDetector, SignalDetectorConfig};
+    use chrono::Utc;
+    use rust_decimal::Decimal;
+
+    use crate::domain::{
+        product::ProductId,
+        quote::{Quote, QuoteId, QuoteLine, QuoteStatus},
+    };
+
+    use super::{
+        GhostQuoteGenerator, InMemoryCustomerHistoryProvider, InMemoryGhostQuoteStore,
+        SignalDetector, SignalDetectorConfig,
+    };
 
     #[test]
     fn detects_buying_signal_with_entities_and_competitor_mentions() {
@@ -276,5 +472,66 @@ mod tests {
         assert!(signal.timelines.contains(&"next month".to_string()));
         assert!(signal.departments.contains(&"finance".to_string()));
         assert!(signal.departments.contains(&"engineering".to_string()));
+    }
+
+    #[test]
+    fn ghost_quote_generator_creates_discounted_draft_and_persists_it() {
+        let detector = SignalDetector::default();
+        let signal = detector
+            .detect(
+                "Acme Corp plans to expand operations next quarter and is evaluating Salesforce pricing.",
+            )
+            .expect("should detect high-confidence signal");
+
+        let mut history_provider = InMemoryCustomerHistoryProvider::default();
+        history_provider.insert_history(
+            "Acme Corp",
+            vec![quote("Q-hist-1", 10, 100_000), quote("Q-hist-2", 12, 110_000)],
+        );
+        let mut store = InMemoryGhostQuoteStore::default();
+        let generator = GhostQuoteGenerator::default();
+
+        let ghost_quote = generator
+            .generate("Q-ghost-1", &signal, &history_provider, &mut store)
+            .expect("generation should not error")
+            .expect("ghost quote should be created");
+
+        assert_eq!(ghost_quote.company, "Acme Corp".to_string());
+        assert!(ghost_quote.confidence >= signal.confidence);
+        assert!(ghost_quote.suggested_discount_pct > 0);
+        assert_eq!(store.drafts().len(), 1);
+        assert_eq!(store.drafts()[0].id, QuoteId("Q-ghost-1".to_string()));
+        assert!(
+            store.drafts()[0].lines[0].unit_price < Decimal::new(110_000, 2),
+            "expected discounted unit price in draft"
+        );
+    }
+
+    #[test]
+    fn ghost_quote_generator_returns_none_for_low_confidence_signal() {
+        let signal = SignalDetector::default().analyze("General sync later today.");
+        let history_provider = InMemoryCustomerHistoryProvider::default();
+        let mut store = InMemoryGhostQuoteStore::default();
+        let generator = GhostQuoteGenerator::default();
+
+        let ghost_quote = generator
+            .generate("Q-ghost-2", &signal, &history_provider, &mut store)
+            .expect("generation should not error");
+
+        assert!(ghost_quote.is_none());
+        assert!(store.drafts().is_empty());
+    }
+
+    fn quote(quote_id: &str, quantity: u32, unit_price_cents: i64) -> Quote {
+        Quote {
+            id: QuoteId(quote_id.to_string()),
+            status: QuoteStatus::Draft,
+            lines: vec![QuoteLine {
+                product_id: ProductId("starter".to_string()),
+                quantity,
+                unit_price: Decimal::new(unit_price_cents, 2),
+            }],
+            created_at: Utc::now(),
+        }
     }
 }
