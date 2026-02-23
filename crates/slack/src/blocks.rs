@@ -370,11 +370,181 @@ fn format_similarity(similarity_score: f64) -> String {
     format!("{:.0}%", normalized * 100.0)
 }
 
+// Execution Queue Status Types
+#[derive(Clone, Debug, PartialEq)]
+pub enum ExecutionTaskStatus {
+    Queued,
+    Running { worker_id: String, started_at: String },
+    Completed { result_summary: String },
+    RetryableFailed { error: String, retry_count: u32, max_retries: u32 },
+    FailedTerminal { error: String },
+    Recovered { previous_error: String },
+}
+
+/// Build execution task progress message for Slack thread
+pub fn execution_task_progress_message(
+    quote_id: &str,
+    task_id: &str,
+    operation_kind: &str,
+    status: ExecutionTaskStatus,
+) -> MessageTemplate {
+    let (icon, status_text, actions) = match &status {
+        ExecutionTaskStatus::Queued => (
+            "⏳",
+            "Queued for processing".to_string(),
+            vec![ButtonElement::new("exec.refresh.v1", "Check Status")
+                .value(format!("{quote_id}:{task_id}"))],
+        ),
+        ExecutionTaskStatus::Running { worker_id, started_at } => (
+            "🔄",
+            format!("Processing (worker: {worker_id}, started: {started_at})"),
+            vec![ButtonElement::new("exec.refresh.v1", "Refresh")
+                .value(format!("{quote_id}:{task_id}"))],
+        ),
+        ExecutionTaskStatus::Completed { result_summary } => (
+            "✅",
+            format!("Completed: {result_summary}"),
+            vec![ButtonElement::new("exec.view_result.v1", "View Result")
+                .style(ButtonStyle::Primary)
+                .value(format!("{quote_id}:{task_id}"))],
+        ),
+        ExecutionTaskStatus::RetryableFailed { error, retry_count, max_retries } => (
+            "⚠️",
+            format!("Failed (attempt {retry_count}/{max_retries}): {error}"),
+            vec![
+                ButtonElement::new("exec.retry_now.v1", "Retry Now")
+                    .style(ButtonStyle::Primary)
+                    .value(format!("{quote_id}:{task_id}")),
+                ButtonElement::new("exec.cancel.v1", "Cancel")
+                    .style(ButtonStyle::Danger)
+                    .value(format!("{quote_id}:{task_id}")),
+            ],
+        ),
+        ExecutionTaskStatus::FailedTerminal { error } => (
+            "❌",
+            format!("Failed permanently: {error}"),
+            vec![
+                ButtonElement::new("exec.view_error.v1", "View Details")
+                    .value(format!("{quote_id}:{task_id}")),
+                ButtonElement::new("exec.contact_support.v1", "Contact Support")
+                    .value(format!("{quote_id}:{task_id}")),
+            ],
+        ),
+        ExecutionTaskStatus::Recovered { previous_error } => (
+            "🔄",
+            format!("Recovered from: {previous_error}"),
+            vec![ButtonElement::new("exec.view_details.v1", "View Details")
+                .value(format!("{quote_id}:{task_id}"))],
+        ),
+    };
+
+    let fallback = format!("Execution {operation_kind} for quote {quote_id}: {status_text}");
+
+    MessageBuilder::new(&fallback)
+        .section("exec.status.header.v1", |section| {
+            section.mrkdwn(format!("{icon} *{operation_kind}* for `{quote_id}`"));
+        })
+        .section("exec.status.detail.v1", |section| {
+            section.plain(status_text);
+        })
+        .actions("exec.status.actions.v1", |actions_builder| {
+            for button in actions {
+                actions_builder.button(button);
+            }
+        })
+        .context("exec.status.context.v1", |context| {
+            context.plain(format!("Task ID: {task_id}"));
+        })
+        .build()
+}
+
+/// Build execution summary message showing all tasks for a quote
+pub fn execution_summary_message(
+    quote_id: &str,
+    tasks: &[(String, String, ExecutionTaskStatus)],
+) -> MessageTemplate {
+    let completed =
+        tasks.iter().filter(|(_, _, s)| matches!(s, ExecutionTaskStatus::Completed { .. })).count();
+    let failed = tasks
+        .iter()
+        .filter(|(_, _, s)| matches!(s, ExecutionTaskStatus::FailedTerminal { .. }))
+        .count();
+    let in_progress = tasks
+        .iter()
+        .filter(|(_, _, s)| {
+            matches!(
+                s,
+                ExecutionTaskStatus::Queued
+                    | ExecutionTaskStatus::Running { .. }
+                    | ExecutionTaskStatus::RetryableFailed { .. }
+            )
+        })
+        .count();
+
+    let summary =
+        format!("✅ {completed} completed • 🔄 {in_progress} in progress • ❌ {failed} failed");
+
+    let mut builder = MessageBuilder::new(format!("Execution summary for quote {quote_id}"))
+        .section("exec.summary.header.v1", |section| {
+            section.mrkdwn(format!("*Execution Summary* for `{quote_id}`"));
+        })
+        .section("exec.summary.stats.v1", |section| {
+            section.mrkdwn(summary);
+        });
+
+    // Add each task as a context line
+    for (task_id, operation_kind, status) in tasks {
+        let (icon, status_str) = match status {
+            ExecutionTaskStatus::Queued => ("⏳", "queued".to_string()),
+            ExecutionTaskStatus::Running { .. } => ("🔄", "running".to_string()),
+            ExecutionTaskStatus::Completed { result_summary } => ("✅", result_summary.clone()),
+            ExecutionTaskStatus::RetryableFailed { retry_count, max_retries, .. } => {
+                ("⚠️", format!("retry {retry_count}/{max_retries}"))
+            }
+            ExecutionTaskStatus::FailedTerminal { .. } => ("❌", "failed".to_string()),
+            ExecutionTaskStatus::Recovered { .. } => ("🔄", "recovered".to_string()),
+        };
+        builder = builder.context("exec.summary.task.v1", |context| {
+            context.plain(format!("{icon} {operation_kind} ({task_id}): {status_str}"));
+        });
+    }
+
+    builder.build()
+}
+
+/// Build recovery notification message
+pub fn execution_recovery_message(
+    quote_id: &str,
+    task_id: &str,
+    operation_kind: &str,
+    previous_error: &str,
+    retry_count: u32,
+) -> MessageTemplate {
+    MessageBuilder::new(format!("Recovered {operation_kind} for quote {quote_id}"))
+        .section("exec.recovery.header.v1", |section| {
+            section.mrkdwn(format!("🔄 *Recovered* `{operation_kind}` for `{quote_id}`"));
+        })
+        .section("exec.recovery.detail.v1", |section| {
+            section.plain(format!(
+                "Task recovered after transient failure.\nPrevious error: {previous_error}\nRetry attempt: {retry_count}"
+            ));
+        })
+        .actions("exec.recovery.actions.v1", |actions| {
+            actions.button(
+                ButtonElement::new("exec.view_status.v1", "View Status")
+                    .style(ButtonStyle::Primary)
+                    .value(format!("{quote_id}:{task_id}")),
+            );
+        })
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
-        approval_request_message, error_message, quote_status_message, Block, ButtonStyle,
-        DealDnaCard, DealDnaSimilarDeal, MessageBuilder, TextObject,
+        approval_request_message, error_message, execution_task_progress_message,
+        quote_status_message, Block, ButtonStyle, DealDnaCard, DealDnaSimilarDeal,
+        ExecutionTaskStatus, MessageBuilder, TextObject,
     };
 
     #[test]
@@ -572,5 +742,86 @@ mod tests {
             ),
             "empty card should not render per-deal detail actions"
         );
+    }
+
+    #[test]
+    fn execution_task_progress_shows_queued_status() {
+        let message = execution_task_progress_message(
+            "Q-2026-001",
+            "task-123",
+            "send_slack_message",
+            ExecutionTaskStatus::Queued,
+        );
+
+        assert!(message.fallback_text.contains("Queued for processing"));
+        assert!(message.blocks.iter().any(|block| matches!(
+            block,
+            Block::Section { block_id, text: TextObject::Mrkdwn { text } }
+            if block_id == "exec.status.header.v1" && text.contains("send_slack_message")
+        )));
+    }
+
+    #[test]
+    fn execution_task_progress_shows_running_status() {
+        let message = execution_task_progress_message(
+            "Q-2026-002",
+            "task-456",
+            "generate_pdf",
+            ExecutionTaskStatus::Running {
+                worker_id: "worker-001".to_string(),
+                started_at: "2026-02-23T10:00:00Z".to_string(),
+            },
+        );
+
+        assert!(message.fallback_text.contains("Processing"));
+        assert!(message.fallback_text.contains("worker-001"));
+    }
+
+    #[test]
+    fn execution_task_progress_shows_completed_status() {
+        let message = execution_task_progress_message(
+            "Q-2026-003",
+            "task-789",
+            "crm_sync",
+            ExecutionTaskStatus::Completed { result_summary: "Synced 3 records".to_string() },
+        );
+
+        assert!(message.fallback_text.contains("Completed"));
+        assert!(message.fallback_text.contains("Synced 3 records"));
+    }
+
+    #[test]
+    fn execution_task_progress_shows_retryable_failed_with_buttons() {
+        let message = execution_task_progress_message(
+            "Q-2026-004",
+            "task-abc",
+            "pdf_generation",
+            ExecutionTaskStatus::RetryableFailed {
+                error: "Network timeout".to_string(),
+                retry_count: 1,
+                max_retries: 3,
+            },
+        );
+
+        assert!(message.fallback_text.contains("Failed"));
+        assert!(message.fallback_text.contains("attempt 1/3"));
+
+        let actions_block = message.blocks.iter().find(|block| {
+            matches!(block, Block::Actions { block_id, .. } if block_id == "exec.status.actions.v1")
+        });
+        assert!(actions_block.is_some(), "expected actions block for retryable failure");
+    }
+
+    #[test]
+    fn execution_task_progress_shows_terminal_failure() {
+        let message = execution_task_progress_message(
+            "Q-2026-005",
+            "task-def",
+            "validation",
+            ExecutionTaskStatus::FailedTerminal { error: "Invalid configuration".to_string() },
+        );
+
+        assert!(message.fallback_text.contains("Failed permanently"));
+        assert!(message.fallback_text.contains("Invalid configuration"));
     }
 }
