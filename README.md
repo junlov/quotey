@@ -47,6 +47,9 @@ Current scaffold contracts from completed foundation beads:
 - `crates/core/src/cpq`:
   explicit `ConstraintEngine` / `PricingEngine` / `PolicyEngine` interfaces,
   plus `DeterministicCpqRuntime` orchestration and pricing trace output.
+- `crates/core/src/dna`:
+  deterministic `FingerprintGenerator` producing 128-bit SimHash signatures and
+  vector representation for configuration similarity workflows.
 - `crates/core/src/errors.rs`:
   layered error taxonomy (`DomainError` → `ApplicationError` → `InterfaceError`) with
   explicit conversion boundaries and user-safe interface messages.
