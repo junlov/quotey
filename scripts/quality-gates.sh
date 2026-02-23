@@ -4,8 +4,10 @@ set -euo pipefail
 ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$ROOT_DIR"
 
-export TMPDIR="${TMPDIR:-$ROOT_DIR/.tmp}"
-export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
+# Force workspace-local temp/target paths by default to avoid host-level /tmp pressure.
+# Operators can override explicitly with QUOTEY_*_OVERRIDE vars when needed.
+export TMPDIR="${QUOTEY_TMPDIR_OVERRIDE:-$ROOT_DIR/.tmp}"
+export CARGO_TARGET_DIR="${QUOTEY_CARGO_TARGET_DIR_OVERRIDE:-$ROOT_DIR/.tmp-target}"
 mkdir -p "$TMPDIR" "$CARGO_TARGET_DIR"
 
 log() {
@@ -34,15 +36,17 @@ if ! cargo deny --version >/dev/null 2>&1; then
   exit 2
 fi
 
+run_gate "build" cargo build --workspace
 run_gate "fmt" cargo fmt --all -- --check
 
 if cargo lint --help >/dev/null 2>&1; then
-  run_gate "lint" cargo lint
+  run_gate "clippy" cargo lint
 else
-  run_gate "lint" cargo clippy --workspace --all-targets -- -D warnings
+  run_gate "clippy" cargo clippy --workspace --all-targets -- -D warnings
 fi
 
 run_gate "tests" cargo test --workspace
 run_gate "deny" cargo deny check
+run_gate "doc" cargo doc --workspace --no-deps
 
 log "ALL QUALITY GATES PASSED"
