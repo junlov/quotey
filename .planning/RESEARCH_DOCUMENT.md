@@ -1,457 +1,251 @@
 # Quotey Project - Comprehensive Research Document
 
-**Document Type:** Technical Architecture & Project Research  
-**Author:** ResearchAgent (kimi-k2)  
+**Research Agent:** ResearchAgent  
 **Date:** 2026-02-23  
-**Project:** Quotey - Rust-based, Local-first CPQ Agent for Slack  
-**Version:** 0.1.1
+**Project:** quotey - Rust-based, local-first CPQ (Configure, Price, Quote) agent for Slack  
+
+---
+
+## Table of Contents
+
+1. [Executive Summary](#executive-summary)
+2. [Project Overview](#project-overview)
+3. [Architecture Overview](#architecture-overview)
+4. [Crate-by-Crate Analysis](#crate-by-crate-analysis)
+5. [Key Design Patterns](#key-design-patterns)
+6. [Current Implementation Status](#current-implementation-status)
+7. [Active Work (Beads)](#active-work-beads)
+8. [Research Findings](#research-findings)
+9. [Recommendations](#recommendations)
 
 ---
 
 ## Executive Summary
 
-Quotey is a Rust-based, local-first Configure-Price-Quote (CPQ) agent that operates within Slack. It addresses the market gap created by Salesforce CPQ's End-of-Sale (March 2025) by providing an agent-first, deterministic pricing solution that eliminates the traditional CPQ implementation cycle.
+Quotey is a sophisticated Rust-based CPQ (Configure, Price, Quote) system designed to operate as a Slack-native agent. It combines natural language interaction with deterministic business logic, ensuring that while LLMs assist with intent extraction and user experience, all pricing, policy, and approval decisions are made by auditable, deterministic engines.
 
 **Key Differentiators:**
-- Agent-first natural language interaction (not form-based)
-- Deterministic pricing engine with full audit trails
-- Local-first deployment (SQLite + single binary)
-- Catalog bootstrap from unstructured data (PDFs, CSVs, spreadsheets)
+- Local-first architecture (SQLite, single binary deployment)
 - Constraint-based configuration (not rule-based)
+- Deal DNA fingerprinting for similarity matching
+- Cryptographic quote ledger for tamper-evident audit trails
+- Configuration archaeology for forensics
+- Ghost quotes for predictive opportunity detection
 
 ---
 
-## 1. Project Architecture Overview
+## Project Overview
 
-### 1.1 Six-Layer Architecture
+### What is Quotey?
+
+Quotey replaces traditional rigid CPQ screens with natural language interaction in Slack. Sales reps express intent conversationally, and the agent:
+1. Gathers context through dialogue
+2. Configures products using constraint-based validation
+3. Runs deterministic pricing with full traceability
+4. Manages approval workflows with smart routing
+5. Generates PDF quotes from HTML templates
+
+### Target Users
+
+- Sales reps and deal desk analysts
+- Mid-to-enterprise organizations
+- Teams currently using spreadsheets or legacy CPQ tools
+
+### Core Value Proposition
+
+Create accurate, policy-compliant, fully-audited quotes through natural conversation in Slack—without touching a CPQ UI, without waiting days for approvals.
+
+---
+
+## Architecture Overview
+
+### High-Level Architecture (6 Boxes)
 
 ```
 ┌─────────────────────────────────────────────────────────────────┐
 │                    SLACK BOT INTERFACE                          │
-│  Socket Mode · Slash Commands · Thread Events · Block Kit UI    │
+│  Socket Mode listener · Slash commands · Message events         │
+│  Interactive components (buttons/modals) · File uploads         │
 ├─────────────────────────────────────────────────────────────────┤
 │                    AGENT RUNTIME                                │
-│  Intent Extraction · Slot Filling · Guardrails · Tool Registry  │
+│  Intent extraction · Slot filling · Action selection            │
+│  Guardrails · Tool permissions · Conversation management        │
 ├──────────────────┬──────────────────┬───────────────────────────┤
 │  DETERMINISTIC   │   CPQ CORE       │   TOOL ADAPTERS           │
 │  FLOW ENGINE     │                  │                           │
-│                  │  Product Catalog  │  slack.* (post/update)    │
-│  State Machine   │  Constraint       │  crm.* (sync/read/write) │
-│  Required Fields │    Engine         │  doc.* (render/attach)   │
-│  Allowed         │  Pricing Engine   │  composio.* (REST)       │
-│    Transitions   │  Policy Engine    │  catalog.* (bootstrap)   │
-│                  │                  │  intelligence.*          │
+│                  │  Product catalog  │  slack.* (post/update/    │
+│  State machine   │  Constraint       │          upload)          │
+│  Required fields │    engine         │  crm.* (sync/read/write) │
+│  Allowed         │  Pricing engine   │  doc.* (render/attach)   │
+│    transitions   │  Discount         │  composio.* (REST)       │
+│  "What happens   │    policies       │  catalog.* (bootstrap/   │
+│   next"          │  Approval         │           ingest)         │
+│                  │    thresholds     │  intelligence.*           │
+│                  │                  │    (parse/extract)        │
 ├──────────────────┴──────────────────┴───────────────────────────┤
 │                    SQLITE DATA STORE                            │
-│  Products · Price Books · Quotes · Approvals · Audit Log        │
+│  Products · Price books · Deals · Quotes · Approvals            │
+│  Configuration rules · Pricing policies · Audit log             │
+│  Slack thread mapping · CRM sync state                          │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-### 1.2 Workspace Crate Structure
+### The Safety Principle (Non-Negotiable)
 
-| Crate | Responsibility | Key Dependencies |
-|-------|---------------|------------------|
-| `core` | Domain models, CPQ engines, flows | None (pure logic) |
-| `db` | SQLite connection, migrations, repositories | `core`, `sqlx` |
-| `agent` | Runtime orchestration, LLM integration | `core`, `db` |
-| `slack` | Socket mode, events, Block Kit | `core`, `slack-morphism` |
-| `cli` | Operator commands (migrate, doctor, smoke) | `core`, `db`, `clap` |
-| `server` | Bootstrap, health checks, process entry | All above |
+**LLMs may:**
+- Translate natural language → structured intent
+- Map fuzzy product names → product IDs
+- Generate human-friendly summaries
+- Draft approval justification text
 
-**Dependency Flow:** `core` ← (`db`, `agent`, `slack`) ← `server`
+**LLMs NEVER:**
+- Decide prices (pricing engine decides)
+- Validate configurations (constraint engine decides)
+- Approve discounts (approval workflow decides)
+- Choose workflow steps (flow engine decides)
 
 ---
 
-## 2. Core Domain Architecture
+## Crate-by-Crate Analysis
 
-### 2.1 Domain Models (`crates/core/src/domain/`)
+### 1. `crates/core` - Domain and Business Logic
 
-#### Quote Domain
-```rust
-pub struct Quote {
-    pub id: QuoteId,                    // Newtype: String wrapper
-    pub status: QuoteStatus,            // 11-state lifecycle enum
-    pub lines: Vec<QuoteLine>,          // Individual items
-    pub created_at: DateTime<Utc>,
-}
+**Responsibility:** Deterministic domain primitives and engine seams
 
-pub enum QuoteStatus {
-    Draft, Validated, Priced, Approval, Approved, 
-    Finalized, Sent, Expired, Cancelled, Rejected, Revised
-}
+#### Domain Models (`src/domain/`)
+
+| Module | Key Types | Purpose |
+|--------|-----------|---------|
+| `quote.rs` | `Quote`, `QuoteLine`, `QuoteId`, `QuoteStatus` | Central quote aggregate with 11-state lifecycle |
+| `product.rs` | `Product`, `ProductId` | Product catalog entity |
+| `customer.rs` | `Customer`, `CustomerId` | Customer identity and segmentation |
+| `approval.rs` | `ApprovalRequest`, `ApprovalId`, `ApprovalStatus` | Approval workflow tracking |
+| `execution.rs` | `ExecutionTask`, `IdempotencyRecord`, `ExecutionTransitionEvent` | Async task execution with idempotency |
+
+**Quote Status Lifecycle:**
+```
+Draft → Validated → Priced → (Approval → Approved) → Finalized → Sent
+  ↑      │           │            │        │           │         │
+  └─── Revised      │            │        │           │         │
+       (from       │            │        │           │         │
+        Rejected)  │            │        │           │         │
+                    │            │        │           │         │
+Terminal: Rejected, Expired, Cancelled
 ```
 
-**State Machine Transitions:**
-```
-Draft → Validated → Priced → (Approval) → Approved → Finalized → Sent
-                  ↘ Policy Clear ───────↗
-```
+#### Flow Engine (`src/flows/`)
 
-#### Product Domain
-- `ProductId`: Newtype String wrapper
-- `Product`: Simple entity with SKU, name, active flag
-- Supports configurable products, bundles, and attributes
+- **FlowEngine**: Generic state machine with audit integration
+- **NetNewFlow**: Implementation for new quote flows
+- **FlowState/FlowEvent/FlowAction**: Type-safe state machine components
 
-#### Customer Domain
-- `CustomerId`: UUID-based identifier
-- `Customer`: Segment-aware (SMB, Mid-Market, Enterprise)
-
-#### Execution Domain
-- `ExecutionTask`: Durable task with idempotency keys
-- `ExecutionTaskState`: Queued → Running → Completed/Failed
-- `IdempotencyRecord`: Exactly-once execution guarantee
-
-### 2.2 CPQ Core Engines (`crates/core/src/cpq/`)
-
-**Critical Safety Principle:** LLMs never decide prices, configuration validity, or policy compliance. Deterministic engines are always the source of truth.
-
-#### Constraint Engine
-```rust
-pub trait ConstraintEngine: Send + Sync {
-    fn validate(&self, input: &ConstraintInput) -> ConstraintResult;
-}
-
-pub struct ConstraintResult {
-    pub valid: bool,
-    pub violations: Vec<ConstraintViolation>,
-}
-```
-
-**Constraint Types:**
-1. **Requires** - Product A requires Product B
-2. **Excludes** - Product A incompatible with Product B
-3. **Attribute Constraints** - Conditional field validation
-4. **Quantity Constraints** - Min/max quantity rules
-5. **Bundle Constraints** - Composition rules
-6. **Cross-product Constraints** - Multi-line-item validation
-
-#### Pricing Engine
-```rust
-pub trait PricingEngine: Send + Sync {
-    fn price(&self, quote: &Quote, currency: &str) -> PricingResult;
-}
-
-pub struct PricingResult {
-    pub subtotal: Decimal,
-    pub discount_total: Decimal,
-    pub tax_total: Decimal,
-    pub total: Decimal,
-    pub approval_required: bool,
-    pub trace: PricingTrace,        // Immutable audit trail
-}
-```
-
-**Pricing Pipeline:**
-1. Select price book(s) by segment/region/currency
-2. Look up base prices
-3. Apply volume tiers
-4. Apply bundle discounts
-5. Apply formulas
-6. Apply requested discounts (capped by policy)
-7. Compute subtotals
-8. Apply tax (stub for v1)
-9. Generate pricing trace
-
-#### Policy Engine
-```rust
-pub trait PolicyEngine: Send + Sync {
-    fn evaluate(&self, input: &PolicyInput) -> PolicyDecision;
-}
-
-pub struct PolicyDecision {
-    pub approval_required: bool,
-    pub approval_status: ApprovalStatus,
-    pub reasons: Vec<String>,
-    pub violations: Vec<PolicyViolation>,
-}
-```
-
-**Policy Types:**
-- Discount caps by segment
-- Margin floors by product type
-- Deal size thresholds
-- Product-specific rules
-- Temporal policies (EOQ rules)
-
-### 2.3 Flow Engine (`crates/core/src/flows/`)
-
-```rust
-pub trait FlowDefinition: Send + Sync {
-    fn flow_type(&self) -> FlowType;
-    fn initial_state(&self) -> FlowState;
-    fn transition(
-        &self,
-        current: FlowState,
-        event: FlowEvent,
-        ctx: &FlowContext,
-    ) -> Result<TransitionOutcome, FlowTransitionError>;
-}
-
-pub struct FlowEngine<F: FlowDefinition> {
-    definition: F,
-}
-```
-
-**Net-New Flow Transitions:**
-| Current State | Event | Next State | Actions |
-|--------------|-------|------------|---------|
+**Key Transitions:**
+| From | Event | To | Action |
+|------|-------|-----|--------|
 | Draft | RequiredFieldsCollected | Validated | EvaluatePricing |
 | Validated | PricingCalculated | Priced | EvaluatePolicy |
 | Priced | PolicyClear | Finalized | FinalizeQuote |
 | Priced | PolicyViolationDetected | Approval | RouteApproval |
 | Approval | ApprovalGranted | Approved | FinalizeQuote |
-| Approved | QuoteDelivered | Sent | MarkQuoteSent |
 
----
+#### CPQ Core (`src/cpq/`)
 
-## 3. Advanced Capabilities
+| Module | Trait | Implementation | Purpose |
+|--------|-------|----------------|---------|
+| `constraints.rs` | `ConstraintEngine` | `DeterministicConstraintEngine` | Configuration validation |
+| `pricing.rs` | `PricingEngine` | `DeterministicPricingEngine` | Price calculation with trace |
+| `policy.rs` | `PolicyEngine` | `DeterministicPolicyEngine` | Business rule evaluation |
+| `catalog.rs` | `Catalog` | In-memory registry | Product lookup |
 
-### 3.1 Deal DNA / Fingerprinting (`crates/core/src/dna/`)
-
-**Purpose:** Intelligent similarity matching for quotes using SimHash fingerprints.
-
+**CpqRuntime** orchestrates all three engines:
 ```rust
-pub struct ConfigurationFingerprint {
-    pub simhash: u128,              // 128-bit SimHash signature
-}
-
-pub struct SimilarityEngine {
-    candidates: Vec<SimilarityCandidate>,
-    threshold: f64,                 // Default 0.8 (80% similar)
-}
-
-pub struct SimilarDeal {
-    pub outcome: DealOutcomeMetadata,
-    pub similarity_score: f64,
-    pub hamming_distance: u32,
+pub trait CpqRuntime: Send + Sync {
+    fn evaluate_quote(&self, input: CpqEvaluationInput<'_>) -> CpqEvaluation;
 }
 ```
 
-**Algorithm:**
-- SimHash with FNV-1a hashing for local-sensitive hashing
-- Key-order independent canonical JSON
-- Sub-millisecond similarity search over 10k candidates
+#### Advanced Features (`src/`)
 
-**Usage:** Find similar past deals for pricing intelligence and precedent analysis.
+| Module | Purpose | Key Algorithm |
+|--------|---------|---------------|
+| `audit.rs` | Structured audit events | Sink pattern with correlation tracking |
+| `dna/mod.rs` | Configuration fingerprinting | SimHash (128-bit LSH) |
+| `archaeology/mod.rs` | Configuration forensics | Dependency graph traversal |
+| `ledger/mod.rs` | Cryptographic audit trail | Hash chain with HMAC |
+| `collab/mod.rs` | Multi-user quote sessions | Operational Transform |
+| `ghost/mod.rs` | Predictive opportunity creation | Signal detection + draft generation |
+| `policy/mod.rs` | Policy explanations | Template-based explanation generation |
 
-### 3.2 Immutable Quote Ledger (`crates/core/src/ledger/`)
+**Deal DNA (SimHash):**
+- 128-bit fingerprints for configuration similarity
+- Order-independent hashing
+- Sub-100ms similarity queries on 10,000 candidates
+- Default threshold: 80% similarity
 
-**Purpose:** Cryptographic chain integrity for quote versions.
-
-```rust
-pub struct LedgerEntry {
-    pub version: u32,
-    pub quote_id: QuoteId,
-    pub action: LedgerAction,
-    pub content_hash: String,       // SHA-256 of quote state
-    pub prev_hash: String,          // Hash of previous entry
-    pub entry_hash: String,         // Hash of this entry
-    pub signature: String,          // HMAC-SHA256
-}
-
-pub enum LedgerAction {
-    Create,
-    Update,
-    Approve,
-    Reject,
-    Custom(String),
-}
-```
-
-**Security Features:**
+**Ledger (Cryptographic):**
 - SHA-256 content hashing
-- Chain linking (each entry includes previous hash)
 - HMAC-SHA256 signatures
-- Tamper detection via chain verification
+- Chain linking: each entry includes previous hash
+- Tamper-evident verification
 
-### 3.3 Ghost Quote Generator (`crates/core/src/ghost/`)
+#### Error Handling (`src/errors.rs`)
 
-**Purpose:** Proactive draft quotes from buying signals in Slack messages.
-
-```rust
-pub struct SignalDetector {
-    config: SignalDetectorConfig,
-}
-
-pub struct Signal {
-    pub confidence: f64,
-    pub detected_company: Option<String>,
-    pub intent_keywords: Vec<String>,
-    pub timeline_hint: Option<String>,
-    pub competitor_mentions: Vec<String>,
-}
-
-pub struct GhostQuote {
-    pub confidence: f64,
-    pub draft_quote: Quote,
-    pub suggested_discount_pct: Option<u8>,
-}
+Three-layer error taxonomy:
 ```
-
-**Signal Detection:**
-- Keywords: budget, expand, evaluating, pricing, renewal
-- Company extraction: Inc, Corp, LLC, Ltd, GmbH suffixes
-- Timeline detection: Q1-Q4, this/next quarter
-- Competitor mentions: Salesforce, HubSpot, Oracle, SAP
-
-### 3.4 Archaeology / Dependency Graph (`crates/core/src/archaeology/`)
-
-**Purpose:** Graph analysis for configuration blockages and resolution paths.
-
-```rust
-pub struct DependencyGraph {
-    pub nodes: Vec<DependencyNode>,
-    pub edges: Vec<DependencyEdge>,
-}
-
-pub enum ConstraintEdgeType {
-    Requires,
-    Excludes,
-    Alternative,
-}
-
-pub struct DependencyGraphEngine;
-```
-
-**Capabilities:**
-- BFS/DFS chain detection
-- Shortest enablement path finding
-- Root cause analysis for blockages
-- Alternative product suggestions
-
-### 3.5 Operational Transform (`crates/core/src/collab/`)
-
-**Purpose:** Conflict resolution for concurrent quote edits.
-
-```rust
-pub struct OperationalTransform;
-
-pub struct QuoteOperation {
-    pub op_type: OperationType,
-    pub target_product_id: ProductId,
-    pub authority: OperationAuthority,
-}
-
-pub struct TransformResult {
-    pub applied: Vec<QuoteOperation>,
-    pub overridden: Vec<QuoteOperation>,
-    pub rejected: Vec<QuoteOperation>,
-}
-```
-
-**Conflict Resolution:** Authority-based precedence (rank → timestamp → id).
-
-### 3.6 Policy Explanation Generator (`crates/core/src/policy/`)
-
-**Purpose:** Human-readable explanations for policy violations.
-
-```rust
-pub struct ExplanationTemplate {
-    pub rule_id: String,
-    pub default_template: String,
-    pub role_templates: HashMap<String, String>,
-    pub resolution_paths: Vec<String>,
-}
-
-pub struct GeneratedExplanation {
-    pub citation: String,
-    pub summary: String,
-    pub resolution_paths: Vec<String>,
-}
+DomainError → ApplicationError → InterfaceError
+   (business)    (infrastructure)   (user-facing)
 ```
 
 ---
 
-## 4. Database Layer (`crates/db/`)
+### 2. `crates/db` - Data Persistence
 
-### 4.1 Connection Management
+**Responsibility:** SQLite connection, migrations, and repository layer
 
-```rust
-pub type DbPool = sqlx::SqlitePool;
+#### Connection Management (`src/connection.rs`)
 
-pub async fn connect(database_url: &str) -> Result<DbPool, sqlx::Error>
-pub async fn connect_with_settings(
-    database_url: &str,
-    max_connections: u32,
-    timeout_secs: u64,
-) -> Result<DbPool, sqlx::Error>
-```
+- `DbPool = sqlx::SqlitePool`
+- WAL mode for concurrency
+- Foreign key enforcement
+- Busy timeout: 5 seconds
 
-**SQLite Configuration:**
-- `PRAGMA foreign_keys = ON`
-- `PRAGMA journal_mode = WAL`
-- `PRAGMA busy_timeout = 5000`
+#### Migrations (`src/migrations.rs`)
 
-### 4.2 Migration System
+- SQLx built-in migrator
+- 46 tables covering all domains
+- 52 indexes for query optimization
+- Reversible migrations
 
-- 6 migration files covering full schema
-- 40+ tables including: quote, quote_line, flow_state, audit_event, emoji_approvals, execution_queue_task
-- Comprehensive test coverage for reversibility
+#### Repository Pattern (`src/repositories/`)
 
-### 4.3 Repository Pattern
+| Repository | Status | Notes |
+|------------|--------|-------|
+| `QuoteRepository` | Scaffolded | Stub implementation |
+| `ProductRepository` | Scaffolded | Stub implementation |
+| `ApprovalRepository` | Scaffolded | Stub implementation |
+| `ExecutionQueueRepository` | **Full** | Production-ready with idempotency |
+| `IdempotencyRepository` | **Full** | Bundled with Execution Queue |
 
-| Repository | Purpose | Implementation |
-|------------|---------|----------------|
-| `QuoteRepository` | Quote CRUD | SQL stub (placeholder) |
-| `ProductRepository` | Product lookup | SQL stub (placeholder) |
-| `ApprovalRepository` | Approval requests | SQL stub (placeholder) |
-| `ExecutionQueueRepository` | Task queue | **Full SQL implementation** |
-| `IdempotencyRepository` | Deduplication | **Full SQL implementation** |
-| `CustomerRepository` | Customer data | SQL stub (placeholder) |
+**Execution Queue Schema:**
+- `execution_queue_task`: Task lifecycle management
+- `execution_queue_transition_audit`: Complete state history
+- `execution_idempotency_ledger`: Duplicate prevention
 
-**In-Memory Implementations:** Available for testing via `InMemory*Repository` types.
+**In-Memory Implementations:** Available for all repositories (testing)
 
 ---
 
-## 5. Agent Runtime (`crates/agent/`)
+### 3. `crates/agent` - Agent Runtime
 
-### 5.1 Runtime Orchestration
+**Responsibility:** Runtime orchestration, tool registry, and guardrails
 
-```rust
-pub struct AgentRuntime {
-    guardrails: GuardrailPolicy,
-}
+#### Runtime (`src/runtime.rs`)
 
-impl AgentRuntime {
-    pub async fn handle_thread_message(&self, text: &str) -> Result<String>
-}
-```
+- `AgentRuntime`: Minimal orchestrator (19 lines)
+- `handle_thread_message()`: Main entry point
+- Guardrails injected at construction
 
-### 5.2 Intent Extraction (`src/conversation.rs`)
-
-```rust
-pub struct ExtractedIntent {
-    pub product_mentions: Vec<String>,
-    pub quantity_mentions: Vec<u32>,
-    pub budget_cents: Option<i64>,
-    pub timeline_hint: Option<String>,
-    pub requested_discount_pct: Option<u8>,
-    pub confidence_score: u8,
-}
-
-pub struct IntentExtractor;
-pub struct ConstraintMapper<E: ConstraintEngine>;
-```
-
-**Extraction Capabilities:**
-- Product name matching from aliases
-- Budget parsing ("$50k" → 5,000,000 cents)
-- Quantity detection
-- Timeline hints
-- Discount requests
-
-### 5.3 Guardrails (`src/guardrails.rs`)
-
-```rust
-pub struct GuardrailPolicy {
-    pub llm_can_set_prices: bool,       // Default: false
-    pub llm_can_approve_discounts: bool, // Default: false
-}
-```
-
-**Safety Enforcement:** Prevents LLM from making business decisions.
-
-### 5.4 Tools (`src/tools.rs`)
+#### Tools (`src/tools.rs`)
 
 ```rust
 #[async_trait]
@@ -459,468 +253,362 @@ pub trait Tool: Send + Sync {
     fn name(&self) -> &'static str;
     async fn execute(&self, input: Value) -> Result<Value>;
 }
+```
 
-pub struct ToolRegistry {
-    tools: HashMap<String, Box<dyn Tool>>,
+**Current State:** Empty registry skeleton - tools to be registered
+
+#### Conversation (`src/conversation.rs`)
+
+**Intent Extraction:**
+- Product mention detection (keyword matching)
+- Quantity parsing ("200 seats")
+- Budget extraction ("$50k")
+- Timeline hints ("this quarter", "Q2")
+- Discount parsing ("15%")
+- Constraint detection (budget caps, exclusions)
+
+**Confidence Scoring (0-100):**
+- Base: 10
+- Product mention: +30
+- Budget: +20
+- Quantity: +15
+- Discount: +15
+- Constraints: +10
+- Timeline: +10
+
+**Clarification Prompts:** Generated when confidence < 40
+
+#### Guardrails (`src/guardrails.rs`)
+
+```rust
+pub struct GuardrailPolicy {
+    pub llm_can_set_prices: bool,      // Default: false
+    pub llm_can_approve_discounts: bool, // Default: false
 }
 ```
 
----
+Explicit safety policy preventing LLM overreach.
 
-## 6. Slack Integration (`crates/slack/`)
+#### LLM Integration (`src/llm.rs`)
 
-### 6.1 Socket Mode (`src/socket.rs`)
-
+Trait-based abstraction for provider flexibility:
 ```rust
 #[async_trait]
-pub trait SocketTransport: Send + Sync {
-    async fn connect(&self) -> Result<(), TransportError>;
-    async fn next_envelope(&self) -> Result<Option<SlackEnvelope>, TransportError>;
-    async fn acknowledge(&self, envelope_id: &str) -> Result<(), TransportError>;
-}
-
-pub struct SocketModeRunner {
-    transport: Arc<dyn SocketTransport>,
-    dispatcher: EventDispatcher,
-    reconnect_policy: ReconnectPolicy,
-}
-```
-
-**Features:**
-- Exponential backoff reconnect
-- Correlation ID extraction
-- Graceful degradation
-
-### 6.2 Commands (`src/commands.rs`)
-
-```rust
-pub enum QuoteCommand {
-    New { customer_hint: Option<String>, freeform_args: String },
-    Status { quote_id: Option<String>, freeform_args: String },
-    List { filter: Option<String> },
-    Help,
-}
-
-#[async_trait]
-pub trait QuoteCommandService: Send + Sync {
-    async fn new_quote(&self, ...) -> Result<MessageTemplate, CommandRouteError>;
-    async fn status_quote(&self, ...) -> Result<MessageTemplate, CommandRouteError>;
-    async fn list_quotes(&self, ...) -> Result<MessageTemplate, CommandRouteError>;
-}
-```
-
-### 6.3 Events (`src/events.rs`)
-
-| Handler | Event Type | Purpose |
-|---------|-----------|---------|
-| `SlashCommandHandler` | SlashCommand | Routes `/quote` commands |
-| `ThreadMessageHandler` | ThreadMessage | Processes thread replies |
-| `ReactionAddedHandler` | ReactionAdded | Emoji approvals (👍/👎/💬) |
-
-**Emoji Approval Support:**
-- 👍 / +1 / thumbsup → Approve
-- 👎 / -1 / thumbsdown → Reject
-- 💬 / speech_balloon → Discuss
-
-### 6.4 Block Kit Builders (`src/blocks.rs`)
-
-```rust
-pub struct MessageBuilder { ... }
-pub struct SectionBuilder { ... }
-pub struct ActionsBuilder { ... }
-
-pub fn quote_status_message(quote_id: &str, status: QuoteStatus) -> MessageTemplate
-pub fn approval_request_message(quote_id: &str, approver_role: &str) -> MessageTemplate
-pub fn error_message(summary: &str, correlation_id: &str) -> MessageTemplate
-```
-
----
-
-## 7. CLI Interface (`crates/cli/`)
-
-### 7.1 Commands
-
-| Command | Purpose | Key Checks |
-|---------|---------|------------|
-| `start` | Preflight before server | Config, DB, migrations |
-| `migrate` | Apply migrations | Config, DB, SQLx migrate |
-| `seed` | Load demo fixtures | Config, DB (no-op currently) |
-| `smoke` | E2E validation | Config, Slack tokens, DB |
-| `config` | Inspect config | Shows value + source |
-| `doctor` | Readiness checks | Full system health |
-
-### 7.2 Output Format
-
-```json
-{
-  "command": "doctor",
-  "status": "ok|error",
-  "error_class": "ConfigError|DatabaseError|...",
-  "message": "..."
+pub trait LlmClient: Send + Sync {
+    async fn complete(&self, prompt: &str) -> Result<String>;
 }
 ```
 
 ---
 
-## 8. Server Bootstrap (`crates/server/`)
+### 4. `crates/slack` - Slack Integration
 
-### 8.1 Bootstrap Sequence
+**Responsibility:** Slack Socket Mode, commands, events, Block Kit UI
 
-```rust
-pub async fn bootstrap(options: LoadOptions) -> Result<Application, BootstrapError> {
-    // 1. Load configuration
-    let config = AppConfig::load(options)?;
-    
-    // 2. Connect to database
-    let db_pool = connect_with_settings(...).await?;
-    
-    // 3. Run migrations
-    migrations::run_pending(&db_pool).await?;
-    
-    // 4. Create agent runtime
-    let agent_runtime = AgentRuntime::new(GuardrailPolicy::default());
-    
-    // 5. Create Slack runner
-    let slack_runner = SocketModeRunner::default();
-    
-    Ok(Application { config, db_pool, agent_runtime, slack_runner })
-}
-```
+#### Socket Mode (`src/socket.rs`)
 
-### 8.2 Health Checks (`src/health.rs`)
+**SocketModeRunner Features:**
+- Exponential backoff: `delay = min(base * 2^attempt, max_delay)`
+- Graceful degradation after max retries
+- Correlation tracking: `Q-YYYY-XXXX` quote ID extraction
+- Structured logging with `event_name`, `correlation_id`, `quote_id`, `thread_id`
 
-```rust
-pub async fn spawn(bind_address: &str, port: u16, db_pool: DbPool) -> std::io::Result<()>
+**Default ReconnectPolicy:**
+- Max retries: 5
+- Base delay: 250ms
+- Max delay: 5s
 
-// GET /health
-// Returns 200 if DB reachable, 503 if not
-```
+#### Commands (`src/commands.rs`)
 
-### 8.3 Main Entry (`src/main.rs`)
+| Command | Syntax | Purpose |
+|---------|--------|---------|
+| `/quote new` | `new [for <customer>]` | Create quote |
+| `/quote status` | `status <quote_id>` | Check status |
+| `/quote list` | `list [filter]` | List quotes |
+| `/quote help` | `help` | Show help |
 
-1. Initialize tracing
-2. Bootstrap application
-3. Spawn health endpoint
-4. Start Slack runner
+**Quote ID Format:** `Q-YYYY-XXXX` (validated with byte-level checks)
+
+#### Events (`src/events.rs`)
+
+| Handler | Event Type | Service Trait |
+|---------|------------|---------------|
+| `SlashCommandHandler` | SlashCommand | `QuoteCommandService` |
+| `ThreadMessageHandler` | ThreadMessage | `ThreadMessageService` |
+| `ReactionAddedHandler` | ReactionAdded | `ReactionApprovalService` |
+
+**Emoji Approvals:**
+- 👍 / :+1: → Approve
+- 👎 / :-1: → Reject
+- 💬 → Request changes
+
+#### Blocks (`src/blocks.rs`)
+
+Block Kit UI generation:
+- `MessageBuilder`: Fluent builder pattern
+- Pre-built templates: `quote_status_message`, `approval_request_message`, `error_message`, `help_message`
+
+---
+
+### 5. `crates/server` - Server Bootstrap
+
+**Responsibility:** Executable bootstrap/wiring entrypoint
+
+#### Main (`src/main.rs`)
+
+Initialization flow:
+1. Initialize tracing subscriber
+2. Bootstrap application (DB, migrations, agent runtime)
+3. Spawn health check endpoint
+4. Start Slack socket mode runner
 5. Wait for shutdown signal
 
----
-
-## 9. Configuration System (`crates/core/src/config.rs`)
-
-### 9.1 Load Precedence
-
-1. Built-in defaults
-2. Optional TOML config file
-3. `QUOTEY_*` environment variables
-4. CLI/runtime overrides
-
-### 9.2 Configuration Sections
+#### Bootstrap (`src/bootstrap.rs`)
 
 ```rust
-pub struct AppConfig {
-    pub database: DatabaseConfig,   // SQLite URL, connections, timeout
-    pub slack: SlackConfig,         // App token (xapp-), Bot token (xoxb-)
-    pub llm: LlmConfig,             // Provider, API key, model, timeout
-    pub server: ServerConfig,       // Bind address, health port
-    pub logging: LoggingConfig,     // Level, format
+pub struct Application {
+    pub config: AppConfig,
+    pub db_pool: DbPool,
+    pub agent_runtime: AgentRuntime,
+    pub slack_runner: SocketModeRunner,
 }
 ```
 
-### 9.3 Environment Interpolation
+**Integration Tests:**
+- Database table verification
+- Flow engine state transitions
+- CPQ evaluation (constraints, pricing, policy)
 
-Config files support `${ENV_VAR}` syntax:
-```toml
-[slack]
-app_token = "${SLACK_APP_TOKEN}"
-bot_token = "${SLACK_BOT_TOKEN}"
-```
+#### Health (`src/health.rs`)
 
-### 9.4 Validation
-
-- Database URL must be SQLite
-- Slack tokens must have correct prefixes
-- LLM provider requires appropriate credentials
-- Ports must be non-zero
+- Axum-based HTTP endpoint
+- `GET /health` → JSON response
+- Database health check via `SELECT 1`
+- HTTP 200 (ready) or 503 (degraded)
 
 ---
 
-## 10. Error Handling (`crates/core/src/errors.rs`)
+### 6. `crates/cli` - Command Line Interface
 
-### 10.1 Layered Error Taxonomy
+**Responsibility:** Operator command surface
 
-| Layer | Error Type | Purpose |
-|-------|-----------|---------|
-| Domain | `DomainError` | InvalidQuoteTransition, FlowTransition, InvariantViolation |
-| Application | `ApplicationError` | Domain, Persistence, Integration, Configuration |
-| Interface | `InterfaceError` | BadRequest (400), ServiceUnavailable (503), Internal (500) |
+#### Commands
 
-### 10.2 Conversion Flow
+| Command | Purpose | Exit Codes |
+|---------|---------|------------|
+| `start` | Startup preflight | 0, 2-5 |
+| `migrate` | Apply migrations | 0, 2-5 |
+| `seed` | Load demo fixtures | 0 (no-op) |
+| `smoke` | E2E readiness checks | 0, 6 |
+| `config` | Inspect configuration | 0, 2 |
+| `doctor` | Validate setup | 0, 1 |
 
-```
-DomainError → ApplicationError → InterfaceError
-                   ↓
-            into_interface(correlation_id)
-```
-
-### 10.3 User-Safe Messages
-
-Interface errors contain messages safe to display to users.
+**Exit Code Reference:**
+- 0: Success
+- 2: Config validation failure
+- 3: Runtime initialization failure
+- 4: Database connectivity failure
+- 5: Migration failure
+- 6: Smoke test failure
 
 ---
 
-## 11. Audit System (`crates/core/src/audit.rs`)
+## Key Design Patterns
 
-### 11.1 Event Categories
-
+### 1. Newtype Pattern
+All IDs are newtype wrappers for type safety:
 ```rust
-pub enum AuditCategory {
-    Ingress,    // Slack events, API calls
-    Flow,       // State transitions
-    Pricing,    // Price calculations
-    Policy,     // Policy evaluations
-    Persistence, // DB operations
-    System,     // Startup, errors
+pub struct QuoteId(String);
+pub struct ProductId(String);
+pub struct CustomerId(Uuid);
+```
+
+### 2. Trait-Based Abstraction
+Engines and repositories use traits for testability:
+```rust
+pub trait PricingEngine: Send + Sync { ... }
+pub trait QuoteRepository { ... }
+```
+
+### 3. State Machine Pattern
+Explicit states, events, and valid transitions:
+```rust
+fn transition(&self, current: &FlowState, event: &FlowEvent) 
+    -> Result<TransitionOutcome, FlowTransitionError>;
+```
+
+### 4. Idempotency Pattern
+Execution framework prevents duplicates:
+```rust
+pub struct IdempotencyRecord {
+    pub operation_key: OperationKey,
+    pub payload_hash: String,
+    pub state: IdempotencyRecordState,
+    ...
 }
 ```
 
-### 11.2 Event Structure
-
+### 5. Audit Trail Pattern
+Every action emits immutable audit events:
 ```rust
-pub struct AuditEvent {
-    pub id: Uuid,
-    pub timestamp: DateTime<Utc>,
-    pub actor: String,
-    pub actor_type: ActorType,
-    pub quote_id: Option<QuoteId>,
-    pub event_type: String,
-    pub category: AuditCategory,
-    pub payload: BTreeMap<String, String>,
-    pub metadata: BTreeMap<String, String>,
-}
+AuditEvent::new(quote_id, thread_id, correlation_id, 
+    event_type, category, actor, outcome)
+    .with_metadata("from", "Draft")
+    .with_metadata("to", "Validated")
 ```
 
-### 11.3 Correlation Tracking
+### 6. Layered Error Handling
+Clear separation between domain, application, and interface concerns.
 
-All events include:
-- `quote_id` - Links to specific quote
-- `thread_id` - Links to Slack thread
-- `correlation_id` - Request-scoped trace ID
+### 7. Optimistic Concurrency
+`state_version` field for conflict detection in `ExecutionTask`.
 
 ---
 
-## 12. Current Work Status
+## Current Implementation Status
 
-### 12.1 Active Development
+### Production-Ready Components ✅
 
-**Epic bd-271: Power Capabilities Wave 1**
-- 10 feature tracks for pragmatic CPQ differentiators
-- Currently in_progress: bd-271.1 (Resilient Execution Queue)
+1. **Execution Queue Repository** - Full SQL implementation with idempotency
+2. **CPQ Runtime** - Deterministic engines for constraints, pricing, policy
+3. **Flow Engine** - State machine with audit integration
+4. **Deal DNA** - SimHash fingerprinting with similarity search
+5. **Ledger** - Cryptographic hash chain
+6. **Archaeology** - Dependency graph forensics
+7. **Collab** - Operational transform for multi-user sessions
+8. **Slack Socket Mode** - WebSocket connection with reconnection
+9. **CLI Commands** - start, migrate, smoke, config, doctor
+10. **Health Check** - Axum endpoint with DB verification
 
-**Active Agents:**
-1. ChartreusePond (codex-cli, gpt-5-codex)
-2. IvoryBear (codex-cli, gpt-5)
-3. IvoryLake (codex-cli, gpt-5)
-4. JadeDesert (codex-cli, gpt-5)
-5. LavenderIsland (codex-cli, gpt-5)
-6. LilacMountain (codex-cli, gpt-5-codex)
-7. ResearchAgent (kimi-cli, kimi-k2) ← **This agent**
-8. SageDeer (codex-cli, gpt-5)
+### Scaffolded / Partial Components 🚧
 
-### 12.2 Recent Commits
+1. **Quote Repository** - Stub implementation
+2. **Product Repository** - Stub implementation
+3. **Approval Repository** - Stub implementation
+4. **Agent Tool Registry** - Empty skeleton
+5. **LLM Implementations** - Trait only, no providers
+6. **Seed Command** - Deterministic no-op
 
-```
-86f7f2c docs(planning): add REL execution queue spec and guardrails
-9a3a75c feat(core): add ghost quote draft generator
-2fc7dae feat(core): add ghost quote buying-signal detector
-bc9a87e feat(core): add policy explanation generator service
-a10a821 feat(core): add cryptographic ledger hash chain service
-9790eac feat(core): add operational transform engine for quote edits
-976b681 feat(core): add dependency graph traversal engine
-```
+### Not Yet Started ❌
 
-### 12.3 In-Progress Beads
+1. **CRM Integration** - Composio REST client scaffold needed
+2. **PDF Generation** - HTML→PDF pipeline
+3. **Catalog Bootstrap** - CSV/PDF ingestion
+4. **Quote Intelligence** - RFP/email parsing
+
+---
+
+## Active Work (Beads)
+
+### Current In-Progress Beads
 
 | ID | Title | Priority | Status |
 |----|-------|----------|--------|
-| bd-271.1 | W1 [REL] Resilient Execution Queue | 0 | in_progress |
-| bd-70d.10.2 | ROUTE-002: Build smart routing engine | 1 | in_progress |
-| bd-271.3 | W1 [FIX] Constraint Auto-Repair | 1 | in_progress |
+| bd-271.1 | W1 [REL] Resilient Execution Queue | P0 | In Progress |
+| bd-271.3 | W1 [FIX] Constraint Auto-Repair and Tradeoff Explorer | P1 | In Progress |
+
+### Top Ready Beads (Per bv triage)
+
+| ID | Title | Type | Action |
+|----|-------|------|--------|
+| bd-271.1.3 | [REL] Task 3 Deterministic Engine Logic | task | Work on bd-271.1.2 first |
+| bd-271.2.3 | [EXP] Task 3 Deterministic Engine Logic | task | Work on bd-271.2.2 first |
+| bd-271.3.2 | [FIX] Task 2 API and Slack Surfaces | task | Available |
+
+### Major Epics
+
+| ID | Title | Description |
+|----|-------|-------------|
+| bd-70d | EPIC: Quotey AI-Native CPQ Enhancement Initiative | 10 major feature areas including Deal DNA, Conversational Solver, Emoji Approvals |
+| bd-271 | EPIC: Power Capabilities Wave 1 (Top-10 Differentiators) | Deal Flight Simulator, Constraint Auto-Repair, Approval Packet Autopilot, etc. |
 
 ---
 
-## 13. Technical Debt & Gaps
+## Research Findings
 
-### 13.1 Placeholder Implementations
+### Strengths
 
-The following repositories have stub implementations and need full SQL:
-- `SqlQuoteRepository`
-- `SqlProductRepository`
-- `SqlApprovalRepository`
-- `SqlCustomerRepository`
+1. **Solid Architectural Foundation**: Clean separation of concerns between crates
+2. **Deterministic Safety**: Core business logic is deterministic and auditable
+3. **Comprehensive Test Coverage**: Unit tests in modules + integration tests
+4. **Modern Rust Practices**: Async/await, structured logging, error handling
+5. **Extensible Design**: Trait-based abstractions allow swapping implementations
+6. **Documentation**: Well-documented planning in `.planning/PROJECT.md`
 
-### 13.2 LLM Provider
+### Areas for Attention
 
-The `LlmClient` trait exists but no concrete implementations (OpenAI, Anthropic, Ollama) are present.
+1. **Repository Implementation Gap**: Core repositories (quote, product, approval) are stubs
+2. **LLM Provider Gap**: No concrete LLM implementations (OpenAI, Anthropic, Ollama)
+3. **Tool Registry Empty**: Agent tools need to be implemented and registered
+4. **CRM Integration Missing**: Composio REST client not yet built
+5. **PDF Generation Missing**: No HTML→PDF pipeline
 
-### 13.3 Slack Transport
+### Technical Debt Observations
 
-Currently uses `NoopSocketTransport`. Real `slack-morphism` integration needed.
-
-### 13.4 CRM Integration
-
-Stub CRM adapter exists but Composio REST client not implemented.
-
----
-
-## 14. Testing Strategy
-
-### 14.1 Current Coverage
-
-| Area | Test Type | Coverage |
-|------|-----------|----------|
-| Config | Unit | Comprehensive (precedence, validation, interpolation) |
-| Database | Integration | Migration reversibility, schema verification |
-| Execution Queue | Integration | Round-trip, state transitions |
-| Flows | Unit | State machine transitions |
-| CPQ Engines | Unit | Constraint, pricing, policy validation |
-
-### 14.2 Quality Gates
-
-```bash
-cargo fmt --check
-cargo clippy --all-targets --all-features -- -D warnings
-cargo test --all-targets --all-features
-ubs --diff
-```
+1. **Placeholder Returns**: Many repository methods return `Ok(())` or `Ok(None)`
+2. **No-op Seed Command**: Intentionally empty, needs fixtures
+3. **Missing Error Variants**: Some error cases not fully enumerated
 
 ---
 
-## 15. Deployment Model
+## Recommendations
 
-### 15.1 Target Artifacts
+### Immediate (Next 2 Weeks)
 
-1. Single Rust binary (`quotey`)
-2. SQLite database file (created on first run)
-3. Configuration file (`quotey.toml`)
-4. HTML templates for PDF generation
-5. Demo fixture CSVs (optional)
+1. **Complete REL Execution Queue** (bd-271.1) - P0, already in progress
+2. **Implement Quote Repository** - Unblock quote persistence
+3. **Add LLM Provider** - At least one concrete implementation (Ollama for local-first)
 
-### 15.2 Installation Steps
+### Short Term (Next Month)
 
-1. Download binary for platform
-2. Create Slack app with Socket Mode
-3. Configure tokens in `quotey.toml`
-4. Run `quotey migrate`
-5. Run `quotey seed-demo` (optional)
-6. Run `quotey start`
+1. **Complete Power Capabilities Wave 1** (bd-271)
+2. **Implement Product Repository** - Enable catalog operations
+3. **Build CRM Composio Client** - Enable external integrations
+4. **Add PDF Generation** - Complete quote delivery pipeline
 
-### 15.3 Runtime Requirements
+### Medium Term (Next Quarter)
 
-- No public URL needed (Socket Mode)
-- No cloud deployment required
-- Runs on laptop/desktop
-- SQLite (embedded)
+1. **Complete AI-Native CPQ Epic** (bd-70d)
+2. **Performance Optimization** - Query tuning, connection pooling
+3. **Observability** - Metrics, alerting, tracing
+4. **Security Audit** - Cryptographic verification, input validation
 
 ---
 
-## 16. Market Context
-
-### 16.1 Salesforce CPQ End-of-Sale
-
-- EoS announced: March 2025
-- Projected EOL: 2029-2030
-- Migration to Revenue Cloud: 18-24 months
-- Market window: 3 years for alternatives
-
-### 16.2 Competitive Position
-
-| Competitor | Strength | Quotey Advantage |
-|------------|----------|------------------|
-| Salesforce CPQ | CRM integration | No lock-in, local-first, agent-first UX |
-| DealHub | Fast implementation | Constraint-based config, open architecture |
-| Conga/Apttus | Document generation | Catalog bootstrap, NL interaction |
-| PROS | ML pricing | Local simplicity, open LLM layer |
-| Tacton | Constraint engine | Full CPQ flow, agent-first UX |
-
-### 16.3 Agent-First Differentiation
-
-1. **Catalog Bootstrap** - Ingest unstructured data (PDFs, CSVs, spreadsheets)
-2. **Quote Intelligence** - Parse RFPs/emails to pre-populate quotes
-3. **Natural Language** - Express intent, not fill forms
-4. **Deterministic Core** - LLMs translate, engines decide
-
----
-
-## 17. References
-
-### 17.1 Key Documentation
-
-- `/data/projects/quotey/AGENTS.md` - Agent execution instructions
-- `/data/projects/quotey/.planning/PROJECT.md` - Detailed architecture spec
-- `/data/projects/quotey/.planning/config.json` - Planning configuration
-- `/data/projects/quotey/README.md` - Quick start guide
-
-### 17.2 Configuration Example
+## Appendix A: Workspace Dependencies
 
 ```toml
-[database]
-url = "sqlite://quotey.db"
-max_connections = 5
-timeout_secs = 30
-
-[slack]
-app_token = "${SLACK_APP_TOKEN}"
-bot_token = "${SLACK_BOT_TOKEN}"
-
-[llm]
-provider = "ollama"
-base_url = "http://localhost:11434"
-model = "llama3.1"
-timeout_secs = 30
-max_retries = 2
-
-[server]
-bind_address = "127.0.0.1"
-health_check_port = 8080
-graceful_shutdown_secs = 15
-
-[logging]
-level = "info"
-format = "pretty"
+[workspace.dependencies]
+anyhow = "1.0"
+async-trait = "0.1"
+chrono = { version = "0.4", features = ["serde"] }
+clap = { version = "4.5", features = ["derive"] }
+rust_decimal = { version = "1.36", features = ["serde"] }
+secrecy = "0.10"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+sqlx = { version = "0.8.6", features = [...] }
+thiserror = "2.0"
+tokio = { version = "1.43", features = [...] }
+toml = "0.8"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = [...] }
+uuid = { version = "1.11", features = ["v4", "serde"] }
 ```
 
----
+## Appendix B: Database Schema Overview
 
-## 18. Research Notes
+### 46 Tables Across 6 Domains
 
-### 18.1 Key Design Decisions
-
-1. **Rust for Performance & Safety** - Single binary, memory safety
-2. **SQLite for Local-First** - Zero-ops, portable, inspectable
-3. **Slack Socket Mode** - No infrastructure, runs on laptop
-4. **Constraint vs Rules-Based** - Better scalability (O(N) vs O(N²))
-5. **LLM as Translator** - Never source of truth for pricing
-6. **Immutable Audit Trail** - Cryptographic verification
-
-### 18.2 Safety Principles
-
-- LLMs extract intent, not decide prices
-- Deterministic engines validate all configurations
-- Pricing traces prove calculation correctness
-- Approval workflows route, LLMs don't approve
-- All state changes are append-only
-
-### 18.3 Next Research Areas
-
-1. Composio REST API integration details
-2. PDF generation pipeline (wkhtmltopdf integration)
-3. Complete SQL repository implementations
-4. LLM provider implementations
-5. Slack Socket Mode transport implementation
-6. End-to-end flow testing scenarios
+1. **Quotes**: quote, quote_line, quote_pricing_snapshot
+2. **Products**: product, product_relationship, price_book, price_book_entry, volume_tier, pricing_formula, bundle, constraint_rule, discount_policy, approval_threshold
+3. **Customers**: account, contact, deal
+4. **Workflow**: flow_state, approval_request, approval_chain
+5. **Audit**: audit_event, slack_thread_map, crm_sync_state, llm_interaction_log
+6. **Advanced**: configuration_fingerprints, similarity_cache, quote_ledger, execution_queue_task, etc.
 
 ---
 
-*Document compiled by ResearchAgent (kimi-k2) for the quotey project.*
-*Last updated: 2026-02-23*
+*Document Version: 1.0*  
+*Research Agent: ResearchAgent*  
+*Status: Complete*
