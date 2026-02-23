@@ -28,7 +28,7 @@ and `cargo deny` verification commands.
 - `crates/agent`:
   runtime orchestration, tool registry, and guardrail policy seams.
 - `crates/cli`:
-  operator command surface (`start`, `migrate`, `seed`, `config`, `doctor`).
+  operator command surface (`start`, `migrate`, `seed`, `smoke`, `config`, `doctor`).
 - `crates/server`:
   executable bootstrap/wiring entrypoint for runtime components.
 

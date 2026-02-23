@@ -2,6 +2,7 @@ pub mod config;
 pub mod doctor;
 pub mod migrate;
 pub mod seed;
+pub mod smoke;
 pub mod start;
 
 use serde::Serialize;
