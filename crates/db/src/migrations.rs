@@ -26,6 +26,8 @@ mod tests {
         "similarity_cache",
         "dialogue_sessions",
         "dialogue_turns",
+        "policy_rules",
+        "explanation_cache",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -44,6 +46,9 @@ mod tests {
         "idx_dialogue_sessions_slack_thread_id",
         "idx_dialogue_sessions_user_id",
         "idx_dialogue_turns_session_turn_number",
+        "idx_policy_rules_rule_category",
+        "idx_explanation_cache_rule_id",
+        "idx_explanation_cache_quote_id",
     ];
 
     #[tokio::test]
@@ -123,6 +128,22 @@ mod tests {
         .expect("check dialogue_turns table")
         .get::<i64, _>("count");
 
+        let policy_rules_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'policy_rules'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check policy_rules table")
+        .get::<i64, _>("count");
+
+        let explanation_cache_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'explanation_cache'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check explanation_cache table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -132,6 +153,8 @@ mod tests {
         assert_eq!(similarity_cache_count, 1);
         assert_eq!(dialogue_sessions_count, 1);
         assert_eq!(dialogue_turns_count, 1);
+        assert_eq!(policy_rules_count, 1);
+        assert_eq!(explanation_cache_count, 1);
     }
 
     #[tokio::test]
