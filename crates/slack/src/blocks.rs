@@ -240,11 +240,141 @@ pub fn help_message() -> MessageTemplate {
         .build()
 }
 
+pub const DEAL_DNA_MAX_DEALS: usize = 5;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DealDnaSimilarDeal {
+    pub quote_id: String,
+    pub customer_name: String,
+    pub similarity_score: f64,
+    pub outcome: String,
+    pub final_price: f64,
+    pub discount_percent: f64,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct DealDnaCard {
+    quote_id: String,
+    similar_deals: Vec<DealDnaSimilarDeal>,
+}
+
+impl DealDnaCard {
+    pub fn new(quote_id: impl Into<String>, similar_deals: Vec<DealDnaSimilarDeal>) -> Self {
+        Self { quote_id: quote_id.into(), similar_deals }
+    }
+
+    pub fn render(&self) -> MessageTemplate {
+        let visible_deals: Vec<&DealDnaSimilarDeal> =
+            self.similar_deals.iter().take(DEAL_DNA_MAX_DEALS).collect();
+        let shown_count = visible_deals.len();
+        let total_count = self.similar_deals.len();
+
+        if visible_deals.is_empty() {
+            return MessageBuilder::new(format!("Deal DNA insights for quote {}", self.quote_id))
+                .section("quote.deal_dna.header.v1", |section| {
+                    section.mrkdwn(format!("📊 *Deal DNA* for `{}`", self.quote_id));
+                })
+                .section("quote.deal_dna.empty.v1", |section| {
+                    section.plain("No similar closed deals found yet.");
+                })
+                .context("quote.deal_dna.context.v1", |context| {
+                    context.plain("Compact thread view is ready once comparable deals exist.");
+                })
+                .build();
+        }
+
+        let mut min_price = f64::INFINITY;
+        let mut max_price = f64::NEG_INFINITY;
+        let mut min_discount = f64::INFINITY;
+        let mut max_discount = f64::NEG_INFINITY;
+        let mut wins = 0usize;
+
+        for deal in &visible_deals {
+            min_price = min_price.min(deal.final_price);
+            max_price = max_price.max(deal.final_price);
+
+            let normalized_discount = deal.discount_percent.clamp(0.0, 100.0);
+            min_discount = min_discount.min(normalized_discount);
+            max_discount = max_discount.max(normalized_discount);
+
+            if deal.outcome.eq_ignore_ascii_case("won") {
+                wins += 1;
+            }
+        }
+
+        let win_rate = ((wins as f64 / shown_count as f64) * 100.0).round() as u32;
+        let deal_lines = visible_deals
+            .iter()
+            .map(|deal| {
+                format!(
+                    "• *{}* (`{}`) · 🎯 {} match · {} · 💰 {} · 📉 {:.0}% off",
+                    deal.customer_name,
+                    deal.quote_id,
+                    format_similarity(deal.similarity_score),
+                    deal.outcome,
+                    format_currency(deal.final_price),
+                    deal.discount_percent.clamp(0.0, 100.0)
+                )
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        MessageBuilder::new(format!("Deal DNA insights for quote {}", self.quote_id))
+            .section("quote.deal_dna.header.v1", |section| {
+                section.mrkdwn(format!("📊 *Deal DNA* for `{}`", self.quote_id));
+            })
+            .section("quote.deal_dna.summary.v1", |section| {
+                section.mrkdwn(format!(
+                    "🎯 *Win rate:* {win_rate}% ({wins}/{shown_count})\n💰 *Price range:* {} - {}\n📉 *Discount range:* {:.0}% - {:.0}%",
+                    format_currency(min_price),
+                    format_currency(max_price),
+                    min_discount,
+                    max_discount
+                ));
+            })
+            .section("quote.deal_dna.list.v1", |section| {
+                section.mrkdwn(format!("*Similar deals (compact)*\n{deal_lines}"));
+            })
+            .actions("quote.deal_dna.toggle.v1", |actions| {
+                actions.button(
+                    ButtonElement::new("quote.deal_dna.expand.v1", "Expand Similar Deals")
+                        .value(self.quote_id.clone()),
+                );
+            })
+            .actions("quote.deal_dna.details.v1", |actions| {
+                for (index, deal) in visible_deals.iter().enumerate() {
+                    actions.button(
+                        ButtonElement::new(
+                            format!("quote.deal_dna.view_details.{}.v1", index + 1),
+                            "View Details",
+                        )
+                        .value(deal.quote_id.clone()),
+                    );
+                }
+            })
+            .context("quote.deal_dna.context.v1", |context| {
+                context.plain(format!(
+                    "Compact thread view: showing {shown_count} of {total_count} similar deals."
+                ));
+            })
+            .build()
+    }
+}
+
+fn format_currency(value: f64) -> String {
+    format!("${value:.0}")
+}
+
+fn format_similarity(similarity_score: f64) -> String {
+    let normalized = similarity_score.clamp(0.0, 1.0);
+    format!("{:.0}%", normalized * 100.0)
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         approval_request_message, error_message, quote_status_message, Block, ButtonStyle,
-        MessageBuilder, TextObject,
+        DealDnaCard, DealDnaSimilarDeal, MessageBuilder, TextObject,
     };
 
     #[test]
@@ -326,5 +456,121 @@ mod tests {
             elements.first(),
             Some(element) if element.action_id == "quote.refresh.v1"
         ));
+    }
+
+    #[test]
+    fn deal_dna_card_renders_metrics_and_limits_to_top_five() {
+        let card = DealDnaCard::new(
+            "Q-2026-0001",
+            vec![
+                DealDnaSimilarDeal {
+                    quote_id: "Q-2026-0002".to_string(),
+                    customer_name: "Acme".to_string(),
+                    similarity_score: 0.91,
+                    outcome: "won".to_string(),
+                    final_price: 45_000.0,
+                    discount_percent: 10.0,
+                },
+                DealDnaSimilarDeal {
+                    quote_id: "Q-2026-0003".to_string(),
+                    customer_name: "Globex".to_string(),
+                    similarity_score: 0.86,
+                    outcome: "lost".to_string(),
+                    final_price: 47_000.0,
+                    discount_percent: 12.0,
+                },
+                DealDnaSimilarDeal {
+                    quote_id: "Q-2026-0004".to_string(),
+                    customer_name: "Initech".to_string(),
+                    similarity_score: 0.82,
+                    outcome: "won".to_string(),
+                    final_price: 51_000.0,
+                    discount_percent: 18.0,
+                },
+                DealDnaSimilarDeal {
+                    quote_id: "Q-2026-0005".to_string(),
+                    customer_name: "Umbrella".to_string(),
+                    similarity_score: 0.80,
+                    outcome: "lost".to_string(),
+                    final_price: 53_000.0,
+                    discount_percent: 22.0,
+                },
+                DealDnaSimilarDeal {
+                    quote_id: "Q-2026-0006".to_string(),
+                    customer_name: "Hooli".to_string(),
+                    similarity_score: 0.78,
+                    outcome: "won".to_string(),
+                    final_price: 59_000.0,
+                    discount_percent: 28.0,
+                },
+                DealDnaSimilarDeal {
+                    quote_id: "Q-2026-0007".to_string(),
+                    customer_name: "Soylent".to_string(),
+                    similarity_score: 0.72,
+                    outcome: "won".to_string(),
+                    final_price: 64_000.0,
+                    discount_percent: 31.0,
+                },
+            ],
+        );
+
+        let message = card.render();
+        let summary =
+            if let Block::Section { text: TextObject::Mrkdwn { text }, .. } = &message.blocks[1] {
+                Some(text)
+            } else {
+                None
+            };
+        assert!(summary.is_some(), "expected markdown summary section");
+        let summary = summary.expect("summary section asserted above");
+
+        assert!(summary.contains("🎯 *Win rate:* 60% (3/5)"));
+        assert!(summary.contains("💰 *Price range:* $45000 - $59000"));
+        assert!(summary.contains("📉 *Discount range:* 10% - 28%"));
+
+        let list =
+            if let Block::Section { text: TextObject::Mrkdwn { text }, .. } = &message.blocks[2] {
+                Some(text)
+            } else {
+                None
+            };
+        assert!(list.is_some(), "expected markdown list section");
+        let list = list.expect("list section asserted above");
+
+        assert!(list.contains("Q-2026-0006"));
+        assert!(!list.contains("Q-2026-0007"));
+
+        let detail_actions = if let Block::Actions { block_id, elements } = &message.blocks[4] {
+            assert_eq!(block_id, "quote.deal_dna.details.v1");
+            Some(elements)
+        } else {
+            None
+        };
+        assert!(detail_actions.is_some(), "expected per-deal actions block");
+        let detail_actions = detail_actions.expect("actions block asserted above");
+
+        assert_eq!(detail_actions.len(), 5);
+        assert_eq!(detail_actions[0].value.as_deref(), Some("Q-2026-0002"));
+        assert_eq!(detail_actions[4].value.as_deref(), Some("Q-2026-0006"));
+    }
+
+    #[test]
+    fn deal_dna_card_renders_empty_state_without_detail_buttons() {
+        let message = DealDnaCard::new("Q-2026-404", vec![]).render();
+
+        assert!(message.fallback_text.contains("Q-2026-404"));
+        assert!(message.blocks.iter().any(|block| matches!(
+            block,
+            Block::Section {
+                block_id,
+                text: TextObject::Plain { text }
+            } if block_id == "quote.deal_dna.empty.v1" && text.contains("No similar closed deals")
+        )));
+        assert!(
+            !message.blocks.iter().any(
+                |block| matches!(block, Block::Actions { block_id, .. } if block_id == "quote.deal_dna.details.v1")
+            ),
+            "empty card should not render per-deal detail actions"
+        );
     }
 }
