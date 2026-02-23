@@ -8,15 +8,21 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+axum = { version = "0.8", default-features = false, features = ["http1", "json", "tokio"] }
+chrono.workspace = true
 quotey-agent = { path = "../agent" }
 quotey-core = { path = "../core" }
 quotey-db = { path = "../db" }
 quotey-slack = { path = "../slack" }
+serde.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true
+
+[dev-dependencies]
+rust_decimal.workspace = true
 
 [[bin]]
 name = "quotey-server"
