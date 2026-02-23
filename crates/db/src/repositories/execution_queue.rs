@@ -1,4 +1,4 @@
-use chrono::{DateTime, Utc};
+use quotey_core::chrono::{DateTime, Utc};
 use sqlx::{sqlite::SqliteRow, Row};
 
 use quotey_core::domain::execution::{

@@ -1,3 +1,6 @@
+// Re-export chrono for downstream crates that need DateTime types
+pub use chrono;
+
 pub mod approvals;
 pub mod archaeology;
 pub mod audit;
@@ -7,6 +10,7 @@ pub mod cpq;
 pub mod dna;
 pub mod domain;
 pub mod errors;
+pub mod execution_engine;
 pub mod flows;
 pub mod ghost;
 pub mod ledger;
@@ -36,6 +40,10 @@ pub use domain::execution::{
 pub use domain::product::{Product, ProductId};
 pub use domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
 pub use errors::{ApplicationError, DomainError, InterfaceError};
+pub use execution_engine::{
+    ClaimResult, DeterministicExecutionEngine, ExecutionEngineConfig, ExecutionError,
+    InMemoryExecutionEngine, RetryPolicy, TransitionResult,
+};
 pub use ghost::{
     GhostQuote, GhostQuoteGenerator, InMemoryCustomerHistoryProvider, InMemoryGhostQuoteStore,
     Signal, SignalDetector, SignalDetectorConfig,
