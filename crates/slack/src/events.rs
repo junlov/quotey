@@ -89,6 +89,8 @@ pub enum EventHandlerError {
     Route(#[from] CommandRouteError),
     #[error("thread message handler failure: {0}")]
     ThreadMessage(String),
+    #[error("reaction approval handler failure: {0}")]
+    ReactionApproval(String),
 }
 
 #[derive(Debug, Error, PartialEq, Eq)]
@@ -303,7 +305,7 @@ where
 
         let outcome = self.service.process_reaction_approval(event, ctx).await?;
         let summary = format!(
-            "emoji approval captured ({}) · db={} state_transition={} dm={} undo={}s",
+            "emoji approval captured ({}) | db={} state_transition={} dm={} undo={}s",
             event.reaction,
             outcome.database_recorded,
             outcome.state_transition_triggered,
@@ -329,7 +331,7 @@ impl ReactionApprovalService for NoopReactionApprovalService {
         _ctx: &EventContext,
     ) -> Result<ReactionApprovalOutcome, EventHandlerError> {
         let quote_id = event.quote_id.clone().ok_or_else(|| {
-            EventHandlerError::ThreadMessage("missing quote id for reaction approval".to_owned())
+            EventHandlerError::ReactionApproval("missing quote id for reaction approval".to_owned())
         })?;
 
         Ok(ReactionApprovalOutcome {
@@ -343,10 +345,16 @@ impl ReactionApprovalService for NoopReactionApprovalService {
 }
 
 fn is_supported_approval_reaction(reaction: &str) -> bool {
+    let normalized = normalize_reaction_token(reaction);
+
     matches!(
-        reaction,
+        normalized.as_str(),
         "👍" | "👎" | "💬" | "+1" | "-1" | "thumbsup" | "thumbsdown" | "speech_balloon"
     )
+}
+
+fn normalize_reaction_token(reaction: &str) -> String {
+    reaction.trim().trim_matches(':').to_ascii_lowercase()
 }
 
 #[cfg(test)]
@@ -445,5 +453,32 @@ mod tests {
             dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
 
         assert_eq!(result, HandlerResult::Processed);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_accepts_colon_wrapped_case_variant_reaction_alias() {
+        let dispatcher = default_dispatcher();
+        let envelope = SlackEnvelope {
+            envelope_id: "env-5".to_owned(),
+            event: SlackEvent::ReactionAdded(ReactionAddedEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000000.4000".to_owned(),
+                thread_ts: Some("1730000000.1000".to_owned()),
+                reactor_user_id: "U5".to_owned(),
+                reaction: ":THUMBSUP:".to_owned(),
+                quote_id: Some("Q-2026-1003".to_owned()),
+                approval_type: "discount".to_owned(),
+            }),
+        };
+
+        let result =
+            dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
+
+        assert!(matches!(result, HandlerResult::Responded(_)));
+    }
+
+    #[test]
+    fn reaction_token_normalization_handles_spacing_and_colons() {
+        assert_eq!(super::normalize_reaction_token(" :THUMBSDOWN: "), "thumbsdown");
     }
 }
