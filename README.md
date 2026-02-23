@@ -56,6 +56,9 @@ Current scaffold contracts from completed foundation beads:
 - `crates/core/src/audit.rs`:
   structured audit event model with `quote_id`, `thread_id`, and `correlation_id` fields,
   plus sink interface for emission.
+- `crates/core/src/domain/execution.rs` and `migrations/0012_execution_queue_rel.*`:
+  durable execution-queue persistence primitives (queue tasks, idempotency ledger, transition
+  audit trail) for resilient retry/recovery workflows.
 - `crates/slack/src/socket.rs` and `crates/server/src/*`:
   structured tracing baseline including `correlation_id`, `quote_id`, and `thread_id`
   fields at ingress/bootstrap/runtime boundaries.

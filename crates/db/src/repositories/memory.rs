@@ -3,10 +3,17 @@ use std::collections::HashMap;
 use tokio::sync::RwLock;
 
 use quotey_core::domain::approval::{ApprovalId, ApprovalRequest};
+use quotey_core::domain::execution::{
+    ExecutionTask, ExecutionTaskId, ExecutionTaskState, ExecutionTransitionEvent,
+    IdempotencyRecord, OperationKey,
+};
 use quotey_core::domain::product::{Product, ProductId};
 use quotey_core::domain::quote::{Quote, QuoteId};
 
-use super::{ApprovalRepository, ProductRepository, QuoteRepository, RepositoryError};
+use super::{
+    ApprovalRepository, ExecutionQueueRepository, IdempotencyRepository, ProductRepository,
+    QuoteRepository, RepositoryError,
+};
 
 #[derive(Default)]
 pub struct InMemoryQuoteRepository {
@@ -68,18 +75,112 @@ impl ApprovalRepository for InMemoryApprovalRepository {
     }
 }
 
+#[derive(Default)]
+pub struct InMemoryExecutionQueueRepository {
+    tasks: RwLock<HashMap<String, ExecutionTask>>,
+    transitions: RwLock<Vec<ExecutionTransitionEvent>>,
+}
+
+#[async_trait::async_trait]
+impl ExecutionQueueRepository for InMemoryExecutionQueueRepository {
+    async fn find_task_by_id(
+        &self,
+        id: &ExecutionTaskId,
+    ) -> Result<Option<ExecutionTask>, RepositoryError> {
+        let tasks = self.tasks.read().await;
+        Ok(tasks.get(&id.0).cloned())
+    }
+
+    async fn list_tasks_for_quote(
+        &self,
+        quote_id: &QuoteId,
+        state: Option<ExecutionTaskState>,
+    ) -> Result<Vec<ExecutionTask>, RepositoryError> {
+        let tasks = self.tasks.read().await;
+        let mut entries: Vec<ExecutionTask> = tasks
+            .values()
+            .filter(|task| {
+                task.quote_id == *quote_id
+                    && match state.as_ref() {
+                        Some(expected) => task.state == *expected,
+                        None => true,
+                    }
+            })
+            .cloned()
+            .collect();
+        entries.sort_by(|left, right| left.available_at.cmp(&right.available_at));
+        Ok(entries)
+    }
+
+    async fn save_task(&self, task: ExecutionTask) -> Result<(), RepositoryError> {
+        let mut tasks = self.tasks.write().await;
+        tasks.insert(task.id.0.clone(), task);
+        Ok(())
+    }
+
+    async fn append_transition(
+        &self,
+        transition: ExecutionTransitionEvent,
+    ) -> Result<(), RepositoryError> {
+        let mut transitions = self.transitions.write().await;
+        transitions.push(transition);
+        transitions.sort_by(|left, right| left.occurred_at.cmp(&right.occurred_at));
+        Ok(())
+    }
+
+    async fn list_transitions_for_task(
+        &self,
+        task_id: &ExecutionTaskId,
+    ) -> Result<Vec<ExecutionTransitionEvent>, RepositoryError> {
+        let transitions = self.transitions.read().await;
+        Ok(transitions
+            .iter()
+            .filter(|transition| transition.task_id == *task_id)
+            .cloned()
+            .collect())
+    }
+}
+
+#[derive(Default)]
+pub struct InMemoryIdempotencyRepository {
+    operations: RwLock<HashMap<String, IdempotencyRecord>>,
+}
+
+#[async_trait::async_trait]
+impl IdempotencyRepository for InMemoryIdempotencyRepository {
+    async fn find_operation(
+        &self,
+        operation_key: &OperationKey,
+    ) -> Result<Option<IdempotencyRecord>, RepositoryError> {
+        let operations = self.operations.read().await;
+        Ok(operations.get(&operation_key.0).cloned())
+    }
+
+    async fn save_operation(&self, record: IdempotencyRecord) -> Result<(), RepositoryError> {
+        let mut operations = self.operations.write().await;
+        operations.insert(record.operation_key.0.clone(), record);
+        Ok(())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
     use rust_decimal::Decimal;
 
     use quotey_core::domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
+    use quotey_core::domain::execution::{
+        ExecutionTask, ExecutionTaskId, ExecutionTaskState, ExecutionTransitionEvent,
+        ExecutionTransitionId, IdempotencyRecord, IdempotencyRecordState, OperationKey,
+    };
     use quotey_core::domain::product::{Product, ProductId};
     use quotey_core::domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
 
     use crate::repositories::{
-        ApprovalRepository, InMemoryApprovalRepository, InMemoryProductRepository,
-        InMemoryQuoteRepository, ProductRepository, QuoteRepository,
+        ApprovalRepository, ExecutionQueueRepository, IdempotencyRepository,
+        InMemoryApprovalRepository, InMemoryExecutionQueueRepository,
+        InMemoryIdempotencyRepository, InMemoryProductRepository, InMemoryQuoteRepository,
+        ProductRepository, QuoteRepository,
     };
 
     #[tokio::test]
@@ -134,5 +235,79 @@ mod tests {
         let found = repo.find_by_id(&approval.id).await.expect("find approval");
 
         assert_eq!(found, Some(approval));
+    }
+
+    #[tokio::test]
+    async fn in_memory_execution_queue_repo_round_trip() {
+        let repo = InMemoryExecutionQueueRepository::default();
+        let task = ExecutionTask {
+            id: ExecutionTaskId("task-1".to_string()),
+            quote_id: QuoteId("Q-1".to_string()),
+            operation_kind: "crm.write_quote".to_string(),
+            payload_json: "{\"deal_id\":\"D-1\"}".to_string(),
+            idempotency_key: OperationKey("op-1".to_string()),
+            state: ExecutionTaskState::Queued,
+            retry_count: 0,
+            max_retries: 3,
+            available_at: Utc::now(),
+            claimed_by: None,
+            claimed_at: None,
+            last_error: None,
+            result_fingerprint: None,
+            state_version: 1,
+            created_at: Utc::now(),
+            updated_at: Utc::now(),
+        };
+
+        repo.save_task(task.clone()).await.expect("save task");
+        let found = repo.find_task_by_id(&task.id).await.expect("find task");
+        assert_eq!(found, Some(task.clone()));
+
+        let transition = ExecutionTransitionEvent {
+            id: ExecutionTransitionId("transition-1".to_string()),
+            task_id: task.id.clone(),
+            quote_id: task.quote_id.clone(),
+            from_state: Some(ExecutionTaskState::Queued),
+            to_state: ExecutionTaskState::Running,
+            transition_reason: "claimed".to_string(),
+            error_class: None,
+            decision_context_json: "{}".to_string(),
+            actor_type: "system".to_string(),
+            actor_id: "worker-1".to_string(),
+            idempotency_key: Some(task.idempotency_key.clone()),
+            correlation_id: "corr-1".to_string(),
+            state_version: 2,
+            occurred_at: Utc::now(),
+        };
+
+        repo.append_transition(transition.clone()).await.expect("append transition");
+        let transitions = repo.list_transitions_for_task(&task.id).await.expect("list transitions");
+        assert_eq!(transitions, vec![transition]);
+    }
+
+    #[tokio::test]
+    async fn in_memory_idempotency_repo_round_trip() {
+        let repo = InMemoryIdempotencyRepository::default();
+        let record = IdempotencyRecord {
+            operation_key: OperationKey("op-1".to_string()),
+            quote_id: QuoteId("Q-1".to_string()),
+            operation_kind: "slack.update_message".to_string(),
+            payload_hash: "sha256:abcd".to_string(),
+            state: IdempotencyRecordState::Reserved,
+            attempt_count: 1,
+            first_seen_at: Utc::now(),
+            last_seen_at: Utc::now(),
+            result_snapshot_json: None,
+            error_snapshot_json: None,
+            expires_at: None,
+            correlation_id: "corr-2".to_string(),
+            created_by_component: "socket".to_string(),
+            updated_by_component: "socket".to_string(),
+        };
+
+        repo.save_operation(record.clone()).await.expect("save operation");
+        let found = repo.find_operation(&record.operation_key).await.expect("find operation");
+
+        assert_eq!(found, Some(record));
     }
 }
