@@ -36,6 +36,8 @@ mod tests {
         "constraint_nodes",
         "constraint_edges",
         "archaeology_queries",
+        "buying_signals",
+        "ghost_quotes",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -69,6 +71,9 @@ mod tests {
         "idx_constraint_nodes_node_key",
         "idx_constraint_edges_config_id",
         "idx_archaeology_queries_config_id",
+        "idx_buying_signals_matched_rep_id",
+        "idx_buying_signals_status",
+        "idx_ghost_quotes_signal_id",
     ];
 
     #[tokio::test]
@@ -228,6 +233,22 @@ mod tests {
         .expect("check archaeology_queries table")
         .get::<i64, _>("count");
 
+        let buying_signals_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'buying_signals'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check buying_signals table")
+        .get::<i64, _>("count");
+
+        let ghost_quotes_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'ghost_quotes'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check ghost_quotes table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -247,6 +268,8 @@ mod tests {
         assert_eq!(constraint_nodes_count, 1);
         assert_eq!(constraint_edges_count, 1);
         assert_eq!(archaeology_queries_count, 1);
+        assert_eq!(buying_signals_count, 1);
+        assert_eq!(ghost_quotes_count, 1);
     }
 
     #[tokio::test]
