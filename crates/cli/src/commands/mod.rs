@@ -1,5 +1,6 @@
 pub mod config;
 pub mod doctor;
+pub mod genome;
 pub mod migrate;
 pub mod policy_packet;
 pub mod seed;

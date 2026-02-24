@@ -60,6 +60,7 @@ proving exactly how every number was calculated.
 - [ ] Configuration rules and pricing policies stored in SQLite, manageable via CLI without recompilation
 - [ ] Closed-loop policy optimizer that proposes rule improvements from outcomes, gates changes with deterministic replay, requires human approval, and supports signed rollback
 - [ ] Deterministic negotiation autopilot that proposes bounded counteroffers in Slack, enforces concession guardrails, escalates out-of-policy offers, and preserves replayable audit evidence
+- [ ] Deal autopsy & revenue genome engine that performs automated causal attribution on every deal outcome using deterministic audit trails, builds a queryable attribution graph, supports counterfactual simulation, and feeds enhanced inputs to CLO/NXT/Precedent Intelligence
 
 ### Out of Scope
 
@@ -167,6 +168,14 @@ offers during live negotiation by combining deterministic concession envelopes, 
 guardrails, and approval escalation hooks. This accelerates deal cycles while ensuring every
 suggestion is reproducible, policy-safe, and audit-replayable.
 
+**Deal autopsy & revenue genome for causal strategy intelligence.** Quotey can perform automated
+causal attribution on every deal outcome by walking the deterministic audit trail backward,
+attributing outcomes to specific decision forks (pricing path, discount level, constraint
+resolution, approval exception, negotiation concession), and building a queryable attribution
+graph that reveals which decisions at which stages produce which outcomes. This enables
+counterfactual simulation ("what if we had offered X instead of Y?"), evidence-backed strategy
+recommendations, and temporal pattern detection — all deterministic, all auditable.
+
 ### The Safety Principle
 
 This is the most important architectural decision in the entire system.
@@ -264,6 +273,7 @@ This is the right level of autonomy for enterprise CPQ.
 | Slack-first over web UI | Meets reps where they work. Socket Mode eliminates infrastructure requirements. Interactive components (buttons, modals) provide structured input when NL is insufficient. | — Pending |
 | Catalog bootstrap as differentiator | The #1 CPQ implementation blocker is data readiness. Agent-powered catalog ingestion from unstructured sources (CSV, PDF, spreadsheets) is a unique value prop that traditional CPQ cannot match. | — Pending |
 | Human-approved closed-loop policy optimizer over autonomous policy mutation | Policy evolution should compound from real outcomes, but enterprise safety requires deterministic replay evidence and explicit human approval before apply. | — Proposed |
+| Deterministic causal attribution over ML-based attribution | Enterprise strategy decisions require transparent, reproducible evidence. Deterministic audit trail walking + weighted attribution scoring provides provable causation without black-box ML. | — Proposed |
 
 ---
 

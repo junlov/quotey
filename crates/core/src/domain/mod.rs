@@ -1,4 +1,5 @@
 pub mod approval;
+pub mod autopsy;
 pub mod customer;
 pub mod execution;
 pub mod explanation;
