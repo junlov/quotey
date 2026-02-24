@@ -105,8 +105,8 @@ metrics_export_interval_secs = 60
 ```
 
 ### Environment Variables
-- `QUOTEY_LOG_FORMAT` - json, compact, or pretty
-- `QUOTEY_LOG_LEVEL` - error, warn, info, debug, trace
+- `QUOTEY_LOGGING_FORMAT` - json, compact, or pretty
+- `QUOTEY_LOGGING_LEVEL` - error, warn, info, debug, trace
 - `QUOTEY_OTEL_ENABLED` - true/false
 - `QUOTEY_OTEL_ENDPOINT` - OTLP collector endpoint
 

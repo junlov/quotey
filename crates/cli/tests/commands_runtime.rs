@@ -189,6 +189,8 @@ fn with_env(vars: &[(&str, &str)], test_fn: impl FnOnce()) {
         "QUOTEY_SERVER_BIND_ADDRESS",
         "QUOTEY_SERVER_HEALTH_CHECK_PORT",
         "QUOTEY_SERVER_GRACEFUL_SHUTDOWN_SECS",
+        "QUOTEY_LOGGING_LEVEL",
+        "QUOTEY_LOGGING_FORMAT",
         "QUOTEY_LOG_LEVEL",
         "QUOTEY_LOG_FORMAT",
     ];
