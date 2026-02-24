@@ -50,6 +50,22 @@ impl SqlPricingSnapshotRepository {
         quote_id: &QuoteId,
         version: i32,
     ) -> Result<LedgerVersion, ExplanationError> {
+        let latest_raw: Option<i64> =
+            sqlx::query_scalar("SELECT MAX(version_number) FROM quote_ledger WHERE quote_id = ?")
+                .bind(&quote_id.0)
+                .fetch_one(&self.pool)
+                .await
+                .map_err(Self::db_error)?;
+
+        let latest_version = match latest_raw {
+            Some(value) => {
+                i32::try_from(value).map_err(|_| ExplanationError::EvidenceGatheringFailed {
+                    reason: format!("latest ledger version `{value}` does not fit in i32"),
+                })?
+            }
+            None => 0,
+        };
+
         let row = sqlx::query(
             r#"
             SELECT entry_id, content_hash, timestamp, version_number
@@ -76,18 +92,11 @@ impl SqlPricingSnapshotRepository {
                 entry_id: row.try_get("entry_id").map_err(Self::db_error)?,
                 content_hash: row.try_get("content_hash").map_err(Self::db_error)?,
                 timestamp: row.try_get("timestamp").map_err(Self::db_error)?,
+                latest_version,
             });
         }
 
-        let latest_raw: Option<i64> =
-            sqlx::query_scalar("SELECT MAX(version_number) FROM quote_ledger WHERE quote_id = ?")
-                .bind(&quote_id.0)
-                .fetch_one(&self.pool)
-                .await
-                .map_err(Self::db_error)?;
-
-        let actual = latest_raw.and_then(|value| i32::try_from(value).ok()).unwrap_or_default();
-        Err(ExplanationError::VersionMismatch { expected: version, actual })
+        Err(ExplanationError::VersionMismatch { expected: version, actual: latest_version })
     }
 
     async fn load_cached_snapshot_row(
@@ -235,6 +244,14 @@ impl SqlPricingSnapshotRepository {
                     ),
                 }
             })?;
+            if quantity < 0 {
+                return Err(ExplanationError::EvidenceGatheringFailed {
+                    reason: format!(
+                        "negative quantity `{quantity}` on quote {} line {} is invalid",
+                        quote_id.0, line_id
+                    ),
+                });
+            }
             let unit_price_text: String = row.try_get("unit_price_text").map_err(Self::db_error)?;
             let line_subtotal_text: String =
                 row.try_get("line_subtotal_text").map_err(Self::db_error)?;
@@ -365,6 +382,12 @@ impl PricingSnapshotProvider for SqlPricingSnapshotRepository {
             return Self::snapshot_from_row(&row);
         }
 
+        // quote_line rows represent mutable live state. Without a persisted snapshot we can
+        // only safely reconstruct the latest ledger version.
+        if version != ledger.latest_version {
+            return Err(ExplanationError::MissingPricingSnapshot { quote_id: quote_id.clone() });
+        }
+
         let snapshot = self
             .build_fallback_snapshot(quote_id, version, currency, ledger.timestamp.clone())
             .await?;
@@ -384,6 +407,7 @@ struct LedgerVersion {
     entry_id: String,
     content_hash: String,
     timestamp: String,
+    latest_version: i32,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -597,6 +621,92 @@ mod tests {
         assert!(matches!(
             error,
             quotey_core::ExplanationError::VersionMismatch { expected: 2, actual: 1 }
+        ));
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_reports_ledger_version_overflow_when_latest_exceeds_i32() {
+        let pool = setup_pool().await;
+        let quote_id = QuoteId("Q-PS-VERSION-OVERFLOW-001".to_string());
+        insert_quote(&pool, &quote_id, "USD").await;
+
+        let timestamp = "2026-02-24T00:00:00Z";
+        sqlx::query(
+            r#"
+            INSERT INTO quote_ledger (
+                entry_id, quote_id, version_number, content_hash, prev_hash, actor_id, action_type, timestamp, signature, metadata_json
+            ) VALUES (?, ?, ?, ?, ?, 'U-PS', 'update', ?, 'sig', '{}')
+            "#,
+        )
+        .bind("led-overflow-1")
+        .bind(&quote_id.0)
+        .bind(i64::from(i32::MAX) + 1)
+        .bind("hash-overflow-1")
+        .bind(Option::<String>::None)
+        .bind(timestamp)
+        .execute(&pool)
+        .await
+        .expect("insert overflow ledger");
+
+        let repo = SqlPricingSnapshotRepository::new(pool.clone());
+        let error = repo
+            .get_snapshot(&quote_id, 1)
+            .await
+            .expect_err("overflowed latest version should fail loudly");
+        assert!(matches!(
+            error,
+            quotey_core::ExplanationError::EvidenceGatheringFailed { reason }
+                if reason.contains("latest ledger version")
+        ));
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_requires_persisted_snapshot_for_non_latest_version() {
+        let pool = setup_pool().await;
+        let quote_id = QuoteId("Q-PS-HIST-001".to_string());
+        insert_quote(&pool, &quote_id, "USD").await;
+        insert_quote_line(&pool, &quote_id, "line-1", "plan-pro", 1, "100.00", Some("100.00"))
+            .await;
+        insert_ledger_entry(&pool, &quote_id, 1, "led-hist-1", "hash-hist-1", None).await;
+        insert_ledger_entry(&pool, &quote_id, 2, "led-hist-2", "hash-hist-2", Some("hash-hist-1"))
+            .await;
+
+        let repo = SqlPricingSnapshotRepository::new(pool.clone());
+        let error = repo
+            .get_snapshot(&quote_id, 1)
+            .await
+            .expect_err("historical fallback should be rejected");
+        assert!(matches!(
+            error,
+            quotey_core::ExplanationError::MissingPricingSnapshot { quote_id: QuoteId(id) }
+                if id == "Q-PS-HIST-001"
+        ));
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn get_snapshot_rejects_negative_quantity_in_fallback_rows() {
+        let pool = setup_pool().await;
+        let quote_id = QuoteId("Q-PS-NEG-001".to_string());
+        insert_quote(&pool, &quote_id, "USD").await;
+        insert_quote_line(&pool, &quote_id, "line-neg", "plan-pro", -3, "25.00", Some("-75.00"))
+            .await;
+        insert_ledger_entry(&pool, &quote_id, 1, "led-neg-1", "hash-neg-1", None).await;
+
+        let repo = SqlPricingSnapshotRepository::new(pool.clone());
+        let error = repo
+            .get_snapshot(&quote_id, 1)
+            .await
+            .expect_err("negative quantity fallback reconstruction must fail");
+        assert!(matches!(
+            error,
+            quotey_core::ExplanationError::EvidenceGatheringFailed { reason }
+                if reason.contains("negative quantity")
         ));
 
         pool.close().await;
