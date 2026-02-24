@@ -470,8 +470,10 @@ pub struct VerificationResult {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
+    use super::{E2ESeedDataset, SEED_FLOWS};
     use crate::{connect_with_settings, migrations};
+    use serde_json::Value;
+    type SeedTestResult = Result<(), String>;
 
     #[test]
     fn sql_fixture_is_valid() {
@@ -479,41 +481,44 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn verify_seed_contract_and_idempotency() {
+    async fn verify_seed_contract_and_idempotency() -> SeedTestResult {
         let pool = connect_with_settings("sqlite::memory:?cache=shared", 1, 30)
             .await
-            .expect("connect to test database");
+            .map_err(|err| err.to_string())?;
 
-        migrations::run_pending(&pool).await.expect("run migrations");
+        migrations::run_pending(&pool).await.map_err(|err| err.to_string())?;
 
-        let first = E2ESeedDataset::load(&pool).await.expect("load seed fixtures");
-        let first_verification = E2ESeedDataset::verify(&pool).await.expect("verify seed fixtures");
+        let first = E2ESeedDataset::load(&pool).await.map_err(|err| err.to_string())?;
+        let first_verification =
+            E2ESeedDataset::verify(&pool).await.map_err(|err| err.to_string())?;
         assert!(first_verification.all_present);
         assert_eq!(first.flows_seeded.len(), 3);
 
-        let second = E2ESeedDataset::load(&pool).await.expect("reload seed fixtures");
+        let second = E2ESeedDataset::load(&pool).await.map_err(|err| err.to_string())?;
         let second_verification =
-            E2ESeedDataset::verify(&pool).await.expect("re-verify seed fixtures");
+            E2ESeedDataset::verify(&pool).await.map_err(|err| err.to_string())?;
         assert!(second_verification.all_present);
         assert_eq!(second.flows_seeded.len(), 3);
         assert_eq!(first_verification.checks, second_verification.checks);
+        assert_eq!(first.flows_seeded.len(), second.flows_seeded.len());
+        Ok(())
     }
 
     #[tokio::test]
-    async fn verify_seed_flow_specific_properties() {
+    async fn verify_seed_flow_specific_properties() -> SeedTestResult {
         let pool = connect_with_settings("sqlite::memory:?cache=shared", 1, 30)
             .await
-            .expect("connect to test database");
+            .map_err(|err| err.to_string())?;
 
-        migrations::run_pending(&pool).await.expect("run migrations");
+        migrations::run_pending(&pool).await.map_err(|err| err.to_string())?;
 
-        E2ESeedDataset::load(&pool).await.expect("load seed fixtures");
+        E2ESeedDataset::load(&pool).await.map_err(|err| err.to_string())?;
 
         let net_new_status: String = sqlx::query_scalar("SELECT status FROM quote WHERE id = ?1")
             .bind("quote-netnew-001")
             .fetch_one(&pool)
             .await
-            .expect("query net-new status");
+            .map_err(|err| err.to_string())?;
         assert_eq!(net_new_status, "draft");
 
         let net_new_prior: Option<String> =
@@ -521,7 +526,7 @@ mod tests {
                 .bind("quote-netnew-001")
                 .fetch_one(&pool)
                 .await
-                .expect("query net-new prior quote");
+                .map_err(|err| err.to_string())?;
         assert!(net_new_prior.is_none());
 
         let renewal_prior: String =
@@ -529,7 +534,7 @@ mod tests {
                 .bind("quote-renewal-001")
                 .fetch_one(&pool)
                 .await
-                .expect("query renewal prior quote");
+                .map_err(|err| err.to_string())?;
         assert_eq!(renewal_prior, "quote-renewal-prior-001");
 
         let discount_pct: i64 =
@@ -537,7 +542,7 @@ mod tests {
                 .bind("quote-discount-001")
                 .fetch_one(&pool)
                 .await
-                .expect("query discount percent");
+                .map_err(|err| err.to_string())?;
         assert_eq!(discount_pct, 25);
 
         let threshold_pct: i64 =
@@ -545,7 +550,7 @@ mod tests {
                 .bind("quote-discount-001")
                 .fetch_one(&pool)
                 .await
-                .expect("query discount threshold");
+                .map_err(|err| err.to_string())?;
         assert_eq!(threshold_pct, 20);
 
         let approval_request_events: i64 =
@@ -553,8 +558,9 @@ mod tests {
                 .bind("quote-discount-001")
                 .fetch_one(&pool)
                 .await
-                .expect("query discount approval events");
+                .map_err(|err| err.to_string())?;
         assert_eq!(approval_request_events, 1);
+        Ok(())
     }
 
     #[test]
