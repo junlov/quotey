@@ -29,6 +29,29 @@ To skip clippy (slower) during commit:
 QUOTEY_PRE_COMMIT_CLIPPY=0 git commit -m "your message"
 ```
 
+### Environment Configuration
+
+The project supports environment-specific configuration files in `config/`:
+
+| File | Purpose |
+|------|---------|
+| `quotey.example.toml` | Template for custom configuration |
+| `quotey.dev.toml` | Local development (default) |
+| `quotey.staging.toml` | Staging environment |
+| `quotey.prod.toml` | Production environment |
+
+To use a specific environment:
+
+```bash
+# Using environment variable
+QUOTEY_CONFIG=staging cargo run
+
+# Using explicit config path
+cargo run -- --config config/quotey.prod.toml
+```
+
+Environment variables in config files use `${VAR_NAME}` syntax and are resolved at runtime.
+
 ### Quick Start
 
 ```bash

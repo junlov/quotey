@@ -1,0 +1,29 @@
+# Quotey Production Configuration
+#
+# Use with: QUOTEY_CONFIG=prod cargo run
+# Or: cargo run -- --config config/quotey.prod.toml
+
+[database]
+url = "${DATABASE_URL}"
+max_connections = 20
+timeout_secs = 60
+
+[slack]
+app_token = "${SLACK_APP_TOKEN}"
+bot_token = "${SLACK_BOT_TOKEN}"
+
+[llm]
+provider = "openai"
+api_key = "${OPENAI_API_KEY}"
+model = "gpt-4"
+timeout_secs = 120
+max_retries = 5
+
+[server]
+bind_address = "0.0.0.0"
+health_check_port = 8080
+graceful_shutdown_secs = 60
+
+[logging]
+level = "warn"
+format = "json"
