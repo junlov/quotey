@@ -1426,6 +1426,7 @@ version = "0.1.1"
 dependencies = [
  "anyhow",
  "async-trait",
+ "rust_decimal",
  "serde",
  "thiserror",
  "tokio",
