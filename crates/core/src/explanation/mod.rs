@@ -8,8 +8,7 @@ use rust_decimal::Decimal;
 use std::collections::HashMap;
 
 use crate::domain::explanation::*;
-use crate::domain::quote::{Quote, QuoteId, QuoteLine, QuoteLineId};
-use crate::domain::product::ProductId;
+use crate::domain::quote::{QuoteId, QuoteLineId};
 
 /// Error types for explanation operations
 #[derive(Clone, Debug, PartialEq)]
@@ -20,6 +19,26 @@ pub enum ExplanationError {
     QuoteNotFound { quote_id: QuoteId },
     VersionMismatch { expected: i32, actual: i32 },
     EvidenceGatheringFailed { reason: String },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum GuardrailedExplanation {
+    Allowed {
+        request_id: ExplanationRequestId,
+        response: ExplanationResponse,
+        audit_events: Vec<ExplanationAuditEvent>,
+    },
+    Denied {
+        request_id: ExplanationRequestId,
+        user_message: String,
+        audit_events: Vec<ExplanationAuditEvent>,
+    },
+    Degraded {
+        request_id: ExplanationRequestId,
+        response: ExplanationResponse,
+        user_message: String,
+        audit_events: Vec<ExplanationAuditEvent>,
+    },
 }
 
 impl std::fmt::Display for ExplanationError {
@@ -49,12 +68,20 @@ impl std::fmt::Display for ExplanationError {
 
 /// Trait for pricing snapshot repository (abstract for testability)
 pub trait PricingSnapshotProvider: Send + Sync {
-    fn get_snapshot(&self, quote_id: &QuoteId, version: i32) -> Result<PricingSnapshot, ExplanationError>;
+    fn get_snapshot(
+        &self,
+        quote_id: &QuoteId,
+        version: i32,
+    ) -> Result<PricingSnapshot, ExplanationError>;
 }
 
 /// Trait for policy evaluation repository
 pub trait PolicyEvaluationProvider: Send + Sync {
-    fn get_evaluation(&self, quote_id: &QuoteId, version: i32) -> Result<PolicyEvaluation, ExplanationError>;
+    fn get_evaluation(
+        &self,
+        quote_id: &QuoteId,
+        version: i32,
+    ) -> Result<PolicyEvaluation, ExplanationError>;
 }
 
 /// Pricing snapshot data (from CPQ pricing engine)
@@ -127,6 +154,17 @@ pub struct AppliedRule {
     pub rule_description: String,
 }
 
+/// Format a decimal value as currency string
+fn format_currency_value(value: &Decimal, currency: &str) -> String {
+    let symbol = match currency {
+        "USD" => "$",
+        "EUR" => "€",
+        "GBP" => "£",
+        _ => currency,
+    };
+    format!("{}{:.2}", symbol, value)
+}
+
 /// Deterministic explanation engine
 pub struct ExplanationEngine<P, O> {
     pricing_provider: P,
@@ -136,14 +174,15 @@ pub struct ExplanationEngine<P, O> {
 impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<P, O> {
     /// Create a new explanation engine
     pub fn new(pricing_provider: P, policy_provider: O) -> Self {
-        Self {
-            pricing_provider,
-            policy_provider,
-        }
+        Self { pricing_provider, policy_provider }
     }
 
     /// Explain the total amount for a quote
-    pub fn explain_total(&self, quote_id: &QuoteId, version: i32) -> Result<ExplanationResponse, ExplanationError> {
+    pub fn explain_total(
+        &self,
+        quote_id: &QuoteId,
+        version: i32,
+    ) -> Result<ExplanationResponse, ExplanationError> {
         let pricing = self.pricing_provider.get_snapshot(quote_id, version)?;
         let policy = self.policy_provider.get_evaluation(quote_id, version)?;
 
@@ -175,14 +214,9 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
         let pricing = self.pricing_provider.get_snapshot(quote_id, version)?;
         let policy = self.policy_provider.get_evaluation(quote_id, version)?;
 
-        let line = pricing
-            .line_items
-            .iter()
-            .find(|l| l.line_id == line_id.0)
-            .ok_or_else(|| ExplanationError::InvalidLineId {
-                quote_id: quote_id.clone(),
-                line_id: line_id.clone(),
-            })?;
+        let line = pricing.line_items.iter().find(|l| l.line_id == line_id.0).ok_or_else(|| {
+            ExplanationError::InvalidLineId { quote_id: quote_id.clone(), line_id: line_id.clone() }
+        })?;
 
         let arithmetic_chain = self.build_line_arithmetic_chain(line);
         let policy_evidence = self.build_policy_evidence(&policy);
@@ -203,7 +237,11 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
     }
 
     /// Explain policy decisions for a quote
-    pub fn explain_policy(&self, quote_id: &QuoteId, version: i32) -> Result<ExplanationResponse, ExplanationError> {
+    pub fn explain_policy(
+        &self,
+        quote_id: &QuoteId,
+        version: i32,
+    ) -> Result<ExplanationResponse, ExplanationError> {
         let pricing = self.pricing_provider.get_snapshot(quote_id, version)?;
         let policy = self.policy_provider.get_evaluation(quote_id, version)?;
 
@@ -223,6 +261,223 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
             source_references,
             user_summary,
         })
+    }
+
+    /// Explain with deterministic guardrail enforcement and explicit audit trail.
+    pub fn explain_with_guardrails(
+        &self,
+        request: CreateExplanationRequest,
+    ) -> GuardrailedExplanation {
+        let request_id = ExplanationRequestId(format!("exp-{}", Utc::now().timestamp_millis()));
+        let mut audit_events = vec![self.audit_event(
+            &request_id,
+            ExplanationEventType::RequestReceived,
+            "{}".to_string(),
+            &request.actor_id,
+            &request.correlation_id,
+        )];
+
+        if request.quote_version < 1 {
+            let message =
+                "I can't explain this amount because the quote version is invalid. Refresh the quote and try again."
+                    .to_string();
+            audit_events.push(self.audit_event(
+                &request_id,
+                ExplanationEventType::ErrorOccurred,
+                Self::guardrail_payload("denied", "invalid_quote_version", &message),
+                &request.actor_id,
+                &request.correlation_id,
+            ));
+            return GuardrailedExplanation::Denied {
+                request_id,
+                user_message: message,
+                audit_events,
+            };
+        }
+
+        let pricing =
+            match self.pricing_provider.get_snapshot(&request.quote_id, request.quote_version) {
+                Ok(snapshot) => snapshot,
+                Err(error) => {
+                    let message = Self::user_safe_message_for_error(&error);
+                    audit_events.push(self.audit_event(
+                        &request_id,
+                        ExplanationEventType::ErrorOccurred,
+                        Self::guardrail_payload("denied", "missing_pricing_snapshot", &message),
+                        &request.actor_id,
+                        &request.correlation_id,
+                    ));
+                    return GuardrailedExplanation::Denied {
+                        request_id,
+                        user_message: message,
+                        audit_events,
+                    };
+                }
+            };
+
+        if pricing.version != request.quote_version {
+            let message =
+                "I can't explain this amount because the pricing snapshot version does not match the request."
+                    .to_string();
+            audit_events.push(self.audit_event(
+                &request_id,
+                ExplanationEventType::ErrorOccurred,
+                Self::guardrail_payload("denied", "pricing_version_mismatch", &message),
+                &request.actor_id,
+                &request.correlation_id,
+            ));
+            return GuardrailedExplanation::Denied {
+                request_id,
+                user_message: message,
+                audit_events,
+            };
+        }
+
+        let policy =
+            match self.policy_provider.get_evaluation(&request.quote_id, request.quote_version) {
+                Ok(evaluation) => Some(evaluation),
+                Err(ExplanationError::MissingPolicyEvaluation { .. }) => None,
+                Err(error) => {
+                    let message = Self::user_safe_message_for_error(&error);
+                    audit_events.push(self.audit_event(
+                        &request_id,
+                        ExplanationEventType::ErrorOccurred,
+                        Self::guardrail_payload("denied", "policy_evidence_error", &message),
+                        &request.actor_id,
+                        &request.correlation_id,
+                    ));
+                    return GuardrailedExplanation::Denied {
+                        request_id,
+                        user_message: message,
+                        audit_events,
+                    };
+                }
+            };
+
+        let (mut response, degraded_message) = match (&request.request_type, policy.as_ref()) {
+            (ExplanationRequestType::Total, Some(_)) => {
+                match self.explain_total(&request.quote_id, request.quote_version) {
+                    Ok(resp) => (resp, None),
+                    Err(error) => {
+                        let message = Self::user_safe_message_for_error(&error);
+                        audit_events.push(self.audit_event(
+                            &request_id,
+                            ExplanationEventType::ErrorOccurred,
+                            Self::guardrail_payload("denied", "explain_total_failed", &message),
+                            &request.actor_id,
+                            &request.correlation_id,
+                        ));
+                        return GuardrailedExplanation::Denied {
+                            request_id,
+                            user_message: message,
+                            audit_events,
+                        };
+                    }
+                }
+            }
+            (ExplanationRequestType::Line, Some(_)) => {
+                let Some(line_id) = request.line_id.as_ref() else {
+                    let message =
+                        "I can't explain that line item yet. Select a specific quote line and try again."
+                            .to_string();
+                    audit_events.push(self.audit_event(
+                        &request_id,
+                        ExplanationEventType::ErrorOccurred,
+                        Self::guardrail_payload("denied", "missing_line_id", &message),
+                        &request.actor_id,
+                        &request.correlation_id,
+                    ));
+                    return GuardrailedExplanation::Denied {
+                        request_id,
+                        user_message: message,
+                        audit_events,
+                    };
+                };
+
+                match self.explain_line(&request.quote_id, line_id, request.quote_version) {
+                    Ok(resp) => (resp, None),
+                    Err(error) => {
+                        let message = Self::user_safe_message_for_error(&error);
+                        audit_events.push(self.audit_event(
+                            &request_id,
+                            ExplanationEventType::ErrorOccurred,
+                            Self::guardrail_payload("denied", "explain_line_failed", &message),
+                            &request.actor_id,
+                            &request.correlation_id,
+                        ));
+                        return GuardrailedExplanation::Denied {
+                            request_id,
+                            user_message: message,
+                            audit_events,
+                        };
+                    }
+                }
+            }
+            (ExplanationRequestType::Policy, Some(_)) => {
+                match self.explain_policy(&request.quote_id, request.quote_version) {
+                    Ok(resp) => (resp, None),
+                    Err(error) => {
+                        let message = Self::user_safe_message_for_error(&error);
+                        audit_events.push(self.audit_event(
+                            &request_id,
+                            ExplanationEventType::ErrorOccurred,
+                            Self::guardrail_payload("denied", "explain_policy_failed", &message),
+                            &request.actor_id,
+                            &request.correlation_id,
+                        ));
+                        return GuardrailedExplanation::Denied {
+                            request_id,
+                            user_message: message,
+                            audit_events,
+                        };
+                    }
+                }
+            }
+            (_, None) => {
+                let degraded_message = "Policy evidence is temporarily unavailable. Showing deterministic pricing breakdown only."
+                    .to_string();
+                let response = self.fallback_pricing_only_response(&request_id, &request, &pricing);
+                (response, Some(degraded_message))
+            }
+        };
+
+        response.request_id = request_id.clone();
+
+        audit_events.push(self.audit_event(
+            &request_id,
+            if degraded_message.is_some() {
+                ExplanationEventType::EvidenceMissing
+            } else {
+                ExplanationEventType::EvidenceGathered
+            },
+            "{}".to_string(),
+            &request.actor_id,
+            &request.correlation_id,
+        ));
+        audit_events.push(self.audit_event(
+            &request_id,
+            ExplanationEventType::ExplanationGenerated,
+            "{}".to_string(),
+            &request.actor_id,
+            &request.correlation_id,
+        ));
+        audit_events.push(self.audit_event(
+            &request_id,
+            ExplanationEventType::ExplanationDelivered,
+            "{}".to_string(),
+            &request.actor_id,
+            &request.correlation_id,
+        ));
+
+        match degraded_message {
+            Some(user_message) => GuardrailedExplanation::Degraded {
+                request_id,
+                response,
+                user_message,
+                audit_events,
+            },
+            None => GuardrailedExplanation::Allowed { request_id, response, audit_events },
+        }
     }
 
     /// Build arithmetic chain for quote total
@@ -308,7 +563,10 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
             .into_iter()
             .collect(),
             result: base_price,
-            description: format!("Base price for {} ({} × {})", line.product_name, line.unit_price, line.quantity),
+            description: format!(
+                "Base price for {} ({} × {})",
+                line.product_name, line.unit_price, line.quantity
+            ),
         });
 
         // Step 2: Apply discount if any
@@ -333,7 +591,9 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
         steps.push(ArithmeticStep {
             step_order: if line.discount_percent > Decimal::ZERO { 3 } else { 2 },
             operation: "line_total".to_string(),
-            input_values: vec![("line_subtotal".to_string(), line.line_subtotal)].into_iter().collect(),
+            input_values: vec![("line_subtotal".to_string(), line.line_subtotal)]
+                .into_iter()
+                .collect(),
             result: line.line_subtotal,
             description: format!("{} line total", line.product_name),
         });
@@ -400,19 +660,25 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
     }
 
     /// Generate human-readable summary for total explanation
-    fn generate_total_summary(&self, pricing: &PricingSnapshot, policy: &PolicyEvaluation) -> String {
+    fn generate_total_summary(
+        &self,
+        pricing: &PricingSnapshot,
+        policy: &PolicyEvaluation,
+    ) -> String {
         let violation_count = policy.violations.iter().filter(|v| v.severity == "blocking").count();
         let warning_count = policy.violations.iter().filter(|v| v.severity == "warning").count();
 
         let mut summary = format!(
             "Quote total of {} {} calculated from {} line item(s). ",
-            pricing.total, pricing.currency, pricing.line_items.len()
+            format_currency_value(&pricing.total, &pricing.currency),
+            pricing.currency,
+            pricing.line_items.len()
         );
 
         if pricing.discount_total > Decimal::ZERO {
             summary.push_str(&format!(
                 "Total discounts applied: {}. ",
-                pricing.discount_total
+                format_currency_value(&pricing.discount_total, &pricing.currency)
             ));
         }
 
@@ -422,24 +688,22 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
                 violation_count
             ));
         } else if warning_count > 0 {
-            summary.push_str(&format!(
-                "⚡ {} policy warning(s) noted. ",
-                warning_count
-            ));
+            summary.push_str(&format!("⚡ {} policy warning(s) noted. ", warning_count));
         } else {
             summary.push_str("✅ All policy checks passed. ");
         }
 
-        summary.push_str(&format!(
-            "Policy evaluation: {}.",
-            policy.overall_status.to_uppercase()
-        ));
+        summary.push_str(&format!("Policy evaluation: {}.", policy.overall_status.to_uppercase()));
 
         summary
     }
 
     /// Generate human-readable summary for line explanation
-    fn generate_line_summary(&self, line: &PricingLineSnapshot, policy: &PolicyEvaluation) -> String {
+    fn generate_line_summary(
+        &self,
+        line: &PricingLineSnapshot,
+        policy: &PolicyEvaluation,
+    ) -> String {
         let mut summary = format!(
             "{} ({}): {} × {} = {}. ",
             line.product_name, line.product_id, line.quantity, line.unit_price, line.line_subtotal
@@ -453,11 +717,8 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
         }
 
         // Check for policy violations related to this product
-        let product_violations: Vec<_> = policy
-            .violations
-            .iter()
-            .filter(|v| v.message.contains(&line.product_id))
-            .collect();
+        let product_violations: Vec<_> =
+            policy.violations.iter().filter(|v| v.message.contains(&line.product_id)).collect();
 
         if !product_violations.is_empty() {
             summary.push_str(&format!(
@@ -475,28 +736,16 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
         let warnings = policy.violations.iter().filter(|v| v.severity == "warning").count();
         let rules = policy.applied_rules.len();
 
-        let mut summary = format!(
-            "Policy evaluation: {}. ",
-            policy.overall_status.to_uppercase()
-        );
+        let mut summary = format!("Policy evaluation: {}. ", policy.overall_status.to_uppercase());
 
-        summary.push_str(&format!(
-            "{} rule(s) evaluated. ",
-            rules
-        ));
+        summary.push_str(&format!("{} rule(s) evaluated. ", rules));
 
         if blocking > 0 {
-            summary.push_str(&format!(
-                "🚫 {} blocking violation(s) must be resolved. ",
-                blocking
-            ));
+            summary.push_str(&format!("🚫 {} blocking violation(s) must be resolved. ", blocking));
         }
 
         if warnings > 0 {
-            summary.push_str(&format!(
-                "⚡ {} warning(s) noted. ",
-                warnings
-            ));
+            summary.push_str(&format!("⚡ {} warning(s) noted. ", warnings));
         }
 
         if blocking == 0 && warnings == 0 {
@@ -512,11 +761,15 @@ pub struct InMemoryPricingProvider {
     snapshots: HashMap<(String, i32), PricingSnapshot>,
 }
 
+impl Default for InMemoryPricingProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryPricingProvider {
     pub fn new() -> Self {
-        Self {
-            snapshots: HashMap::new(),
-        }
+        Self { snapshots: HashMap::new() }
     }
 
     pub fn add_snapshot(&mut self, quote_id: &QuoteId, version: i32, snapshot: PricingSnapshot) {
@@ -525,13 +778,15 @@ impl InMemoryPricingProvider {
 }
 
 impl PricingSnapshotProvider for InMemoryPricingProvider {
-    fn get_snapshot(&self, quote_id: &QuoteId, version: i32) -> Result<PricingSnapshot, ExplanationError> {
+    fn get_snapshot(
+        &self,
+        quote_id: &QuoteId,
+        version: i32,
+    ) -> Result<PricingSnapshot, ExplanationError> {
         self.snapshots
             .get(&(quote_id.0.clone(), version))
             .cloned()
-            .ok_or_else(|| ExplanationError::MissingPricingSnapshot {
-                quote_id: quote_id.clone(),
-            })
+            .ok_or_else(|| ExplanationError::MissingPricingSnapshot { quote_id: quote_id.clone() })
     }
 }
 
@@ -540,26 +795,37 @@ pub struct InMemoryPolicyProvider {
     evaluations: HashMap<(String, i32), PolicyEvaluation>,
 }
 
+impl Default for InMemoryPolicyProvider {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl InMemoryPolicyProvider {
     pub fn new() -> Self {
-        Self {
-            evaluations: HashMap::new(),
-        }
+        Self { evaluations: HashMap::new() }
     }
 
-    pub fn add_evaluation(&mut self, quote_id: &QuoteId, version: i32, evaluation: PolicyEvaluation) {
+    pub fn add_evaluation(
+        &mut self,
+        quote_id: &QuoteId,
+        version: i32,
+        evaluation: PolicyEvaluation,
+    ) {
         self.evaluations.insert((quote_id.0.clone(), version), evaluation);
     }
 }
 
 impl PolicyEvaluationProvider for InMemoryPolicyProvider {
-    fn get_evaluation(&self, quote_id: &QuoteId, version: i32) -> Result<PolicyEvaluation, ExplanationError> {
+    fn get_evaluation(
+        &self,
+        quote_id: &QuoteId,
+        version: i32,
+    ) -> Result<PolicyEvaluation, ExplanationError> {
         self.evaluations
             .get(&(quote_id.0.clone(), version))
             .cloned()
-            .ok_or_else(|| ExplanationError::MissingPolicyEvaluation {
-                quote_id: quote_id.clone(),
-            })
+            .ok_or_else(|| ExplanationError::MissingPolicyEvaluation { quote_id: quote_id.clone() })
     }
 }
 
@@ -579,7 +845,7 @@ mod tests {
         PricingSnapshot {
             quote_id: quote_id.clone(),
             version: 1,
-            subtotal: Decimal::new(20000, 2), // $200.00
+            subtotal: Decimal::new(20000, 2),      // $200.00
             discount_total: Decimal::new(2000, 2), // $20.00
             tax_total: Decimal::ZERO,
             total: Decimal::new(18000, 2), // $180.00
@@ -617,14 +883,12 @@ mod tests {
             version: 1,
             overall_status: "approved".to_string(),
             violations: vec![],
-            applied_rules: vec![
-                AppliedRule {
-                    rule_id: "rule-1".to_string(),
-                    rule_name: "Discount Cap Check".to_string(),
-                    rule_section: "pricing.policy.discount".to_string(),
-                    rule_description: "Verify discount within allowed range".to_string(),
-                },
-            ],
+            applied_rules: vec![AppliedRule {
+                rule_id: "rule-1".to_string(),
+                rule_name: "Discount Cap Check".to_string(),
+                rule_section: "pricing.policy.discount".to_string(),
+                rule_description: "Verify discount within allowed range".to_string(),
+            }],
             evaluated_at: Utc::now().to_rfc3339(),
         }
     }
@@ -685,7 +949,7 @@ mod tests {
 
         let engine = ExplanationEngine::new(pricing_provider, policy_provider);
         let invalid_line_id = create_test_line_id("nonexistent");
-        
+
         let result = engine.explain_line(&quote_id, &invalid_line_id, 1);
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ExplanationError::InvalidLineId { .. }));
@@ -743,10 +1007,10 @@ mod tests {
 
         // Should have: sum lines, apply discount, final total
         assert!(explanation.arithmetic_chain.len() >= 2);
-        
+
         // Check first step is sum
         assert_eq!(explanation.arithmetic_chain[0].operation, "sum");
-        
+
         // Check last step is total
         let last = explanation.arithmetic_chain.last().unwrap();
         assert_eq!(last.operation, "total");
@@ -756,7 +1020,7 @@ mod tests {
     fn policy_violations_are_included_in_evidence() {
         let quote_id = create_test_quote_id("Q-2026-007");
         let pricing = create_test_pricing_snapshot(&quote_id);
-        
+
         let mut policy = create_test_policy_evaluation(&quote_id);
         policy.violations.push(PolicyViolation {
             policy_id: "pol-1".to_string(),
@@ -796,9 +1060,11 @@ mod tests {
         let engine = ExplanationEngine::new(pricing_provider, policy_provider);
         let explanation = engine.explain_total(&quote_id, 1).expect("should succeed");
 
-        let has_pricing_ref = explanation.source_references.iter().any(|r| r.source_type == "pricing_snapshot");
-        let has_policy_ref = explanation.source_references.iter().any(|r| r.source_type == "policy_evaluation");
-        
+        let has_pricing_ref =
+            explanation.source_references.iter().any(|r| r.source_type == "pricing_snapshot");
+        let has_policy_ref =
+            explanation.source_references.iter().any(|r| r.source_type == "policy_evaluation");
+
         assert!(has_pricing_ref, "should reference pricing snapshot");
         assert!(has_policy_ref, "should reference policy evaluation");
     }

@@ -79,6 +79,29 @@ Define scope, KPI contract, deterministic guardrails, and interface boundaries f
 | Missing policy evidence for legacy records | Medium | Medium | compatibility reader + migration/backfill checklist | Runtime owner |
 | Latency regressions under large trace payloads | Medium | Medium | bounded sections + pre-aggregated evidence view | Platform owner |
 
+## Task 2 Persistence and Migration Contract
+### Schema Additions (`0013_explain_any_number`)
+- `explanation_requests`: request-level persisted context (`quote_id`, optional `line_id`, thread,
+  actor, correlation id, version, lifecycle status, latency/error fields).
+- `explanation_evidence`: deterministic evidence references and payload records keyed by request.
+- `explanation_audit`: append-only event trail for request lifecycle and failure paths.
+- `explanation_response_cache`: cached deterministic summaries for repeated explain prompts.
+- `explanation_request_stats`: singleton operational aggregate table updated via request triggers.
+
+### Version and Audit Semantics
+- `quote_version` is required on all explanation requests to bind each explain result to a specific
+  quote snapshot state.
+- Request status transitions (`pending` -> terminal state) are persisted with `completed_at` and
+  `latency_ms` to support deterministic SLA and error-rate measurement.
+- Audit rows are append-only and keyed by correlation id + request id to preserve replayable trace.
+
+### Migration Behavior and Rollback
+- Migration is additive and does not mutate pre-existing CPQ tables.
+- EXP table names are collision-safe relative to pre-existing policy explanation tables.
+- Rollback (`0013_explain_any_number.down.sql`) removes only EXP explanation artifacts in reverse
+  dependency order (triggers -> stats/cache -> audit/evidence -> requests).
+- Up/down/up behavior is validated by db migration signature tests.
+
 ## Guardrail Checklist (Pre-implementation Exit)
 - Scope and non-goals approved for Wave 1 execution.
 - KPI baseline, target, owner, and query definitions captured.
