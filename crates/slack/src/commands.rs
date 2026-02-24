@@ -1107,9 +1107,22 @@ pub(crate) fn action_value_pairs(raw_value: Option<&str>) -> Option<HashMap<Stri
             continue;
         }
 
-        let (raw_key, encoded_value) = segment.split_once('=')?;
-        let decoded = decode_action_value_component(encoded_value.trim())?;
-        pairs.insert(raw_key.trim().to_ascii_lowercase(), decoded);
+        let (raw_key, encoded_value) = match segment.split_once('=') {
+            Some(pair) => pair,
+            None => continue,
+        };
+
+        let decoded = match decode_action_value_component(encoded_value.trim()) {
+            Some(value) => value,
+            None => continue,
+        };
+
+        let key = raw_key.trim();
+        if key.is_empty() {
+            continue;
+        }
+
+        pairs.insert(key.to_ascii_lowercase(), decoded);
     }
     Some(pairs)
 }
@@ -1657,6 +1670,16 @@ mod tests {
 
         let fallback = action_quote_id(Some("task=abc%3Bx%3Dy"), Some("Q-2026-5555"));
         assert_eq!(fallback, "Q-2026-5555");
+    }
+
+    #[test]
+    fn action_value_parsing_tolerates_invalid_segments() {
+        let encoded = "malformed;quote=Q-2026-7777;task=task%3Aretry%3D1;bad=%zz";
+        let pairs = action_value_pairs(Some(encoded)).expect("pairs parsed");
+        assert_eq!(pairs.get("quote").expect("quote"), "Q-2026-7777");
+        assert_eq!(pairs.get("task").expect("task"), "task:retry=1");
+        assert!(!pairs.contains_key("malformed"));
+        assert!(!pairs.contains_key("bad"));
     }
 
     #[test]
