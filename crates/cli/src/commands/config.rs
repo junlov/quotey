@@ -22,7 +22,7 @@ pub fn run() -> String {
         &config.database.url,
         field_source(
             "database.url",
-            Some("QUOTEY_DATABASE_URL"),
+            &["QUOTEY_DATABASE_URL"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -32,7 +32,7 @@ pub fn run() -> String {
         &config.database.max_connections.to_string(),
         field_source(
             "database.max_connections",
-            Some("QUOTEY_DATABASE_MAX_CONNECTIONS"),
+            &["QUOTEY_DATABASE_MAX_CONNECTIONS"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -42,7 +42,7 @@ pub fn run() -> String {
         &config.database.timeout_secs.to_string(),
         field_source(
             "database.timeout_secs",
-            Some("QUOTEY_DATABASE_TIMEOUT_SECS"),
+            &["QUOTEY_DATABASE_TIMEOUT_SECS"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -55,7 +55,7 @@ pub fn run() -> String {
         &app_token,
         field_source(
             "slack.app_token",
-            Some("QUOTEY_SLACK_APP_TOKEN"),
+            &["QUOTEY_SLACK_APP_TOKEN"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -65,7 +65,7 @@ pub fn run() -> String {
         &bot_token,
         field_source(
             "slack.bot_token",
-            Some("QUOTEY_SLACK_BOT_TOKEN"),
+            &["QUOTEY_SLACK_BOT_TOKEN"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -76,7 +76,7 @@ pub fn run() -> String {
         &format!("{:?}", config.llm.provider),
         field_source(
             "llm.provider",
-            Some("QUOTEY_LLM_PROVIDER"),
+            &["QUOTEY_LLM_PROVIDER"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -86,7 +86,7 @@ pub fn run() -> String {
         &config.llm.model,
         field_source(
             "llm.model",
-            Some("QUOTEY_LLM_MODEL"),
+            &["QUOTEY_LLM_MODEL"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -96,7 +96,7 @@ pub fn run() -> String {
         config.llm.base_url.as_deref().unwrap_or("<unset>"),
         field_source(
             "llm.base_url",
-            Some("QUOTEY_LLM_BASE_URL"),
+            &["QUOTEY_LLM_BASE_URL"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -108,7 +108,7 @@ pub fn run() -> String {
         llm_api_key,
         field_source(
             "llm.api_key",
-            Some("QUOTEY_LLM_API_KEY"),
+            &["QUOTEY_LLM_API_KEY"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -119,7 +119,7 @@ pub fn run() -> String {
         &config.server.bind_address,
         field_source(
             "server.bind_address",
-            Some("QUOTEY_SERVER_BIND_ADDRESS"),
+            &["QUOTEY_SERVER_BIND_ADDRESS"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -129,7 +129,7 @@ pub fn run() -> String {
         &config.server.health_check_port.to_string(),
         field_source(
             "server.health_check_port",
-            Some("QUOTEY_SERVER_HEALTH_CHECK_PORT"),
+            &["QUOTEY_SERVER_HEALTH_CHECK_PORT"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -140,7 +140,7 @@ pub fn run() -> String {
         &config.logging.level,
         field_source(
             "logging.level",
-            Some("QUOTEY_LOGGING_LEVEL"),
+            &["QUOTEY_LOGGING_LEVEL", "QUOTEY_LOG_LEVEL"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -150,7 +150,7 @@ pub fn run() -> String {
         &format!("{:?}", config.logging.format),
         field_source(
             "logging.format",
-            Some("QUOTEY_LOGGING_FORMAT"),
+            &["QUOTEY_LOGGING_FORMAT", "QUOTEY_LOG_FORMAT"],
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -181,13 +181,15 @@ fn load_config_file_doc(path: Option<&Path>) -> Option<Value> {
 
 fn field_source(
     key_path: &str,
-    env_key: Option<&str>,
+    env_keys: &[&str],
     config_file_doc: Option<&Value>,
     config_file_path: Option<&Path>,
 ) -> String {
-    if let Some(env_key) = env_key {
-        if env::var_os(env_key).is_some() {
-            return format!("env ({env_key})");
+    for env_key in env_keys {
+        if let Ok(value) = env::var(env_key) {
+            if !value.trim().is_empty() {
+                return format!("env ({env_key})");
+            }
         }
     }
 
@@ -229,4 +231,111 @@ fn redact_token(token: &str) -> String {
     }
 
     "<redacted>".to_string()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::env;
+    use std::sync::{Mutex, OnceLock};
+
+    #[test]
+    fn logs_level_prefers_env_over_file_and_default() {
+        let output = run_with_env(
+            &[
+                ("QUOTEY_LOGGING_LEVEL", "warn"),
+                ("QUOTEY_DATABASE_URL", "sqlite::memory:"),
+                ("QUOTEY_SLACK_APP_TOKEN", "xapp-test"),
+                ("QUOTEY_SLACK_BOT_TOKEN", "xoxb-test"),
+            ],
+            run,
+        );
+
+        assert!(output.contains("logging.level = warn (source: env (QUOTEY_LOGGING_LEVEL))"));
+    }
+
+    #[test]
+    fn logs_level_reports_alias() {
+        let output = run_with_env(
+            &[
+                ("QUOTEY_LOG_LEVEL", "warn"),
+                ("QUOTEY_DATABASE_URL", "sqlite::memory:"),
+                ("QUOTEY_SLACK_APP_TOKEN", "xapp-test"),
+                ("QUOTEY_SLACK_BOT_TOKEN", "xoxb-test"),
+            ],
+            run,
+        );
+
+        assert!(
+            output.contains("logging.level = warn (source: env (QUOTEY_LOG_LEVEL))"),
+            "expected alias source attribution"
+        );
+    }
+
+    #[test]
+    fn empty_log_level_env_is_not_reported_as_source() {
+        let output = run_with_env(
+            &[
+                ("QUOTEY_LOG_LEVEL", "   "),
+                ("QUOTEY_LOGGING_LEVEL", ""),
+                ("QUOTEY_DATABASE_URL", "sqlite::memory:"),
+                ("QUOTEY_SLACK_APP_TOKEN", "xapp-test"),
+                ("QUOTEY_SLACK_BOT_TOKEN", "xoxb-test"),
+            ],
+            run,
+        );
+
+        assert!(output.contains("logging.level = info (source: default)"));
+    }
+
+    fn run_with_env(vars: &[(&str, &str)], test_fn: impl FnOnce() -> String) -> String {
+        static ENV_LOCK: OnceLock<Mutex<()>> = OnceLock::new();
+        let _guard = ENV_LOCK
+            .get_or_init(|| Mutex::new(()))
+            .lock()
+            .expect("env mutex should not be poisoned");
+
+        let keys = [
+            "QUOTEY_DATABASE_URL",
+            "QUOTEY_DATABASE_MAX_CONNECTIONS",
+            "QUOTEY_DATABASE_TIMEOUT_SECS",
+            "QUOTEY_SLACK_APP_TOKEN",
+            "QUOTEY_SLACK_BOT_TOKEN",
+            "QUOTEY_LLM_PROVIDER",
+            "QUOTEY_LLM_API_KEY",
+            "QUOTEY_LLM_BASE_URL",
+            "QUOTEY_LLM_MODEL",
+            "QUOTEY_LLM_TIMEOUT_SECS",
+            "QUOTEY_LLM_MAX_RETRIES",
+            "QUOTEY_SERVER_BIND_ADDRESS",
+            "QUOTEY_SERVER_HEALTH_CHECK_PORT",
+            "QUOTEY_SERVER_GRACEFUL_SHUTDOWN_SECS",
+            "QUOTEY_LOGGING_LEVEL",
+            "QUOTEY_LOGGING_FORMAT",
+            "QUOTEY_LOG_LEVEL",
+            "QUOTEY_LOG_FORMAT",
+        ];
+
+        let previous_values: Vec<(&str, Option<String>)> =
+            keys.iter().map(|key| (*key, env::var(key).ok())).collect();
+
+        for key in &keys {
+            env::remove_var(key);
+        }
+        for (key, value) in vars {
+            env::set_var(key, value);
+        }
+
+        let result = test_fn();
+
+        for (key, value) in previous_values {
+            if let Some(value) = value {
+                env::set_var(key, value);
+            } else {
+                env::remove_var(key);
+            }
+        }
+
+        result
+    }
 }
