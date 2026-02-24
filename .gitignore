@@ -5,7 +5,12 @@ Thumbs.db
 *.swp
 *.swo
 .idea/
-.vscode/
+# VS Code - ignore personal settings, allow shared workspace settings
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
 *.sublime-*
 
 # Environment/secrets (never commit these)
