@@ -7,6 +7,7 @@ use quotey_core::chrono::{DateTime, Utc};
 use quotey_core::domain::explanation::{
     CreateExplanationRequest, EvidenceType, ExplanationAuditEvent, ExplanationEventType,
     ExplanationEvidence, ExplanationEvidenceId, ExplanationRequest, ExplanationRequestId,
+    ExplanationRequestType,
     ExplanationStats, ExplanationStatus,
 };
 use quotey_core::domain::quote::{QuoteId, QuoteLineId};
@@ -346,7 +347,7 @@ impl ExplanationRepository for SqlExplanationRepository {
             SELECT
                 total_requests, success_count, error_count, missing_evidence_count,
                 avg_latency_ms, p95_latency_ms, last_updated_at
-            FROM explanation_stats
+            FROM explanation_request_stats
             WHERE id = 1
             "#,
         )
@@ -449,4 +450,215 @@ fn parse_timestamp(column: &str, value: String) -> Result<DateTime<Utc>, Reposit
     DateTime::parse_from_rfc3339(&value)
         .map(|ts| ts.with_timezone(&Utc))
         .map_err(|e| RepositoryError::Decode(format!("invalid timestamp in `{column}`: {e}")))
+}
+
+#[cfg(test)]
+mod tests {
+    use quotey_core::domain::explanation::{
+        CreateExplanationRequest, EvidenceType, ExplanationEventType, ExplanationRequestType,
+        ExplanationStatus,
+    };
+    use quotey_core::domain::quote::{QuoteId, QuoteLineId};
+
+    use super::{ExplanationRepository, SqlExplanationRepository};
+    use crate::{connect_with_settings, migrations, DbPool};
+
+    #[tokio::test]
+    async fn sql_explanation_repo_round_trip_for_request_lifecycle() {
+        let pool = setup_pool().await;
+        let quote_id = QuoteId("Q-EXP-REQ-001".to_string());
+        insert_quote(&pool, &quote_id).await;
+        let repo = SqlExplanationRepository::new(pool.clone());
+
+        let created = repo
+            .create_request(CreateExplanationRequest {
+                quote_id: quote_id.clone(),
+                line_id: Some(QuoteLineId("line-1".to_string())),
+                request_type: ExplanationRequestType::Line,
+                thread_id: "T-EXP-1".to_string(),
+                actor_id: "U-123".to_string(),
+                correlation_id: "corr-exp-req-1".to_string(),
+                quote_version: 2,
+            })
+            .await
+            .expect("create request");
+
+        let fetched = repo.get_request(&created.id).await.expect("get request");
+        assert_eq!(fetched, Some(created.clone()));
+
+        let listed = repo
+            .list_requests_for_quote(&quote_id, 10)
+            .await
+            .expect("list requests");
+        assert_eq!(listed.len(), 1);
+        assert_eq!(listed[0].id, created.id);
+
+        repo.update_request_status(
+            &created.id,
+            ExplanationStatus::Success,
+            None,
+            None,
+            Some(120),
+        )
+        .await
+        .expect("update status");
+
+        let updated = repo
+            .get_request(&created.id)
+            .await
+            .expect("get updated request")
+            .expect("request exists");
+        assert_eq!(updated.status, ExplanationStatus::Success);
+        assert_eq!(updated.latency_ms, Some(120));
+        assert!(updated.completed_at.is_some());
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sql_explanation_repo_round_trip_for_evidence_and_audit() {
+        let pool = setup_pool().await;
+        let quote_id = QuoteId("Q-EXP-REQ-002".to_string());
+        insert_quote(&pool, &quote_id).await;
+        let repo = SqlExplanationRepository::new(pool.clone());
+
+        let request = repo
+            .create_request(CreateExplanationRequest {
+                quote_id: quote_id.clone(),
+                line_id: None,
+                request_type: ExplanationRequestType::Total,
+                thread_id: "T-EXP-2".to_string(),
+                actor_id: "U-456".to_string(),
+                correlation_id: "corr-exp-req-2".to_string(),
+                quote_version: 1,
+            })
+            .await
+            .expect("create request");
+
+        repo.add_evidence(
+            &request.id,
+            EvidenceType::PricingTrace,
+            "step:subtotal".to_string(),
+            "{\"amount\":\"1000.00\"}".to_string(),
+            "pricing_snapshot:abc123:step_1".to_string(),
+            0,
+        )
+        .await
+        .expect("add evidence");
+
+        repo.add_evidence(
+            &request.id,
+            EvidenceType::PolicyEvaluation,
+            "policy:discount-cap".to_string(),
+            "{\"decision\":\"passed\"}".to_string(),
+            "policy_eval:def456".to_string(),
+            1,
+        )
+        .await
+        .expect("add evidence");
+
+        let evidence = repo
+            .get_evidence_for_request(&request.id)
+            .await
+            .expect("get evidence");
+        assert_eq!(evidence.len(), 2);
+        assert_eq!(evidence[0].display_order, 0);
+        assert_eq!(evidence[1].display_order, 1);
+
+        repo.append_audit_event(
+            &request.id,
+            ExplanationEventType::RequestReceived,
+            "{}".to_string(),
+            "user".to_string(),
+            "U-456".to_string(),
+            "corr-exp-req-2".to_string(),
+        )
+        .await
+        .expect("append audit received");
+
+        repo.append_audit_event(
+            &request.id,
+            ExplanationEventType::ExplanationDelivered,
+            "{\"status\":\"ok\"}".to_string(),
+            "system".to_string(),
+            "quotey-agent".to_string(),
+            "corr-exp-req-2".to_string(),
+        )
+        .await
+        .expect("append audit delivered");
+
+        let audit = repo.get_audit_trail(&request.id).await.expect("get audit");
+        assert_eq!(audit.len(), 2);
+        assert_eq!(audit[0].event_type, ExplanationEventType::RequestReceived);
+        assert_eq!(audit[1].event_type, ExplanationEventType::ExplanationDelivered);
+
+        pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sql_explanation_repo_stats_track_status_transitions() {
+        let pool = setup_pool().await;
+        let quote_id = QuoteId("Q-EXP-REQ-003".to_string());
+        insert_quote(&pool, &quote_id).await;
+        let repo = SqlExplanationRepository::new(pool.clone());
+
+        let request = repo
+            .create_request(CreateExplanationRequest {
+                quote_id: quote_id.clone(),
+                line_id: None,
+                request_type: ExplanationRequestType::Policy,
+                thread_id: "T-EXP-3".to_string(),
+                actor_id: "U-789".to_string(),
+                correlation_id: "corr-exp-req-3".to_string(),
+                quote_version: 1,
+            })
+            .await
+            .expect("create request");
+
+        let stats_after_create = repo.get_stats().await.expect("stats after create");
+        assert_eq!(stats_after_create.total_requests, 1);
+        assert_eq!(stats_after_create.success_count, 0);
+        assert_eq!(stats_after_create.error_count, 0);
+        assert_eq!(stats_after_create.missing_evidence_count, 0);
+
+        repo.update_request_status(
+            &request.id,
+            ExplanationStatus::MissingEvidence,
+            None,
+            Some("no deterministic trace snapshot found".to_string()),
+            Some(42),
+        )
+        .await
+        .expect("update to missing evidence");
+
+        let stats_after_update = repo.get_stats().await.expect("stats after update");
+        assert_eq!(stats_after_update.total_requests, 1);
+        assert_eq!(stats_after_update.success_count, 0);
+        assert_eq!(stats_after_update.error_count, 0);
+        assert_eq!(stats_after_update.missing_evidence_count, 1);
+
+        pool.close().await;
+    }
+
+    async fn setup_pool() -> DbPool {
+        let pool = connect_with_settings("sqlite::memory:?cache=shared", 1, 30)
+            .await
+            .expect("connect test pool");
+        migrations::run_pending(&pool).await.expect("run migrations");
+        pool
+    }
+
+    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId) {
+        let timestamp = "2026-02-24T00:00:00Z";
+        sqlx::query(
+            "INSERT INTO quote (id, status, currency, created_by, created_at, updated_at)
+             VALUES (?, 'draft', 'USD', 'U-EXP', ?, ?)",
+        )
+        .bind(&quote_id.0)
+        .bind(timestamp)
+        .bind(timestamp)
+        .execute(pool)
+        .await
+        .expect("insert quote");
+    }
 }

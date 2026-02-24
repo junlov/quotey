@@ -28,6 +28,11 @@ mod tests {
         "dialogue_turns",
         "policy_rules",
         "explanation_cache",
+        "explanation_requests",
+        "explanation_evidence",
+        "explanation_audit",
+        "explanation_response_cache",
+        "explanation_request_stats",
         "quote_sessions",
         "session_participants",
         "session_operations",
@@ -68,6 +73,17 @@ mod tests {
         "idx_policy_rules_rule_category",
         "idx_explanation_cache_rule_id",
         "idx_explanation_cache_quote_id",
+        "idx_explanation_requests_quote",
+        "idx_explanation_requests_thread",
+        "idx_explanation_requests_correlation",
+        "idx_explanation_requests_status",
+        "idx_explanation_evidence_request",
+        "idx_explanation_evidence_source",
+        "idx_explanation_audit_request",
+        "idx_explanation_audit_event_type",
+        "idx_explanation_audit_correlation",
+        "idx_explanation_response_cache_quote",
+        "idx_explanation_response_cache_expires",
         "idx_quote_sessions_quote_id",
         "idx_quote_sessions_status",
         "idx_session_participants_user_id",
@@ -188,6 +204,46 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("check explanation_cache table")
+        .get::<i64, _>("count");
+
+        let explanation_requests_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'explanation_requests'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check explanation_requests table")
+        .get::<i64, _>("count");
+
+        let explanation_evidence_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'explanation_evidence'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check explanation_evidence table")
+        .get::<i64, _>("count");
+
+        let explanation_audit_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'explanation_audit'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check explanation_audit table")
+        .get::<i64, _>("count");
+
+        let explanation_response_cache_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'explanation_response_cache'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check explanation_response_cache table")
+        .get::<i64, _>("count");
+
+        let explanation_request_stats_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'explanation_request_stats'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check explanation_request_stats table")
         .get::<i64, _>("count");
 
         let quote_sessions_count = sqlx::query(
@@ -353,6 +409,11 @@ mod tests {
         assert_eq!(dialogue_turns_count, 1);
         assert_eq!(policy_rules_count, 1);
         assert_eq!(explanation_cache_count, 1);
+        assert_eq!(explanation_requests_count, 1);
+        assert_eq!(explanation_evidence_count, 1);
+        assert_eq!(explanation_audit_count, 1);
+        assert_eq!(explanation_response_cache_count, 1);
+        assert_eq!(explanation_request_stats_count, 1);
         assert_eq!(quote_sessions_count, 1);
         assert_eq!(session_participants_count, 1);
         assert_eq!(session_operations_count, 1);

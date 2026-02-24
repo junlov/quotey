@@ -2,8 +2,10 @@ use std::cmp::Ordering;
 
 use rust_decimal::Decimal;
 use serde_json::{json, Value};
+use thiserror::Error;
 
-use crate::domain::quote::{Quote, QuoteLine};
+use crate::domain::quote::{Quote, QuoteLine, QuoteStatus};
+use crate::flows::states::{FlowAction, FlowState, TransitionOutcome};
 
 pub const FINGERPRINT_BITS: usize = 128;
 pub const FINGERPRINT_BYTES: usize = FINGERPRINT_BITS / 8;
@@ -183,6 +185,146 @@ impl SimilarityEngine {
     }
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct FingerprintSnapshot {
+    pub quote_id: String,
+    pub fingerprint_hash: String,
+    pub configuration_vector: Vec<u8>,
+    pub final_price: Decimal,
+    pub close_date: Option<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum ClosedDealOutcome {
+    Won,
+    Lost,
+}
+
+impl From<ClosedDealOutcome> for DealOutcomeStatus {
+    fn from(value: ClosedDealOutcome) -> Self {
+        match value {
+            ClosedDealOutcome::Won => DealOutcomeStatus::Won,
+            ClosedDealOutcome::Lost => DealOutcomeStatus::Lost,
+        }
+    }
+}
+
+pub trait DnaLifecycleStore {
+    fn upsert_fingerprint_snapshot(&mut self, snapshot: FingerprintSnapshot) -> Result<(), String>;
+    fn upsert_deal_outcome(&mut self, outcome: DealOutcomeMetadata) -> Result<(), String>;
+}
+
+#[derive(Clone, Debug, Error, PartialEq, Eq)]
+pub enum DnaLifecycleError {
+    #[error("failed to persist fingerprint snapshot for quote {quote_id}: {source}")]
+    PersistFingerprintSnapshot { quote_id: String, source: String },
+    #[error("failed to persist deal outcome for quote {quote_id}: {source}")]
+    PersistDealOutcome { quote_id: String, source: String },
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DealDnaLifecycleService {
+    generator: FingerprintGenerator,
+}
+
+impl DealDnaLifecycleService {
+    pub fn new(generator: FingerprintGenerator) -> Self {
+        Self { generator }
+    }
+
+    pub fn on_quote_closed<S: DnaLifecycleStore>(
+        &self,
+        quote: &Quote,
+        close_date: Option<String>,
+        store: &mut S,
+    ) -> Result<FingerprintSnapshot, DnaLifecycleError> {
+        let snapshot = self.snapshot_for(quote, close_date);
+        store
+            .upsert_fingerprint_snapshot(snapshot.clone())
+            .map_err(|source| DnaLifecycleError::PersistFingerprintSnapshot {
+                quote_id: snapshot.quote_id.clone(),
+                source,
+            })?;
+
+        Ok(snapshot)
+    }
+
+    pub fn on_quote_reopened_or_modified<S: DnaLifecycleStore>(
+        &self,
+        quote: &Quote,
+        store: &mut S,
+    ) -> Result<FingerprintSnapshot, DnaLifecycleError> {
+        self.on_quote_closed(quote, None, store)
+    }
+
+    pub fn record_closed_deal_outcome<S: DnaLifecycleStore>(
+        &self,
+        quote: &Quote,
+        outcome: ClosedDealOutcome,
+        close_date: String,
+        store: &mut S,
+    ) -> Result<DealOutcomeMetadata, DnaLifecycleError> {
+        let metadata = DealOutcomeMetadata {
+            quote_id: quote.id.0.clone(),
+            outcome_status: outcome.into(),
+            final_price: quote_total(quote),
+            close_date: Some(close_date),
+        };
+
+        store
+            .upsert_deal_outcome(metadata.clone())
+            .map_err(|source| DnaLifecycleError::PersistDealOutcome {
+                quote_id: metadata.quote_id.clone(),
+                source,
+            })?;
+
+        Ok(metadata)
+    }
+
+    pub fn backfill_historical_quotes<S: DnaLifecycleStore>(
+        &self,
+        quotes: &[Quote],
+        store: &mut S,
+    ) -> Result<usize, DnaLifecycleError> {
+        let mut processed = 0;
+        for quote in quotes {
+            if is_closed_quote_status(&quote.status) {
+                self.on_quote_closed(quote, None, store)?;
+                processed += 1;
+            }
+        }
+        Ok(processed)
+    }
+
+    pub fn on_flow_transition<S: DnaLifecycleStore>(
+        &self,
+        transition: &TransitionOutcome,
+        quote: &Quote,
+        store: &mut S,
+    ) -> Result<Option<FingerprintSnapshot>, DnaLifecycleError> {
+        if !transition.actions.contains(&FlowAction::GenerateConfigurationFingerprint) {
+            return Ok(None);
+        }
+
+        match transition.to {
+            FlowState::Finalized | FlowState::Sent => self.on_quote_closed(quote, None, store).map(Some),
+            FlowState::Revised => self.on_quote_reopened_or_modified(quote, store).map(Some),
+            _ => Ok(None),
+        }
+    }
+
+    fn snapshot_for(&self, quote: &Quote, close_date: Option<String>) -> FingerprintSnapshot {
+        let fingerprint = self.generator.generate_from_quote(quote);
+        FingerprintSnapshot {
+            quote_id: quote.id.0.clone(),
+            fingerprint_hash: fingerprint.hash_hex,
+            configuration_vector: fingerprint.hash_bytes.to_vec(),
+            final_price: quote_total(quote),
+            close_date,
+        }
+    }
+}
+
 pub fn configuration_from_lines(lines: &[QuoteLine]) -> Value {
     let mut line_entries: Vec<(String, u32, String)> = lines
         .iter()
@@ -254,6 +396,16 @@ fn bytes_to_hex(bytes: &[u8; FINGERPRINT_BYTES]) -> String {
     bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
+fn is_closed_quote_status(status: &QuoteStatus) -> bool {
+    matches!(status, QuoteStatus::Finalized | QuoteStatus::Sent)
+}
+
+fn quote_total(quote: &Quote) -> Decimal {
+    quote.lines.iter().fold(Decimal::ZERO, |acc, line| {
+        acc + line.unit_price * Decimal::from(u64::from(line.quantity))
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::time::{Duration, Instant};
@@ -266,10 +418,15 @@ mod tests {
         product::ProductId,
         quote::{Quote, QuoteId, QuoteLine, QuoteStatus},
     };
+    use crate::flows::{
+        engine::FlowEngine,
+        states::{FlowContext, FlowEvent, FlowState},
+    };
 
     use super::{
-        configuration_from_lines, DealOutcomeMetadata, DealOutcomeStatus, FingerprintGenerator,
-        SimilarityCandidate, SimilarityEngine, FINGERPRINT_BITS, FINGERPRINT_BYTES,
+        configuration_from_lines, ClosedDealOutcome, DealDnaLifecycleService, DealOutcomeMetadata,
+        DealOutcomeStatus, DnaLifecycleStore, FingerprintGenerator, SimilarityCandidate,
+        SimilarityEngine, FINGERPRINT_BITS, FINGERPRINT_BYTES,
     };
 
     #[test]
@@ -531,13 +688,157 @@ mod tests {
         );
     }
 
+    #[test]
+    fn lifecycle_finalization_generates_and_stores_fingerprint_snapshot() {
+        let service = DealDnaLifecycleService::default();
+        let mut store = InMemoryLifecycleStore::default();
+        let flow_engine = FlowEngine::default();
+        let quote = quote_with_status(
+            "Q-2026-CLOSE-1",
+            QuoteStatus::Priced,
+            vec![QuoteLine {
+                product_id: ProductId("plan-enterprise".to_owned()),
+                quantity: 10,
+                unit_price: Decimal::new(15_000, 2),
+            }],
+        );
+        let transition = flow_engine
+            .apply(&FlowState::Priced, &FlowEvent::PolicyClear, &FlowContext::default())
+            .expect("priced->finalized should succeed");
+
+        let snapshot = service
+            .on_flow_transition(&transition, &quote, &mut store)
+            .expect("finalized quote should generate fingerprint snapshot");
+        let snapshot = snapshot.expect("finalized transition should trigger fingerprint storage");
+
+        assert_eq!(snapshot.quote_id, "Q-2026-CLOSE-1");
+        assert!(snapshot.close_date.is_none());
+        assert_eq!(store.snapshots.len(), 1);
+        assert_eq!(store.snapshots[0], snapshot);
+    }
+
+    #[test]
+    fn lifecycle_reopened_quote_updates_existing_fingerprint_snapshot() {
+        let service = DealDnaLifecycleService::default();
+        let mut store = InMemoryLifecycleStore::default();
+
+        let original = quote_with_status(
+            "Q-2026-REOPEN-1",
+            QuoteStatus::Finalized,
+            vec![QuoteLine {
+                product_id: ProductId("plan-pro".to_owned()),
+                quantity: 5,
+                unit_price: Decimal::new(12_000, 2),
+            }],
+        );
+        let updated = quote_with_status(
+            "Q-2026-REOPEN-1",
+            QuoteStatus::Revised,
+            vec![QuoteLine {
+                product_id: ProductId("plan-pro".to_owned()),
+                quantity: 7,
+                unit_price: Decimal::new(12_000, 2),
+            }],
+        );
+
+        let original_snapshot = service
+            .on_quote_closed(&original, Some("2026-02-20".to_owned()), &mut store)
+            .expect("closed quote should generate snapshot");
+        let refreshed_snapshot = service
+            .on_quote_reopened_or_modified(&updated, &mut store)
+            .expect("reopened quote should refresh snapshot");
+
+        assert_eq!(store.snapshots.len(), 1);
+        assert_ne!(original_snapshot.fingerprint_hash, refreshed_snapshot.fingerprint_hash);
+        assert_eq!(store.snapshots[0].final_price, Decimal::new(84_000, 2));
+    }
+
+    #[test]
+    fn lifecycle_records_won_or_lost_deal_outcomes() {
+        let service = DealDnaLifecycleService::default();
+        let mut store = InMemoryLifecycleStore::default();
+        let quote = quote_with_status(
+            "Q-2026-OUTCOME-1",
+            QuoteStatus::Sent,
+            vec![QuoteLine {
+                product_id: ProductId("plan-growth".to_owned()),
+                quantity: 3,
+                unit_price: Decimal::new(8_500, 2),
+            }],
+        );
+
+        let won = service
+            .record_closed_deal_outcome(
+                &quote,
+                ClosedDealOutcome::Won,
+                "2026-02-21".to_owned(),
+                &mut store,
+            )
+            .expect("won outcome should persist");
+        let lost = service
+            .record_closed_deal_outcome(
+                &quote,
+                ClosedDealOutcome::Lost,
+                "2026-02-22".to_owned(),
+                &mut store,
+            )
+            .expect("lost outcome should upsert for quote");
+
+        assert_eq!(won.outcome_status, DealOutcomeStatus::Won);
+        assert_eq!(lost.outcome_status, DealOutcomeStatus::Lost);
+        assert_eq!(store.outcomes.len(), 1);
+        assert_eq!(store.outcomes[0].close_date.as_deref(), Some("2026-02-22"));
+    }
+
+    #[test]
+    fn lifecycle_backfill_processes_only_closed_quotes() {
+        let service = DealDnaLifecycleService::default();
+        let mut store = InMemoryLifecycleStore::default();
+        let quotes = vec![
+            quote_with_status(
+                "Q-2026-BACKFILL-1",
+                QuoteStatus::Finalized,
+                vec![QuoteLine {
+                    product_id: ProductId("plan-pro".to_owned()),
+                    quantity: 2,
+                    unit_price: Decimal::new(5_000, 2),
+                }],
+            ),
+            quote_with_status(
+                "Q-2026-BACKFILL-2",
+                QuoteStatus::Draft,
+                vec![QuoteLine {
+                    product_id: ProductId("plan-pro".to_owned()),
+                    quantity: 2,
+                    unit_price: Decimal::new(5_000, 2),
+                }],
+            ),
+            quote_with_status(
+                "Q-2026-BACKFILL-3",
+                QuoteStatus::Sent,
+                vec![QuoteLine {
+                    product_id: ProductId("plan-enterprise".to_owned()),
+                    quantity: 1,
+                    unit_price: Decimal::new(25_000, 2),
+                }],
+            ),
+        ];
+
+        let count = service
+            .backfill_historical_quotes(&quotes, &mut store)
+            .expect("backfill should succeed");
+        assert_eq!(count, 2);
+        assert_eq!(store.snapshots.len(), 2);
+        assert!(store.snapshots.iter().all(|snapshot| snapshot.quote_id == "Q-2026-BACKFILL-1"
+            || snapshot.quote_id == "Q-2026-BACKFILL-3"));
+    }
+
     fn quote_fixture(lines: Vec<QuoteLine>) -> Quote {
-        Quote {
-            id: QuoteId("Q-2026-2001".to_owned()),
-            status: QuoteStatus::Draft,
-            lines,
-            created_at: Utc::now(),
-        }
+        quote_with_status("Q-2026-2001", QuoteStatus::Draft, lines)
+    }
+
+    fn quote_with_status(id: &str, status: QuoteStatus, lines: Vec<QuoteLine>) -> Quote {
+        Quote { id: QuoteId(id.to_owned()), status, lines, created_at: Utc::now() }
     }
 
     fn outcome(
@@ -550,6 +851,39 @@ mod tests {
             outcome_status: status,
             final_price,
             close_date: None,
+        }
+    }
+
+    #[derive(Default)]
+    struct InMemoryLifecycleStore {
+        snapshots: Vec<super::FingerprintSnapshot>,
+        outcomes: Vec<DealOutcomeMetadata>,
+    }
+
+    impl DnaLifecycleStore for InMemoryLifecycleStore {
+        fn upsert_fingerprint_snapshot(
+            &mut self,
+            snapshot: super::FingerprintSnapshot,
+        ) -> Result<(), String> {
+            if let Some(index) =
+                self.snapshots.iter().position(|existing| existing.quote_id == snapshot.quote_id)
+            {
+                self.snapshots[index] = snapshot;
+            } else {
+                self.snapshots.push(snapshot);
+            }
+            Ok(())
+        }
+
+        fn upsert_deal_outcome(&mut self, outcome: DealOutcomeMetadata) -> Result<(), String> {
+            if let Some(index) =
+                self.outcomes.iter().position(|existing| existing.quote_id == outcome.quote_id)
+            {
+                self.outcomes[index] = outcome;
+            } else {
+                self.outcomes.push(outcome);
+            }
+            Ok(())
         }
     }
 }
