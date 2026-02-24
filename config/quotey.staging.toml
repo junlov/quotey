@@ -1,0 +1,29 @@
+# Quotey Staging Configuration
+#
+# Use with: QUOTEY_CONFIG=staging cargo run
+# Or: cargo run -- --config config/quotey.staging.toml
+
+[database]
+url = "${DATABASE_URL}"
+max_connections = 10
+timeout_secs = 30
+
+[slack]
+app_token = "${SLACK_APP_TOKEN}"
+bot_token = "${SLACK_BOT_TOKEN}"
+
+[llm]
+provider = "ollama"
+base_url = "http://ollama.staging.internal:11434"
+model = "llama3.1"
+timeout_secs = 60
+max_retries = 3
+
+[server]
+bind_address = "0.0.0.0"
+health_check_port = 8080
+graceful_shutdown_secs = 30
+
+[logging]
+level = "info"
+format = "json"
