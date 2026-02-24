@@ -1346,7 +1346,7 @@ dependencies = [
 
 [[package]]
 name = "quotey-agent"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1357,7 +1357,7 @@ dependencies = [
 
 [[package]]
 name = "quotey-cli"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "clap",
@@ -1372,7 +1372,7 @@ dependencies = [
 
 [[package]]
 name = "quotey-core"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1391,7 +1391,7 @@ dependencies = [
 
 [[package]]
 name = "quotey-db"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "async-trait",
  "chrono",
@@ -1406,7 +1406,7 @@ dependencies = [
 
 [[package]]
 name = "quotey-server"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "axum",
@@ -1426,7 +1426,7 @@ dependencies = [
 
 [[package]]
 name = "quotey-slack"
-version = "0.1.1"
+version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
