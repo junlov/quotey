@@ -57,6 +57,21 @@ Define scope, KPI contract, deterministic guardrails, and interface boundaries f
 - `FingerprintRepository`: write/read deterministic fingerprints with version metadata.
 - `DealOutcomeRepository`: write/read final outcome and commercial context per quote.
 - `ApprovalPathRepository`: write/read routed and final approval path evidence.
+- `SimilarityEvidenceRepository`: write/read deterministic score lineage with strategy version and evidence payload.
+
+### Slice B Persistence Contract (Task 2)
+- Existing deterministic stores remain authoritative for:
+  - `configuration_fingerprints` (fingerprints + base pricing context)
+  - `deal_outcomes` (commercial outcomes)
+- New PRE tables (migration `0016_precedent_intelligence_graph`) capture missing lineage:
+  - `precedent_approval_path_evidence`: versioned route payload, decision state, idempotency key, correlation ID, routed/decided timestamps.
+  - `precedent_similarity_evidence`: source/candidate fingerprint references, strategy version, score components, evidence payload, correlation and idempotency keys.
+- Query semantics:
+  - similarity reads are ordered deterministically by `similarity_score DESC`, then `computed_at DESC`, then candidate quote ID.
+  - latest approval-path evidence is selected deterministically by `route_version DESC`, then `routed_at DESC`.
+- Rollback expectations:
+  - migration down removes only `precedent_approval_path_evidence` and `precedent_similarity_evidence` plus indexes.
+  - pre-existing tables (`configuration_fingerprints`, `deal_outcomes`, `similarity_cache`) are intentionally preserved.
 
 ### Slack Contract
 - Precedent panel is available only in mapped quote threads.
@@ -68,6 +83,25 @@ Define scope, KPI contract, deterministic guardrails, and interface boundaries f
 - `quotey-db`: persistence of fingerprints/outcomes/approval evidence and query pathways.
 - `quotey-slack`: panel rendering and user interactions only.
 - `quotey-agent`: orchestration and guardrail enforcement; no financial truth ownership.
+
+### Slice C Deterministic Engine Contract (Task 3)
+- `DeterministicPrecedentEngine::rank_similar` consumes typed `PrecedentRankingInput` and returns `PrecedentRankingOutput`.
+- Deterministic ordering contract:
+  - rank by `similarity_score DESC`
+  - tie-break on `candidate_quote_id ASC`
+  - final tie-break on `candidate_fingerprint_id ASC`
+- Guardrail contract:
+  - `allow`: query executes as requested.
+  - `deny`: fail closed with explicit user-safe message and fallback path (`capture_quote_fingerprint`).
+  - `degrade`: execute with bounded defaults (`limit <= max_limit`, `min_similarity >= floor`) and emit fallback guidance.
+- Failure taxonomy:
+  - `guardrail_denied`
+  - `invalid_similarity_score`
+  - `missing_strategy_version`
+  - `invalid_outcome_price`
+- Audit event taxonomy for PRE runtime:
+  - `query_allowed`, `query_denied`, `query_degraded`, `ranking_completed`, `ranking_failed`
+  - denial/degraded events must include `reason_code`, `user_message`, and `fallback_path`.
 
 ## Risk Register
 | Risk | Impact | Likelihood | Mitigation | Owner |
