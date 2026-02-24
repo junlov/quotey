@@ -4,12 +4,12 @@ use super::{ApprovalRepository, RepositoryError};
 use crate::DbPool;
 
 pub struct SqlApprovalRepository {
-    pool: DbPool,
+    _pool: DbPool,
 }
 
 impl SqlApprovalRepository {
     pub fn new(pool: DbPool) -> Self {
-        Self { pool }
+        Self { _pool: pool }
     }
 }
 
@@ -19,12 +19,14 @@ impl ApprovalRepository for SqlApprovalRepository {
         &self,
         _id: &ApprovalId,
     ) -> Result<Option<ApprovalRequest>, RepositoryError> {
-        let _pool = &self.pool;
-        Ok(None)
+        Err(RepositoryError::Decode(
+            "SqlApprovalRepository is unavailable: approval tables are not present in current schema".to_string(),
+        ))
     }
 
     async fn save(&self, _approval: ApprovalRequest) -> Result<(), RepositoryError> {
-        let _pool = &self.pool;
-        Ok(())
+        Err(RepositoryError::Decode(
+            "SqlApprovalRepository is unavailable: approval tables are not present in current schema".to_string(),
+        ))
     }
 }
