@@ -92,6 +92,11 @@ If instructions conflict, resolve in this order:
 - `workflow.plan_check: true`: verify planned changes against `.planning/PROJECT.md` constraints/requirements before patching.
 - `workflow.verifier: true`: run validation (tests/lint/build/targeted checks) after edits whenever applicable.
 
+### Current Wave 2 Planning Tracks
+
+- `W2_CLO_CLOSED_LOOP_POLICY_OPTIMIZER_SPEC.md` (CLO): replay-gated, human-approved policy optimization.
+- `W2_NXT_DETERMINISTIC_NEGOTIATION_AUTOPILOT_SPEC.md` (NXT): bounded counteroffers with deterministic concession guardrails and approval handoff.
+
 ---
 
 ## Project Architecture
