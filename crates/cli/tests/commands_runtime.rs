@@ -56,7 +56,7 @@ fn migrate_returns_success_with_valid_env() {
 }
 
 #[test]
-fn seed_returns_noop_success_with_valid_env() {
+fn seed_returns_seed_dataset_success_with_valid_env() {
     with_env(
         &[
             ("QUOTEY_SLACK_APP_TOKEN", "xapp-test"),
@@ -65,7 +65,7 @@ fn seed_returns_noop_success_with_valid_env() {
         ],
         || {
             let result = seed::run();
-            assert_eq!(result.exit_code, 0, "expected deterministic seed no-op success");
+            assert_eq!(result.exit_code, 0, "expected deterministic seed success");
 
             let payload = parse_payload(&result.output);
             assert_eq!(payload["command"], "seed");
