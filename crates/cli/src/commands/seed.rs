@@ -50,24 +50,25 @@ pub fn run() -> CommandResult {
             .await
             .map_err(|error| ("seed_verification", error.to_string(), 6u8))?;
 
-        if !verification.all_present {
-            let failed_checks = verification
-                .checks
-                .iter()
-                .filter_map(|(check, passed)| (!passed).then_some(*check))
-                .collect::<Vec<_>>();
-            let message = if failed_checks.is_empty() {
-                "Some seed data failed to load".to_string()
+        let run_result: Result<SeedOutput, (&'static str, String, u8)> =
+            if !verification.all_present {
+                let failed_checks = verification
+                    .checks
+                    .iter()
+                    .filter_map(|(check, passed)| (!passed).then_some(*check))
+                    .collect::<Vec<_>>();
+                let message = if failed_checks.is_empty() {
+                    "Some seed data failed to load".to_string()
+                } else {
+                    format!("Seed verification failed for checks: {}", failed_checks.join(", "))
+                };
+                Err(("seed_verification", message, 6u8))
             } else {
-                format!("Seed verification failed for checks: {}", failed_checks.join(", "))
+                Ok(SeedOutput { flows: seed_result.flows_seeded })
             };
 
-            pool.close().await;
-            return Err(("seed_verification", message, 6u8));
-        }
-
         pool.close().await;
-        Ok::<SeedOutput, (&'static str, String, u8)>(SeedOutput { flows: seed_result.flows_seeded })
+        run_result
     });
 
     match result {
@@ -91,4 +92,49 @@ pub fn run() -> CommandResult {
 
 struct SeedOutput {
     flows: Vec<quotey_db::FlowSeedInfo>,
+}
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn verification_error_message_targets_failed_checks() {
+        let checks = [
+            ("audit-events", true),
+            ("quote-discount-state", false),
+            ("audit-netnew-created", false),
+        ];
+
+        let failed_checks = checks
+            .iter()
+            .filter_map(|(check, passed)| (!passed).then_some(*check))
+            .collect::<Vec<_>>();
+
+        let message = if failed_checks.is_empty() {
+            "Some seed data failed to load".to_string()
+        } else {
+            format!("Seed verification failed for checks: {}", failed_checks.join(", "))
+        };
+
+        assert_eq!(
+            message,
+            "Seed verification failed for checks: quote-discount-state, audit-netnew-created"
+        );
+    }
+
+    #[test]
+    fn verification_error_message_falls_back_to_generic_when_no_labels() {
+        let checks = [("quote-state", true), ("audit-events", true)];
+
+        let failed_checks = checks
+            .iter()
+            .filter_map(|(check, passed)| (!passed).then_some(*check))
+            .collect::<Vec<_>>();
+        let message = if failed_checks.is_empty() {
+            "Some seed data failed to load".to_string()
+        } else {
+            format!("Seed verification failed for checks: {}", failed_checks.join(", "))
+        };
+
+        assert_eq!(message, "Some seed data failed to load");
+    }
 }
