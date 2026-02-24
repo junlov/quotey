@@ -125,3 +125,45 @@ Validation is fail-fast and actionable. Startup fails if critical fields are inv
 (for example missing Slack token prefixes, invalid SQLite URL, or invalid timeout ranges).
 
 Reference file: `config/quotey.example.toml`.
+
+## Troubleshooting
+
+### Common Errors
+
+**Error: `slack.app_token must start with `xapp-``**
+- You may have swapped the tokens. `QUOTEY_SLACK_APP_TOKEN` should start with `xapp-` (App-Level Token)
+- `QUOTEY_SLACK_BOT_TOKEN` should start with `xoxb-` (Bot User OAuth Token)
+- Get these from https://api.slack.com/apps > Your App > OAuth & Permissions
+
+**Error: `unable to open database file` (SQLite)**
+- The database directory may not exist or be writable
+- For relative paths, ensure the working directory is correct
+- Try using an absolute path: `QUOTEY_DATABASE_URL=sqlite:///absolute/path/to/quotey.db`
+
+**Error: `configuration validation failed: llm.api_key is required`**
+- OpenAI/Anthropic providers require an API key
+- Set `QUOTEY_LLM_API_KEY` or switch to Ollama: `QUOTEY_LLM_PROVIDER=ollama`
+
+### Debugging
+
+Enable debug logging:
+```bash
+QUOTEY_LOG_LEVEL=debug cargo run
+```
+
+Run with structured JSON logs:
+```bash
+QUOTEY_LOG_FORMAT=json cargo run
+```
+
+### Migration Recovery
+
+If migrations fail:
+```bash
+# Check current schema version
+./target/debug/quotey config
+
+# Reset database (WARNING: destroys data)
+rm quotey.db
+./target/debug/quotey migrate
+```
