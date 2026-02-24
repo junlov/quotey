@@ -1,0 +1,42 @@
+{
+  "dataset_version": "bd-3vp2.7.2",
+  "child_bead": "bd-3vp2.8.4.1",
+  "scenario_group": "resilience_fault_matrix",
+  "phase_fault_matrix": [
+    {
+      "phase": "seed_load",
+      "fault_domain": "database",
+      "injected_error": "sqlite_busy",
+      "retryable": true,
+      "expected_retry_window_sec": [1, 2, 4],
+      "max_retries": 3,
+      "expected_outcome": "recover_and_continue"
+    },
+    {
+      "phase": "policy_evaluation",
+      "fault_domain": "policy_service",
+      "injected_error": "temporary_unavailable",
+      "retryable": true,
+      "expected_retry_window_sec": [1, 2, 4],
+      "max_retries": 2,
+      "expected_outcome": "recover_and_retry"
+    },
+    {
+      "phase": "pricing_evaluation",
+      "fault_domain": "database",
+      "injected_error": "constraint_violation",
+      "retryable": false,
+      "max_retries": 0,
+      "expected_outcome": "fail_fast"
+    },
+    {
+      "phase": "approval_routing",
+      "fault_domain": "crm_adapter",
+      "injected_error": "timeout",
+      "retryable": true,
+      "expected_retry_window_sec": [2, 4, 8],
+      "max_retries": 2,
+      "expected_outcome": "retry_with_backoff"
+    }
+  ]
+}

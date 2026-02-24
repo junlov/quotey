@@ -1,0 +1,46 @@
+{
+  "dataset_version": "bd-3vp2.7.2",
+    "child_bead": "bd-3vp2.8.1.1",
+    "flow_type": "net_new",
+    "seed_quote_id": "quote-netnew-001",
+    "seed_contract": {
+      "quote_id": "quote-netnew-001",
+      "account_id": "acct-netnew-001",
+    "account_name": "Acme Corp",
+    "deal_id": "deal-netnew-001",
+    "deal_name": "Acme Corp - New License",
+    "policy_profile": "standard",
+    "status": "draft",
+    "current_step": "gather_requirements",
+    "step_number": 1,
+    "required_fields": [
+      "billing_country",
+      "payment_terms"
+    ],
+    "missing_fields": [
+      "billing_country",
+      "payment_terms"
+    ],
+    "product_ids": [
+      "prod-plan-ent",
+      "prod-sso",
+      "prod-support-premium"
+    ],
+    "product_names": [
+      "Enterprise Plan",
+      "SSO Add-on",
+      "Premium Support"
+    ],
+    "expected_line_count": 3,
+    "expected_transition_checkpoints": [
+      "quote_created",
+      "requirements_capture",
+      "constraints_validated",
+      "pricing_evaluated",
+      "quote_priced"
+    ],
+    "expected_audit_events": [
+      "quote.created"
+    ]
+  }
+}

@@ -1,0 +1,43 @@
+{
+  "dataset_version": "bd-3vp2.7.2",
+    "child_bead": "bd-3vp2.8.2.1",
+    "flow_type": "renewal",
+    "seed_quote_id": "quote-renewal-001",
+    "seed_contract": {
+      "quote_id": "quote-renewal-001",
+      "account_id": "acct-renewal-001",
+    "account_name": "Globex Industries",
+    "deal_id": "deal-renewal-001",
+    "deal_name": "Globex - Annual Renewal",
+    "policy_profile": "renewal",
+    "status": "priced",
+    "current_step": "validate_expansion",
+    "step_number": 3,
+    "required_fields": [
+      "prior_quote_id"
+    ],
+    "missing_fields": [],
+    "product_ids": [
+      "prod-plan-ent",
+      "prod-support-premium",
+      "prod-onboarding"
+    ],
+    "product_names": [
+      "Enterprise Plan",
+      "Premium Support",
+      "Onboarding"
+    ],
+    "expected_line_count": 3,
+    "expected_transition_checkpoints": [
+      "quote_created",
+      "prior_state_loaded",
+      "expansion_validated",
+      "discount_policy_evaluated",
+      "quote_priced"
+    ],
+    "prior_quote_id": "quote-renewal-prior-001",
+    "expected_audit_events": [
+      "quote.created"
+    ]
+  }
+}

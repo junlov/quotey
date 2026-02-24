@@ -1,0 +1,127 @@
+{
+  "dataset_version": "bd-3vp2.7.2",
+  "seed_dataset": "deterministic_e2e_core_flows",
+  "flows": [
+    {
+      "flow_type": "net_new",
+      "quote_id": "quote-netnew-001",
+      "status": "draft",
+      "current_step": "gather_requirements",
+      "step_number": 1,
+      "account_id": "acct-netnew-001",
+      "deal_id": "deal-netnew-001",
+      "account_name": "Acme Corp",
+      "deal_name": "Acme Corp - New License",
+      "policy_profile": "standard",
+      "product_ids": ["prod-plan-ent", "prod-sso", "prod-support-premium"],
+      "product_names": ["Enterprise Plan", "SSO Add-on", "Premium Support"],
+      "required_fields": ["billing_country", "payment_terms"],
+      "missing_fields": ["billing_country", "payment_terms"],
+      "expected_line_count": 3,
+      "expected_transition_checkpoints": [
+        "quote_created",
+        "requirements_capture",
+        "constraints_validated",
+        "pricing_evaluated",
+        "quote_priced"
+      ],
+      "expected_audit_events": ["quote.created"],
+      "prior_quote_id": null
+    },
+    {
+      "flow_type": "renewal",
+      "quote_id": "quote-renewal-001",
+      "status": "priced",
+      "current_step": "validate_expansion",
+      "step_number": 3,
+      "account_id": "acct-renewal-001",
+      "deal_id": "deal-renewal-001",
+      "account_name": "Globex Industries",
+      "deal_name": "Globex - Annual Renewal",
+      "policy_profile": "renewal",
+      "product_ids": ["prod-plan-ent", "prod-support-premium", "prod-onboarding"],
+      "product_names": ["Enterprise Plan", "Premium Support", "Onboarding"],
+      "required_fields": ["prior_quote_id"],
+      "missing_fields": [],
+      "expected_line_count": 3,
+      "expected_transition_checkpoints": [
+        "quote_created",
+        "prior_state_loaded",
+        "expansion_validated",
+        "discount_policy_evaluated",
+        "quote_priced"
+      ],
+      "expected_audit_events": ["quote.created"],
+      "prior_quote_id": "quote-renewal-prior-001"
+    },
+    {
+      "flow_type": "discount_exception",
+      "quote_id": "quote-discount-001",
+      "status": "approval",
+      "current_step": "awaiting_approval",
+      "step_number": 4,
+      "account_id": "acct-discount-001",
+      "deal_id": "deal-discount-001",
+      "account_name": "Initech LLC",
+      "deal_name": "Initech - Expansion Deal",
+      "policy_profile": "discount_exception",
+      "product_ids": ["prod-plan-pro", "prod-sso"],
+      "product_names": ["Pro Plan", "SSO Add-on"],
+      "required_fields": ["approval_decision"],
+      "missing_fields": ["approval_decision"],
+      "expected_line_count": 2,
+      "requested_discount_pct": 25,
+      "threshold_pct": 20,
+      "expected_transition_checkpoints": [
+        "quote_created",
+        "discount_request_captured",
+        "approval_requested",
+        "approval_pending"
+      ],
+      "expected_audit_events": ["quote.created", "approval.requested"],
+      "prior_quote_id": null
+    }
+  ],
+  "discount_threshold_matrix": [
+    {
+      "flow_type": "discount_exception",
+      "account_tier": "mid_market",
+      "requested_discount_pct": 10,
+      "threshold_pct": 20,
+      "expected_routing": "auto_approve",
+      "approval_required": false
+    },
+    {
+      "flow_type": "discount_exception",
+      "account_tier": "smb",
+      "requested_discount_pct": 12,
+      "threshold_pct": 20,
+      "expected_routing": "auto_approve",
+      "approval_required": false
+    },
+    {
+      "flow_type": "discount_exception",
+      "account_tier": "mid_market",
+      "requested_discount_pct": 20,
+      "threshold_pct": 20,
+      "expected_routing": "approval_required",
+      "approval_required": true
+    },
+    {
+      "flow_type": "discount_exception",
+      "account_tier": "mid_market",
+      "requested_discount_pct": 25,
+      "threshold_pct": 20,
+      "expected_routing": "approval_required_manager",
+      "approval_required": true
+    },
+    {
+      "flow_type": "discount_exception",
+      "account_tier": "enterprise",
+      "requested_discount_pct": 18,
+      "threshold_pct": 15,
+      "expected_routing": "approval_required_director",
+      "approval_required": true
+    }
+  ]
+}

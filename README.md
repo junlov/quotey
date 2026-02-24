@@ -63,6 +63,23 @@ Current scaffold contracts from completed foundation beads:
   structured tracing baseline including `correlation_id`, `quote_id`, and `thread_id`
   fields at ingress/bootstrap/runtime boundaries.
 
+## Deterministic E2E Bootstrap
+
+Use the E2E bootstrap script to create a local seeded database for CI-reproducible
+scenario runs:
+
+```bash
+./scripts/e2e_bootstrap.sh
+```
+
+Optional overrides:
+
+- `CLEAN_BEFORE_BOOTSTRAP=0` to reuse an existing file.
+- `QUOTEY_E2E_DB_PATH=...` to choose the SQLite path.
+
+The script appends `mode=rwc` to the `sqlite://` URL so the file-backed database is
+created on first run before running migrations and seed loading.
+
 ## Configuration Contract
 
 `quotey-core` now provides typed startup configuration (`crates/core/src/config.rs`) with
