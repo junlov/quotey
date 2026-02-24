@@ -58,6 +58,7 @@ proving exactly how every number was calculated.
 - [ ] SQLite-backed persistence for all data (products, price books, deals, quotes, approvals, audit log)
 - [ ] CLI tools for admin, catalog management, and debugging
 - [ ] Configuration rules and pricing policies stored in SQLite, manageable via CLI without recompilation
+- [ ] Closed-loop policy optimizer that proposes rule improvements from outcomes, gates changes with deterministic replay, requires human approval, and supports signed rollback
 
 ### Out of Scope
 
@@ -153,6 +154,12 @@ hours.
 and the agent gathers context, fills in slots, executes tools, moves the deterministic
 workflow forward, and asks only for missing or risky items. This eliminates the CPQ
 training burden entirely.
+
+**Closed-loop policy optimization with deterministic gates.** Quotey can continuously improve
+its pricing and policy layer by proposing candidate rule updates from historical outcomes,
+then validating those candidates through deterministic replay and blast-radius scoring before
+any human approval. This allows accretive policy evolution without allowing non-deterministic
+or unaudited mutation of production rules.
 
 ### The Safety Principle
 
@@ -250,6 +257,7 @@ This is the right level of autonomy for enterprise CPQ.
 | HTML → PDF over native Rust PDF | Better output quality, easier templating (tera/handlebars), faster to iterate on quote design. External converter (wkhtmltopdf) is acceptable for alpha. | — Pending |
 | Slack-first over web UI | Meets reps where they work. Socket Mode eliminates infrastructure requirements. Interactive components (buttons, modals) provide structured input when NL is insufficient. | — Pending |
 | Catalog bootstrap as differentiator | The #1 CPQ implementation blocker is data readiness. Agent-powered catalog ingestion from unstructured sources (CSV, PDF, spreadsheets) is a unique value prop that traditional CPQ cannot match. | — Pending |
+| Human-approved closed-loop policy optimizer over autonomous policy mutation | Policy evolution should compound from real outcomes, but enterprise safety requires deterministic replay evidence and explicit human approval before apply. | — Proposed |
 
 ---
 
