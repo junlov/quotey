@@ -172,6 +172,153 @@ These items are tracked as beads and are the authoritative implementation checkl
 - Downstream engine tasks (`bd-lmuc.3+`) must treat idempotency keys and replay checksums as
   authoritative dedupe markers for apply/rollback/audit operations.
 
+## Task 3 Deterministic Replay Engine Contract
+- Engine module: `crates/core/src/policy/optimizer.rs`.
+- Replay request contract includes:
+  `candidate_id`, policy versions, canonicalizable `policy_diff_json`,
+  canonicalizable `cohort_scope_json`, pinned `engine_version`, optional expected checksum,
+  and a non-empty historical snapshot cohort.
+- Snapshot contract per historical quote includes baseline/candidate values for:
+  margin bps, win-rate proxy bps, approval-required flag, hard-violation counts,
+  plus cohort/segment/rule annotations for blast-radius analysis.
+- Deterministic checksum behavior:
+  - request is normalized (sorted snapshots, deduped/sorted rule IDs, canonical JSON serialization),
+  - checksum is `sha256:<hex>` over canonical payload bytes,
+  - if `expected_input_checksum` is provided and mismatches, replay is blocked.
+- Impact metrics produced per replay:
+  - `projected_margin_delta_bps` (cohort average),
+  - `projected_win_rate_proxy_delta_bps` (cohort average),
+  - `projected_approval_load_delta_bps` (delta in approval-required rate),
+  - `projected_hard_violation_delta` (cohort aggregate delta).
+- Blast-radius summary is order-independent and stable:
+  - `impacted_quote_count`,
+  - `impacted_quote_ratio_bps`,
+  - sorted unique impacted segment keys,
+  - sorted unique impacted rule IDs,
+  - sorted unique impacted cohort IDs.
+- Hard guardrail gates block candidate promotion when thresholds are violated:
+  - margin delta below minimum,
+  - win-rate proxy delta below minimum,
+  - approval-load delta above maximum,
+  - hard-violation delta above maximum.
+- Determinism invariant tests required in core unit tests:
+  - identical input -> identical output,
+  - checksum mismatch -> explicit blocked error,
+  - reversed snapshot ordering (and rule list permutations) -> identical blast-radius output/checksum.
+
+## Task 4 Candidate Diff Schema + Generation Contracts
+- Candidate schema implementation lives in `crates/core/src/policy/optimizer.rs` as
+  `PolicyCandidateDiffV1` with explicit schema version `clo_candidate_diff.v1`.
+- Canonical schema fields include:
+  - rule-level diffs (`rule_id`, operation, field, before/after JSON values, rationale),
+  - cohort scope (`segment_keys`, `region_keys`, `quote_ids`, `time_window_days`),
+  - projected impact (replay checksum + deterministic pass bit + key deltas),
+  - confidence bounds (`lower_bps`, `point_estimate_bps`, `upper_bps`),
+  - provenance (`source_replay_evaluation_ids`, outcome window, generator identity),
+  - deterministic rationale summary.
+- Deterministic serialization contract:
+  - normalization lowercases/sorts canonical identity fields where appropriate,
+  - list fields are deduped and sorted,
+  - value payloads are canonicalized JSON,
+  - output is a stable canonical JSON string suitable for replay/audit artifacts.
+- Validation contract (`PolicyCandidateDiffV1::validate`):
+  - rejects empty candidate IDs, missing rule diffs, invalid per-operation payloads,
+    duplicate rule-diff keys, invalid/empty cohort scope, invalid checksum,
+    non-deterministic replay evidence, malformed confidence bounds, missing provenance,
+    and empty rationale summary.
+  - rejects unsafe candidate payloads when projected hard-violation delta is positive.
+- Candidate generation contract (`PolicyCandidateGenerator`):
+  - requires replay evidence + rule signals + scope/provenance/confidence inputs,
+  - links generated candidate payload directly to replay checksum/impact deltas,
+  - emits deterministic machine-readable candidate diff JSON + provenance/cohort artifacts,
+  - auto-rejects high-risk candidates when replay guardrails fail (with explicit reasons).
+- Task 4 invariant tests in core cover:
+  - candidate diff canonicalization stability under ordering/casing variations,
+  - validation rejection for incomplete/unsafe payloads,
+  - deterministic generator output for identical inputs,
+  - explicit guardrail-based rejection for unsafe replay evidence.
+
+## Task 5 Approval Packet Contract + Reviewer UX
+- Approval packet contract is implemented in `crates/core/src/policy/optimizer.rs`:
+  - `ApprovalPacket` (schema version `clo_approval_packet.v1`)
+  - `ApprovalPacketActionPayload` (action version `clo_approval_packet_action.v1`)
+  - deterministic packet/action id generation and strict section/payload validation.
+- Required packet sections are enforced by contract validation:
+  - candidate diff section (`PolicyCandidateDiffV1`),
+  - replay evidence section (`ReplayImpactReport`),
+  - risk score section (`risk_score_bps`),
+  - blast-radius section (`BlastRadiusSummary`),
+  - fallback plan section (`fallback_plan`).
+- Packet/action idempotency + version-awareness:
+  - packet IDs are deterministic hashes over candidate/version/checksum identity,
+  - action payloads include explicit action-version metadata and deterministic idempotency keys,
+  - reject/request-changes actions require explicit reviewer reason text.
+- Deterministic transition mapping:
+  - `approve -> approved`
+  - `reject -> rejected`
+  - `request_changes -> changes_requested`
+  - implemented via `ApprovalPacketActionPayload::target_status`.
+- Append-only audit event contract:
+  - reviewer action payload can deterministically emit `PolicyLifecycleAuditEvent`
+    with stable idempotency key linkage.
+- Slack reviewer surface (`crates/slack/src/blocks.rs`):
+  - `policy_approval_packet_message` renders all required packet sections,
+  - action buttons include version-aware idempotent payload values,
+  - reject/request-changes actions are explicitly labeled as reason-required.
+- CLI reviewer surface (`crates/cli/src/commands/policy_packet.rs` + `crates/cli/src/lib.rs`):
+  - `quotey policy-packet build` builds deterministic approval packets from JSON contracts,
+  - `quotey policy-packet action` emits deterministic reviewer action payload + target status.
+- Task 5 tests validate:
+  - packet ID determinism/versioning,
+  - required-section schema enforcement,
+  - deterministic action idempotency and status mapping,
+  - action payload version gating and audit-event generation,
+  - Slack packet-card required-section/action rendering,
+  - CLI build/action command behavior and reject-without-reason guardrail.
+
+## Task 6 Signed Apply/Rollback Pipeline + Task 6.1 Drill Automation
+- Lifecycle engine implementation is in `crates/core/src/policy/optimizer.rs`:
+  - `InMemoryPolicyLifecycleEngine`
+  - `PolicyApplyRequest` / `PolicyApplyOutcome`
+  - `PolicyRollbackRequest` / `PolicyRollbackOutcome`
+  - `RollbackDrillReport`
+  - `PolicyLifecycleError` with `user_safe_message()` remediation text.
+- Apply contract (`InMemoryPolicyLifecycleEngine::apply`):
+  - requires valid `ApprovalPacket` and `ApprovalPacketActionPayload`,
+  - requires `approve` decision (reject/request-changes are blocked),
+  - requires packet/action candidate + version identity match,
+  - requires replay checksum parity between candidate diff and replay report,
+  - requires current active policy version to match packet base version,
+  - requires signing metadata (`signature_key_id`, `signing_secret`) and emits deterministic apply signature/checksum artifacts.
+- Apply idempotency + auditability:
+  - idempotency key is action-derived by default (or explicit override),
+  - repeated apply requests with same idempotency key return the existing `PolicyApplyRecord`,
+  - apply events are append-only `PolicyLifecycleAuditEvent` records with deterministic correlation/idempotency linkage.
+- Rollback contract (`InMemoryPolicyLifecycleEngine::rollback`):
+  - requires non-empty rollback reason,
+  - requires apply record existence and candidate identity match,
+  - requires active policy version to match the applied version being rolled back,
+  - restores `prior_policy_version` deterministically and emits signed rollback artifacts,
+  - supports idempotent rollback retries via rollback idempotency key.
+- Queryability contract:
+  - apply records are queryable by applied policy version,
+  - rollback records are queryable by rollback target policy version,
+  - lifecycle event stream remains immutable and ordered by emitted operations.
+- Drill automation contract (`InMemoryPolicyLifecycleEngine::run_rollback_drill`):
+  - executes deterministic forward apply -> rollback -> re-apply sequence,
+  - outputs `RollbackDrillReport` containing timing metrics (`*_duration_ms`),
+    verification checksums (first apply / rollback / reapply), safety pass bit, and final policy version.
+- Task 6/6.1 tests in `policy::optimizer::tests` validate:
+  - apply gating for approval decision + replay checksum integrity,
+  - idempotent apply/rollback behavior and lifecycle event immutability,
+  - queryability of apply/rollback records by policy version,
+  - rollback drill artifact completeness and safety pass conditions,
+  - user-safe remediation messaging for key failure paths.
+- Runbook ownership/cadence requirement (for operator documentation in Task 9):
+  - rollback drill must run at least weekly,
+  - primary owner is Runtime owner (backup owner: Revenue Ops owner),
+  - each drill execution must retain report artifacts for audit trail review.
+
 ## Guardrail Exit Checklist (Before Task 2 Coding)
 - [ ] Scope/non-goals approved.
 - [ ] KPI formulas and owners locked.

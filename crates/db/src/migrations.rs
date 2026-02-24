@@ -52,6 +52,18 @@ mod tests {
         "execution_queue_task",
         "execution_idempotency_ledger",
         "execution_queue_transition_audit",
+        "deal_flight_scenario_run",
+        "deal_flight_scenario_variant",
+        "deal_flight_scenario_delta",
+        "deal_flight_scenario_audit",
+        "policy_candidate",
+        "policy_replay_evaluation",
+        "policy_approval_decision",
+        "policy_apply_record",
+        "policy_rollback_record",
+        "policy_lifecycle_audit",
+        "precedent_approval_path_evidence",
+        "precedent_similarity_evidence",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -111,6 +123,35 @@ mod tests {
         "idx_execution_idempotency_expires_at",
         "idx_execution_queue_transition_task_occurred",
         "idx_execution_queue_transition_quote_occurred",
+        "idx_sim_run_quote_created",
+        "idx_sim_run_thread_created",
+        "idx_sim_run_correlation",
+        "idx_sim_run_status_created",
+        "idx_sim_variant_run_rank",
+        "idx_sim_variant_run_selected",
+        "idx_sim_delta_variant_type",
+        "idx_sim_audit_run_occurred",
+        "idx_sim_audit_event_occurred",
+        "idx_sim_audit_correlation",
+        "idx_policy_candidate_status_created",
+        "idx_policy_candidate_base_version",
+        "idx_policy_replay_candidate_replayed",
+        "idx_policy_replay_checksum",
+        "idx_policy_approval_candidate_decided",
+        "idx_policy_approval_stale_expires",
+        "idx_policy_apply_candidate_applied",
+        "idx_policy_apply_idempotency",
+        "idx_policy_rollback_candidate_rolled",
+        "idx_policy_rollback_apply",
+        "idx_policy_audit_candidate_occurred",
+        "idx_policy_audit_event_occurred",
+        "idx_policy_audit_correlation",
+        "idx_precedent_approval_quote_routed",
+        "idx_precedent_approval_status_decided",
+        "idx_precedent_similarity_source_quote_score",
+        "idx_precedent_similarity_source_fp_version",
+        "idx_precedent_similarity_candidate_quote",
+        "idx_precedent_similarity_correlation",
     ];
 
     #[tokio::test]
@@ -398,6 +439,102 @@ mod tests {
         .expect("check execution_queue_transition_audit table")
         .get::<i64, _>("count");
 
+        let deal_flight_scenario_run_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'deal_flight_scenario_run'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check deal_flight_scenario_run table")
+        .get::<i64, _>("count");
+
+        let deal_flight_scenario_variant_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'deal_flight_scenario_variant'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check deal_flight_scenario_variant table")
+        .get::<i64, _>("count");
+
+        let deal_flight_scenario_delta_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'deal_flight_scenario_delta'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check deal_flight_scenario_delta table")
+        .get::<i64, _>("count");
+
+        let deal_flight_scenario_audit_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'deal_flight_scenario_audit'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check deal_flight_scenario_audit table")
+        .get::<i64, _>("count");
+
+        let policy_candidate_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'policy_candidate'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check policy_candidate table")
+        .get::<i64, _>("count");
+
+        let policy_replay_evaluation_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'policy_replay_evaluation'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check policy_replay_evaluation table")
+        .get::<i64, _>("count");
+
+        let policy_approval_decision_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'policy_approval_decision'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check policy_approval_decision table")
+        .get::<i64, _>("count");
+
+        let policy_apply_record_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'policy_apply_record'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check policy_apply_record table")
+        .get::<i64, _>("count");
+
+        let policy_rollback_record_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'policy_rollback_record'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check policy_rollback_record table")
+        .get::<i64, _>("count");
+
+        let policy_lifecycle_audit_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'policy_lifecycle_audit'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check policy_lifecycle_audit table")
+        .get::<i64, _>("count");
+
+        let precedent_approval_path_evidence_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'precedent_approval_path_evidence'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check precedent_approval_path_evidence table")
+        .get::<i64, _>("count");
+
+        let precedent_similarity_evidence_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'precedent_similarity_evidence'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check precedent_similarity_evidence table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -433,6 +570,18 @@ mod tests {
         assert_eq!(execution_queue_task_count, 1);
         assert_eq!(execution_idempotency_ledger_count, 1);
         assert_eq!(execution_queue_transition_audit_count, 1);
+        assert_eq!(deal_flight_scenario_run_count, 1);
+        assert_eq!(deal_flight_scenario_variant_count, 1);
+        assert_eq!(deal_flight_scenario_delta_count, 1);
+        assert_eq!(deal_flight_scenario_audit_count, 1);
+        assert_eq!(policy_candidate_count, 1);
+        assert_eq!(policy_replay_evaluation_count, 1);
+        assert_eq!(policy_approval_decision_count, 1);
+        assert_eq!(policy_apply_record_count, 1);
+        assert_eq!(policy_rollback_record_count, 1);
+        assert_eq!(policy_lifecycle_audit_count, 1);
+        assert_eq!(precedent_approval_path_evidence_count, 1);
+        assert_eq!(precedent_similarity_evidence_count, 1);
     }
 
     #[tokio::test]

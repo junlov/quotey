@@ -40,8 +40,11 @@ pub use domain::execution::{
     ExecutionTransitionId, IdempotencyRecord, IdempotencyRecordState, OperationKey,
 };
 pub use domain::explanation::*;
+pub use domain::optimizer::*;
+pub use domain::precedent::*;
 pub use domain::product::{Product, ProductId};
 pub use domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
+pub use domain::simulation::*;
 pub use errors::{ApplicationError, DomainError, InterfaceError};
 pub use execution_engine::{
     ClaimResult, DeterministicExecutionEngine, ExecutionEngineConfig, ExecutionError,
@@ -57,4 +60,13 @@ pub use ghost::{
     Signal, SignalDetector, SignalDetectorConfig,
 };
 pub use ledger::{LedgerAction, LedgerEntry, LedgerService, VerificationResult};
+pub use policy::optimizer::{
+    BlastRadiusSummary, CandidateCohortScope, CandidateConfidenceBounds,
+    CandidateDiffValidationError, CandidateGenerationError, CandidateGenerationRequest,
+    CandidateProjectedImpact, CandidateProvenance, CandidateRuleDiff, CandidateRuleOperation,
+    CandidateRuleSignal, GeneratedCandidatePackage, PolicyCandidateDiffV1,
+    PolicyCandidateGenerator, PolicyReplayEngine, ReplayGuardrailBlock, ReplayGuardrailCode,
+    ReplayGuardrailEvaluation, ReplayGuardrailThresholds, ReplayImpactError, ReplayImpactReport,
+    ReplayImpactRequest, ReplayQuoteSnapshot,
+};
 pub use policy::{ExplanationGenerator, ExplanationTemplate, GeneratedExplanation};

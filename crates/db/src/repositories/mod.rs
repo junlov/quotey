@@ -14,8 +14,11 @@ pub mod customer;
 pub mod execution_queue;
 pub mod explanation;
 pub mod memory;
+pub mod optimizer;
+pub mod precedent;
 pub mod product;
 pub mod quote;
+pub mod simulation;
 
 pub use approval::SqlApprovalRepository;
 pub use customer::SqlCustomerRepository;
@@ -23,10 +26,16 @@ pub use execution_queue::SqlExecutionQueueRepository;
 pub use explanation::{ExplanationRepository, SqlExplanationRepository};
 pub use memory::{
     InMemoryApprovalRepository, InMemoryExecutionQueueRepository, InMemoryIdempotencyRepository,
-    InMemoryProductRepository, InMemoryQuoteRepository,
+    InMemoryPolicyOptimizerRepository, InMemoryProductRepository, InMemoryQuoteRepository,
 };
+pub use optimizer::{PolicyOptimizerRepository, SqlPolicyOptimizerRepository};
+pub use precedent::{PrecedentRepository, SqlPrecedentRepository};
 pub use product::SqlProductRepository;
 pub use quote::SqlQuoteRepository;
+pub use simulation::{
+    ScenarioAuditEventRecord, ScenarioDeltaRecord, ScenarioRepository, ScenarioRunRecord,
+    ScenarioVariantRecord, SqlScenarioRepository,
+};
 
 #[derive(Debug, Error)]
 pub enum RepositoryError {

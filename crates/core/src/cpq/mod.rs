@@ -1,9 +1,12 @@
 pub mod catalog;
 pub mod constraints;
 pub mod policy;
+pub mod precedent;
 pub mod pricing;
+pub mod simulator;
 
 use crate::domain::quote::Quote;
+use serde::{Deserialize, Serialize};
 
 use self::{
     constraints::{
@@ -20,7 +23,7 @@ pub struct CpqEvaluationInput<'a> {
     pub policy_input: PolicyInput,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CpqEvaluation {
     pub constraints: ConstraintResult,
     pub pricing: PricingResult,

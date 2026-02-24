@@ -2,5 +2,8 @@ pub mod approval;
 pub mod customer;
 pub mod execution;
 pub mod explanation;
+pub mod optimizer;
+pub mod precedent;
 pub mod product;
 pub mod quote;
+pub mod simulation;

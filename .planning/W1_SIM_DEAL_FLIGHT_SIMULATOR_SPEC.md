@@ -60,6 +60,37 @@ deterministic engines and persisted artifacts.
 | Deterministic consistency rate | N/A | 100% | Determinism owner | `identical_inputs_same_output / total_regenerations` |
 | Approval surprise reduction | N/A (new) | >= 30% | Sales Ops owner | decrease in late-stage approval reroutes after scenario pre-check |
 
+## Telemetry Event Taxonomy (Slice D Contract)
+### Event Names
+- `request_received`: simulator request accepted and queued for deterministic evaluation.
+- `comparison_rendered`: deterministic variant comparison completed successfully.
+- `error_occurred`: simulator request rejected by deterministic guardrails.
+- `promotion_requested`: user requested promoting a variant into a quote revision.
+- `promotion_applied`: promotion workflow completed and quote revision was created.
+
+### Deterministic Field Contract
+Every SIM telemetry event must include:
+- `quote_id`
+- `correlation_id`
+- `scenario_run_id` (nullable when run ID is unavailable)
+- `variant_key` (nullable for run-level events)
+- `variant_count`
+- `approval_required_variant_count`
+- `latency_ms` (0 for request events, >=0 otherwise)
+- `outcome` (`accepted`, `success`, `guardrail_rejected`, `promotion_requested`, `promotion_applied`)
+- `error_code` (nullable; set for rejected/failed outcomes)
+- `occurred_at`
+
+### Counter Contract
+Emit deterministic counter deltas from telemetry events:
+- `sim_requests_total`
+- `sim_success_total`
+- `sim_failures_total`
+- `sim_variants_generated_total`
+- `sim_approval_required_variants_total`
+- `sim_promotions_requested_total`
+- `sim_promotions_applied_total`
+
 ## Deterministic Safety Constraints
 - All scenario pricing must delegate to existing deterministic CPQ engines (pricing, policy, constraint).
 - Scenario generation must never alter the parent quote state; scenarios are read-only forks.
