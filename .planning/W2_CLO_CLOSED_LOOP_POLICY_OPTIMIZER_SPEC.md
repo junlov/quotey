@@ -345,6 +345,34 @@ These items are tracked as beads and are the authoritative implementation checkl
   - deterministic artifact generation in successful candidate builds,
   - compatibility with existing replay/approval/apply regression suites.
 
+## Task 8 Telemetry + Outcome Measurement
+- Telemetry/KPI contract is implemented in `crates/core/src/policy/optimizer.rs`:
+  - `RealizedOutcomeObservation`
+  - `PolicyLifecycleTelemetryThresholds`
+  - `PolicyLifecycleKpiSnapshot`
+  - `compute_policy_lifecycle_kpis(...)`
+- KPI formulas map to deterministic lifecycle/replay/outcome fields:
+  - candidate throughput = count of `candidate_created` lifecycle events.
+  - review decision count = count of `{approved,rejected,changes_requested}` lifecycle events.
+  - adoption rate (bps) = `approved_count / review_decision_count`.
+  - rollback rate (bps) = unique rolled-back candidates / unique applied candidates.
+  - false-positive rate (bps) = candidates that were both applied and later rolled back / applied candidates.
+  - approval latency (seconds) = average `(first decision ts - review packet ts)` per candidate.
+  - projected margin delta (bps) = average from replay reports (`projected_margin_delta_bps`).
+  - realized margin delta (bps) = average from latest realized observations per candidate.
+  - projected-vs-realized gap (bps) = average `(projected_margin_delta_bps - realized_margin_delta_bps)` on overlap set.
+- Alert thresholds are deterministic and explicit:
+  - rollback spike: `rollback_rate_bps > max_rollback_rate_bps`
+  - false-positive spike: `false_positive_rate_bps > max_false_positive_rate_bps`
+  - projected/realized drift: `abs(avg_projected_vs_realized_margin_gap_bps) > max_projected_realized_margin_gap_bps`
+- Query/dashboards alignment:
+  - `PolicyLifecycleKpiSnapshot` provides direct, persisted-field-compatible values for
+    projected-vs-realized comparison cards and operator alerting surfaces.
+- Task 8 tests validate:
+  - deterministic KPI outputs under reordered event/report/outcome inputs,
+  - correct formula outputs for throughput/adoption/rollback/latency/margin metrics,
+  - alert behavior for rollback spikes, false-positive spikes, and projected-realized drift.
+
 ## Guardrail Exit Checklist (Before Task 2 Coding)
 - [ ] Scope/non-goals approved.
 - [ ] KPI formulas and owners locked.
