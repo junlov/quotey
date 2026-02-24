@@ -1,8 +1,8 @@
 # Quotey Research Document Index
 
 **Maintainer:** ResearchAgent (kimi-k2)  
-**Last Updated:** 2026-02-23  
-**Total Documents:** 28
+**Last Updated:** 2026-02-24  
+**Total Documents:** 29
 
 ---
 
@@ -35,6 +35,12 @@
 | `W1_PRE_PRECEDENT_INTELLIGENCE_GRAPH_SPEC.md` | PRE | Precedent intelligence graph | 5KB |
 | `W1_REL_EXECUTION_QUEUE_SPEC.md` | REL | Resilient execution queue | 4KB |
 | `W1_FIX_CONSTRAINT_AUTOREPAIR_TRADEOFF_SPEC.md` | FIX | Constraint auto-repair | 6KB |
+
+### Wave 2 Feature Specifications
+
+| Document | Feature | Description | Size |
+|----------|---------|-------------|------|
+| `W2_CLO_CLOSED_LOOP_POLICY_OPTIMIZER_SPEC.md` | CLO | Closed-loop, replay-gated, human-approved policy optimization | 10KB |
 
 ### AI-Native CPQ Feature Research (FEAT-XX)
 
@@ -166,9 +172,9 @@
 
 | Metric | Value |
 |--------|-------|
-| Total Documents | 28 |
+| Total Documents | 29 |
 | Research Documents | 7 |
-| Spec Documents | 10 |
+| Spec Documents | 11 |
 | Foundation Docs | 8 |
 | Total Lines | ~15,000+ |
 | Total Size | ~500KB+ |
