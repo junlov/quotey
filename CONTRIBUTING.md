@@ -11,6 +11,24 @@ Thank you for your interest in contributing to Quotey! This document provides gu
 - **beads** (issue tracking): `brew install dicklesworthstone/tap/br`
 - **cass-memory** (cross-agent memory): `brew install dicklesworthstone/tap/cm`
 
+### Git Hooks
+
+The project includes a pre-commit hook that runs fast quality checks (formatting + clippy) before each commit.
+
+The hooks are stored in `.githooks/` and configured via `git config core.hooksPath .githooks`. This setup is already configured in the repository.
+
+To run the hook manually:
+
+```bash
+.githooks/pre-commit
+```
+
+To skip clippy (slower) during commit:
+
+```bash
+QUOTEY_PRE_COMMIT_CLIPPY=0 git commit -m "your message"
+```
+
 ### Quick Start
 
 ```bash

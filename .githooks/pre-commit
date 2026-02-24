@@ -1,0 +1,43 @@
+#!/bin/bash
+# Quotey pre-commit hook
+# Runs fast quality checks before each commit
+
+set -euo pipefail
+
+ROOT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
+cd "$ROOT_DIR"
+
+# Set temp paths to avoid host-level /tmp pressure
+export TMPDIR="${QUOTEY_TMPDIR_OVERRIDE:-$ROOT_DIR/.tmp}"
+export CARGO_TARGET_DIR="${QUOTEY_CARGO_TARGET_DIR_OVERRIDE:-$ROOT_DIR/.tmp-target}"
+mkdir -p "$TMPDIR" "$CARGO_TARGET_DIR"
+
+echo "[pre-commit] Running quality checks..."
+
+# Check for required tools
+if ! command -v cargo >/dev/null 2>&1; then
+    echo "[pre-commit] ERROR: cargo is not installed"
+    exit 1
+fi
+
+# Run fast checks
+echo "[pre-commit] Checking formatting..."
+if ! cargo fmt --all -- --check; then
+    echo "[pre-commit] ERROR: formatting issues run 'cargo fmt --all' to fix"
+    exit 1
+fi
+echo "[pre-commit] Formatting OK"
+
+# Clippy can be slow, so make it optional via env var
+if [[ "${QUOTEY_PRE_COMMIT_CLIPPY:-1}" == "1" ]]; then
+    echo "[pre-commit] Running clippy..."
+    if command -v cargo lint >/dev/null 2>&1; then
+        cargo lint || exit 1
+    else
+        cargo clippy --workspace --all-targets -- -D warnings || exit 1
+    fi
+    echo "[pre-commit] Clippy OK"
+fi
+
+echo "[pre-commit] All checks passed!"
+exit 0
