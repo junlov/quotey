@@ -111,7 +111,7 @@ impl PrecedentRepository for SqlPrecedentRepository {
                 outcome_status, final_price, close_date, created_at
             FROM configuration_fingerprints
             WHERE quote_id = ?
-            ORDER BY created_at DESC
+            ORDER BY created_at DESC, id DESC
             LIMIT 1
             "#,
         )
@@ -169,7 +169,7 @@ impl PrecedentRepository for SqlPrecedentRepository {
                 customer_segment, product_mix_json, sales_cycle_days, created_at
             FROM deal_outcomes
             WHERE quote_id = ?
-            ORDER BY close_date DESC, created_at DESC
+            ORDER BY close_date DESC, created_at DESC, id DESC
             LIMIT 1
             "#,
         )
@@ -192,9 +192,7 @@ impl PrecedentRepository for SqlPrecedentRepository {
                 routed_by_actor_id, idempotency_key, correlation_id,
                 routed_at, decided_at, created_at, updated_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
-                quote_id = excluded.quote_id,
-                route_version = excluded.route_version,
+            ON CONFLICT(quote_id, route_version) DO UPDATE SET
                 route_payload_json = excluded.route_payload_json,
                 decision_status = excluded.decision_status,
                 decision_actor_id = excluded.decision_actor_id,
@@ -241,7 +239,7 @@ impl PrecedentRepository for SqlPrecedentRepository {
                 routed_at, decided_at, created_at, updated_at
             FROM precedent_approval_path_evidence
             WHERE quote_id = ?
-            ORDER BY route_version DESC, routed_at DESC
+            ORDER BY route_version DESC, routed_at DESC, id DESC
             LIMIT 1
             "#,
         )
@@ -265,13 +263,10 @@ impl PrecedentRepository for SqlPrecedentRepository {
                 evidence_payload_json, idempotency_key, correlation_id,
                 computed_at, created_at
             ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-            ON CONFLICT(id) DO UPDATE SET
+            ON CONFLICT(source_fingerprint_id, candidate_fingerprint_id, strategy_version) DO UPDATE SET
                 source_quote_id = excluded.source_quote_id,
-                source_fingerprint_id = excluded.source_fingerprint_id,
                 candidate_quote_id = excluded.candidate_quote_id,
-                candidate_fingerprint_id = excluded.candidate_fingerprint_id,
                 similarity_score = excluded.similarity_score,
-                strategy_version = excluded.strategy_version,
                 score_components_json = excluded.score_components_json,
                 evidence_payload_json = excluded.evidence_payload_json,
                 idempotency_key = excluded.idempotency_key,
@@ -305,8 +300,9 @@ impl PrecedentRepository for SqlPrecedentRepository {
         min_similarity: f64,
         limit: i32,
     ) -> Result<Vec<PrecedentSimilarityEvidence>, RepositoryError> {
-        let min_similarity = min_similarity.clamp(0.0, 1.0);
-        let limit = limit.max(1);
+        let min_similarity =
+            if min_similarity.is_finite() { min_similarity.clamp(0.0, 1.0) } else { 0.0 };
+        let limit = limit.clamp(1, 100);
 
         let rows = sqlx::query(
             r#"
@@ -615,6 +611,24 @@ mod tests {
 
         repo.save_approval_path_evidence(approval_v1).await.expect("save approval v1");
         repo.save_approval_path_evidence(approval_v2.clone()).await.expect("save approval v2");
+        repo.save_approval_path_evidence(PrecedentApprovalPathEvidence {
+            id: PrecedentApprovalPathId("pre-appr-2-rewrite".to_string()),
+            quote_id: source_quote.clone(),
+            route_version: 2,
+            route_payload_json: "{\"path\":[\"manager\",\"vp_sales\",\"finance\"]}".to_string(),
+            decision_status: PrecedentDecisionStatus::Escalated,
+            decision_actor_id: Some("U-MGR-1".to_string()),
+            decision_reason: Some("requires finance confirmation".to_string()),
+            routed_by_actor_id: "U-SYSTEM".to_string(),
+            idempotency_key: "idem-pre-appr-2-rewrite".to_string(),
+            correlation_id: "corr-pre-2-rewrite".to_string(),
+            routed_at: parse_ts("2026-02-24T02:22:00Z"),
+            decided_at: Some(parse_ts("2026-02-24T02:23:00Z")),
+            created_at: parse_ts("2026-02-24T02:22:00Z"),
+            updated_at: parse_ts("2026-02-24T02:23:00Z"),
+        })
+        .await
+        .expect("rewrite approval route version");
 
         let latest_approval = repo
             .get_latest_approval_path_for_quote(&source_quote)
@@ -622,8 +636,12 @@ mod tests {
             .expect("load latest approval")
             .expect("approval exists");
         assert_eq!(latest_approval.route_version, 2);
-        assert_eq!(latest_approval.decision_status, PrecedentDecisionStatus::Approved);
-        assert_eq!(latest_approval.decision_actor_id.as_deref(), Some("U-VP-1"));
+        assert_eq!(latest_approval.decision_status, PrecedentDecisionStatus::Escalated);
+        assert_eq!(latest_approval.decision_actor_id.as_deref(), Some("U-MGR-1"));
+        assert_eq!(
+            latest_approval.decision_reason.as_deref(),
+            Some("requires finance confirmation")
+        );
 
         let similarity_a = PrecedentSimilarityEvidence {
             id: PrecedentSimilarityEvidenceId("pre-sim-a".to_string()),
@@ -658,6 +676,24 @@ mod tests {
 
         repo.save_similarity_evidence(similarity_a.clone()).await.expect("save similarity a");
         repo.save_similarity_evidence(similarity_b).await.expect("save similarity b");
+        repo.save_similarity_evidence(PrecedentSimilarityEvidence {
+            id: PrecedentSimilarityEvidenceId("pre-sim-a-rewrite".to_string()),
+            source_quote_id: source_quote.clone(),
+            source_fingerprint_id: "fp-pre-src".to_string(),
+            candidate_quote_id: candidate_a.clone(),
+            candidate_fingerprint_id: "fp-pre-a".to_string(),
+            similarity_score: 0.95,
+            strategy_version: "simhash-v1".to_string(),
+            score_components_json: "{\"hamming_distance\":6}".to_string(),
+            evidence_payload_json: "{\"normalization\":\"v1\",\"adjustment\":\"rewrite\"}"
+                .to_string(),
+            idempotency_key: "idem-pre-sim-a-rewrite".to_string(),
+            correlation_id: "corr-pre-sim-1-rewrite".to_string(),
+            computed_at: parse_ts("2026-02-24T02:32:00Z"),
+            created_at: parse_ts("2026-02-24T02:32:00Z"),
+        })
+        .await
+        .expect("rewrite similarity evidence");
 
         let filtered = repo
             .list_similarity_evidence_for_quote(&source_quote, 0.8, 10)
@@ -665,6 +701,7 @@ mod tests {
             .expect("list filtered similarities");
         assert_eq!(filtered.len(), 1);
         assert_eq!(filtered[0].id, similarity_a.id);
+        assert!((filtered[0].similarity_score - 0.95).abs() < f64::EPSILON);
         assert_eq!(filtered[0].candidate_quote_id, candidate_a);
 
         let top_one = repo
@@ -672,7 +709,13 @@ mod tests {
             .await
             .expect("list top similarity");
         assert_eq!(top_one.len(), 1);
-        assert_eq!(top_one[0].similarity_score, 0.91);
+        assert_eq!(top_one[0].similarity_score, 0.95);
+
+        let with_nan_threshold = repo
+            .list_similarity_evidence_for_quote(&source_quote, f64::NAN, 10)
+            .await
+            .expect("nan threshold should degrade to deterministic floor");
+        assert_eq!(with_nan_threshold.len(), 2);
 
         pool.close().await;
     }
