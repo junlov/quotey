@@ -219,6 +219,146 @@ pub fn approval_request_message(quote_id: &str, approver_role: &str) -> MessageT
         .build()
 }
 
+/// Rich approval request context for building detailed approval cards
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApprovalRequestContext {
+    pub quote_id: String,
+    pub customer_name: String,
+    pub quote_value: f64,
+    pub discount_percent: f64,
+    pub approver_role: String,
+    pub approver_name: Option<String>,
+    pub requester_name: String,
+    pub threshold_percent: f64,
+    pub urgency: ApprovalUrgency,
+    pub context_lines: Vec<String>,
+}
+
+/// Urgency level for styling approval requests
+#[derive(Clone, Debug, PartialEq)]
+pub enum ApprovalUrgency {
+    Normal,
+    High,
+    Critical,
+}
+
+impl ApprovalUrgency {
+    fn emoji(&self) -> &'static str {
+        match self {
+            ApprovalUrgency::Normal => "📋",
+            ApprovalUrgency::High => "⚠️",
+            ApprovalUrgency::Critical => "🚨",
+        }
+    }
+
+    fn label(&self) -> &'static str {
+        match self {
+            ApprovalUrgency::Normal => "Normal",
+            ApprovalUrgency::High => "High Priority",
+            ApprovalUrgency::Critical => "Critical",
+        }
+    }
+}
+
+/// Rich approval request card with detailed context and emoji actions
+#[derive(Clone, Debug, PartialEq)]
+pub struct ApprovalRequestCard {
+    context: ApprovalRequestContext,
+}
+
+impl ApprovalRequestCard {
+    /// Create a new approval request card
+    pub fn new(context: ApprovalRequestContext) -> Self {
+        Self { context }
+    }
+
+    /// Render the card as a Slack message template
+    pub fn render(&self) -> MessageTemplate {
+        let ctx = &self.context;
+        let urgency = &ctx.urgency;
+        let emoji = urgency.emoji();
+        let label = urgency.label();
+
+        let mention =
+            ctx.approver_name.as_ref().map(|name| format!("@{} ", name)).unwrap_or_default();
+
+        let fallback = format!(
+            "{} Approval required: {} for {} (${:.0}, {:.0}% discount)",
+            emoji, ctx.quote_id, ctx.customer_name, ctx.quote_value, ctx.discount_percent
+        );
+
+        let mut builder = MessageBuilder::new(&fallback)
+            .section("quote.approval_card.header.v1", |section| {
+                section.mrkdwn(format!(
+                    "{} *Approval Required* • *{}*\n{}{}",
+                    emoji, label, mention, ctx.approver_role
+                ));
+            })
+            .section("quote.approval_card.quote_summary.v1", |section| {
+                section.mrkdwn(format!(
+                    "*Quote:* `{}`\n*Customer:* {}\n*Value:* {}\n*Discount:* {:.1}%",
+                    ctx.quote_id,
+                    ctx.customer_name,
+                    format_currency(ctx.quote_value),
+                    ctx.discount_percent
+                ));
+            })
+            .section("quote.approval_card.threshold.v1", |section| {
+                section.mrkdwn(format!(
+                    "*Threshold exceeded:* {:.0}% discount cap for {}",
+                    ctx.threshold_percent, ctx.approver_role
+                ));
+            });
+
+        // Add context lines if any
+        if !ctx.context_lines.is_empty() {
+            let context_text = ctx.context_lines.join("\n");
+            builder = builder.section("quote.approval_card.context.v1", |section| {
+                section.mrkdwn(format!("*Additional context:*\n{}", context_text));
+            });
+        }
+
+        // Emoji action buttons
+        builder = builder.actions("quote.approval_card.emoji_actions.v1", |actions| {
+            actions
+                .button(
+                    ButtonElement::new("approval.approve.emoji.v1", "👍 Approve")
+                        .style(ButtonStyle::Primary)
+                        .value(&ctx.quote_id),
+                )
+                .button(
+                    ButtonElement::new("approval.reject.emoji.v1", "👎 Reject")
+                        .style(ButtonStyle::Danger)
+                        .value(&ctx.quote_id),
+                )
+                .button(
+                    ButtonElement::new("approval.discuss.emoji.v1", "💬 Discuss")
+                        .value(&ctx.quote_id),
+                );
+        });
+
+        // Secondary text actions
+        builder = builder.actions("quote.approval_card.text_actions.v1", |actions| {
+            actions
+                .button(
+                    ButtonElement::new("approval.view_quote.v1", "View Full Quote")
+                        .value(&ctx.quote_id),
+                )
+                .button(
+                    ButtonElement::new("approval.view_policy.v1", "View Policy")
+                        .value(&ctx.quote_id),
+                );
+        });
+
+        builder
+            .context("quote.approval_card.footer.v1", |context| {
+                context
+                    .plain(format!("Requested by {} • Quote {}", ctx.requester_name, ctx.quote_id));
+            })
+            .build()
+    }
+}
+
 pub fn error_message(summary: &str, correlation_id: &str) -> MessageTemplate {
     MessageBuilder::new(summary.to_owned())
         .section("quote.error.summary.v1", |section| {
@@ -823,5 +963,128 @@ mod tests {
 
         assert!(message.fallback_text.contains("Failed permanently"));
         assert!(message.fallback_text.contains("Invalid configuration"));
+    }
+
+    #[test]
+    fn approval_request_card_renders_with_emoji_buttons() {
+        use super::{ApprovalRequestCard, ApprovalRequestContext, ApprovalUrgency};
+
+        let card = ApprovalRequestCard::new(ApprovalRequestContext {
+            quote_id: "Q-2026-001".to_string(),
+            customer_name: "Acme Corp".to_string(),
+            quote_value: 67_000.0,
+            discount_percent: 23.0,
+            approver_role: "VP Sales".to_string(),
+            approver_name: Some("sarah-vp".to_string()),
+            requester_name: "john-ae".to_string(),
+            threshold_percent: 20.0,
+            urgency: ApprovalUrgency::High,
+            context_lines: vec!["Strategic account".to_string(), "2-year commitment".to_string()],
+        });
+
+        let message = card.render();
+
+        // Check header contains urgency indicator
+        assert!(message.fallback_text.contains("Approval required"));
+        assert!(message.fallback_text.contains("Acme Corp"));
+
+        // Find the header section
+        let header = message.blocks.iter().find(|block| {
+            matches!(block, Block::Section { block_id, .. } if block_id == "quote.approval_card.header.v1")
+        });
+        assert!(header.is_some(), "expected header section");
+
+        // Check quote summary section exists
+        let summary = message.blocks.iter().find(|block| {
+            matches!(block, Block::Section { block_id, .. } if block_id == "quote.approval_card.quote_summary.v1")
+        });
+        assert!(summary.is_some(), "expected quote summary section");
+
+        // Check emoji actions block exists with correct buttons
+        let emoji_actions = message.blocks.iter().find(|block| {
+            matches!(block, Block::Actions { block_id, .. } if block_id == "quote.approval_card.emoji_actions.v1")
+        });
+        assert!(emoji_actions.is_some(), "expected emoji actions block");
+
+        if let Block::Actions { elements, .. } = emoji_actions.unwrap() {
+            assert_eq!(elements.len(), 3);
+            assert!(elements.iter().any(|e| e.action_id == "approval.approve.emoji.v1"));
+            assert!(elements.iter().any(|e| e.action_id == "approval.reject.emoji.v1"));
+            assert!(elements.iter().any(|e| e.action_id == "approval.discuss.emoji.v1"));
+        }
+
+        // Check context lines are included
+        let context_section = message.blocks.iter().find(|block| {
+            matches!(block, Block::Section { block_id, .. } if block_id == "quote.approval_card.context.v1")
+        });
+        assert!(context_section.is_some(), "expected context section with additional info");
+    }
+
+    #[test]
+    fn approval_request_card_normal_urgency_styling() {
+        use super::{ApprovalRequestCard, ApprovalRequestContext, ApprovalUrgency};
+
+        let card = ApprovalRequestCard::new(ApprovalRequestContext {
+            quote_id: "Q-2026-002".to_string(),
+            customer_name: "Globex".to_string(),
+            quote_value: 45_000.0,
+            discount_percent: 15.0,
+            approver_role: "Sales Manager".to_string(),
+            approver_name: None,
+            requester_name: "jane-ae".to_string(),
+            threshold_percent: 15.0,
+            urgency: ApprovalUrgency::Normal,
+            context_lines: vec![],
+        });
+
+        let message = card.render();
+
+        // Normal urgency should not have context section (empty lines)
+        let context_section = message.blocks.iter().find(|block| {
+            matches!(block, Block::Section { block_id, .. } if block_id == "quote.approval_card.context.v1")
+        });
+        assert!(
+            context_section.is_none(),
+            "normal urgency with no context should skip context section"
+        );
+
+        // Should still have all action buttons
+        let emoji_actions = message.blocks.iter().find(|block| {
+            matches!(block, Block::Actions { block_id, .. } if block_id == "quote.approval_card.emoji_actions.v1")
+        });
+        assert!(emoji_actions.is_some());
+    }
+
+    #[test]
+    fn approval_request_card_critical_urgency_includes_all_sections() {
+        use super::{ApprovalRequestCard, ApprovalRequestContext, ApprovalUrgency};
+
+        let card = ApprovalRequestCard::new(ApprovalRequestContext {
+            quote_id: "Q-2026-003".to_string(),
+            customer_name: "Initech".to_string(),
+            quote_value: 120_000.0,
+            discount_percent: 35.0,
+            approver_role: "CFO".to_string(),
+            approver_name: Some("mike-cfo".to_string()),
+            requester_name: "tom-vp".to_string(),
+            threshold_percent: 25.0,
+            urgency: ApprovalUrgency::Critical,
+            context_lines: vec![
+                "Competitive situation".to_string(),
+                "Customer threatening churn".to_string(),
+                "End-of-quarter deal".to_string(),
+            ],
+        });
+
+        let message = card.render();
+
+        // Should have header, summary, threshold, context, two action blocks, and footer
+        assert!(message.blocks.len() >= 6);
+
+        // Verify footer exists with requester info
+        let footer = message.blocks.iter().find(|block| {
+            matches!(block, Block::Context { block_id, .. } if block_id == "quote.approval_card.footer.v1")
+        });
+        assert!(footer.is_some(), "expected footer context block");
     }
 }
