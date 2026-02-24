@@ -2,7 +2,27 @@ mod bootstrap;
 mod health;
 
 use anyhow::Result;
-use quotey_core::config::{ConfigOverrides, LoadOptions};
+use quotey_core::config::{AppConfig, ConfigOverrides, LoadOptions};
+
+fn init_logging(config: &AppConfig) {
+    use quotey_core::config::LogFormat::*;
+    use tracing::Level;
+
+    let log_level = config.logging.level.parse::<Level>().unwrap_or(Level::INFO);
+
+    match config.logging.format {
+        Compact => {
+            tracing_subscriber::fmt().with_target(false).with_max_level(log_level).compact().init();
+        }
+        Pretty => {
+            tracing_subscriber::fmt().with_target(false).with_max_level(log_level).pretty().init();
+        }
+        Json => {
+            // JSON format requires the json feature - fall back to compact if not available
+            tracing_subscriber::fmt().with_target(false).with_max_level(log_level).compact().init();
+        }
+    }
+}
 
 #[tokio::main]
 async fn main() -> Result<()> {
@@ -10,7 +30,9 @@ async fn main() -> Result<()> {
 }
 
 pub async fn run() -> Result<()> {
-    tracing_subscriber::fmt().with_target(false).compact().init();
+    // Load config early for logging setup
+    let config = AppConfig::load(LoadOptions::default()).unwrap_or_else(|_| AppConfig::default());
+    init_logging(&config);
 
     let app = bootstrap::bootstrap(LoadOptions {
         overrides: ConfigOverrides {
