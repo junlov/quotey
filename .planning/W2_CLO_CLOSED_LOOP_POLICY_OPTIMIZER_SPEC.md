@@ -319,6 +319,32 @@ These items are tracked as beads and are the authoritative implementation checkl
   - primary owner is Runtime owner (backup owner: Revenue Ops owner),
   - each drill execution must retain report artifacts for audit trail review.
 
+## Task 7 Safety Evaluation + Red-Team Harness
+- Red-team evaluation contract is implemented in `crates/core/src/policy/optimizer.rs`:
+  - `RedTeamScenarioCode`
+  - `RedTeamScenarioOutcome`
+  - `RedTeamSafetyEvaluation` (schema `clo_red_team_eval.v1`)
+  - deterministic scenario evaluators + artifact checksum generation.
+- Required adversarial scenarios covered in deterministic checks:
+  - `margin_collapse`: blocks broad-impact margin degradation outside the safe envelope.
+  - `policy_bypass`: blocks manipulative control-surface edits (for example removal/disable of approval/guardrail controls).
+  - `biased_cohort_regression`: blocks concentrated single-segment win-rate regressions.
+- Candidate generation integration (`PolicyCandidateGenerator::generate`):
+  - executes red-team evaluation before candidate package emission,
+  - blocks unsafe candidates with explicit scenario-specific reasons,
+  - emits a canonical `safety_evaluation_json` artifact under candidate provenance when checks pass.
+- Candidate validation hardening (`PolicyCandidateDiffV1::validate`):
+  - validates and normalizes `safety_evaluation_json` when present,
+  - enforces schema version, candidate/replay checksum linkage, and evidence checksum integrity,
+  - rejects blocked/unsafe safety artifacts from entering approval/apply workflows.
+- Approval packet attachment + persistence contract:
+  - safety artifact is embedded in candidate provenance, which is included in approval packets,
+  - artifact persists through existing candidate storage paths (`policy_diff_json` / `provenance_json`) without non-deterministic mutation.
+- Task 7 tests validate:
+  - explicit blocking for all three adversarial scenario classes,
+  - deterministic artifact generation in successful candidate builds,
+  - compatibility with existing replay/approval/apply regression suites.
+
 ## Guardrail Exit Checklist (Before Task 2 Coding)
 - [ ] Scope/non-goals approved.
 - [ ] KPI formulas and owners locked.

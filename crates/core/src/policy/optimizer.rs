@@ -14,6 +14,11 @@ use crate::domain::optimizer::{
 };
 
 const BASIS_POINTS_SCALE: i64 = 10_000;
+const RED_TEAM_EVALUATION_SCHEMA_VERSION: &str = "clo_red_team_eval.v1";
+const RED_TEAM_MARGIN_COLLAPSE_MAX_DELTA_BPS: i32 = -45;
+const RED_TEAM_MARGIN_COLLAPSE_MIN_IMPACT_RATIO_BPS: i32 = 6_000;
+const RED_TEAM_BIASED_COHORT_MAX_SEGMENTS: usize = 1;
+const RED_TEAM_BIASED_COHORT_MIN_WIN_RATE_DROP_BPS: i32 = -15;
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ReplayQuoteSnapshot {
@@ -640,6 +645,96 @@ pub struct CandidateProvenance {
     pub source_replay_evaluation_ids: Vec<String>,
     pub source_outcome_window: String,
     pub generated_by: String,
+    #[serde(default)]
+    pub safety_evaluation_json: Option<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RedTeamScenarioCode {
+    MarginCollapse,
+    PolicyBypass,
+    BiasedCohortRegression,
+}
+
+impl RedTeamScenarioCode {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::MarginCollapse => "margin_collapse",
+            Self::PolicyBypass => "policy_bypass",
+            Self::BiasedCohortRegression => "biased_cohort_regression",
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedTeamScenarioOutcome {
+    pub scenario: RedTeamScenarioCode,
+    pub blocked: bool,
+    pub measured_value: i32,
+    pub threshold_value: i32,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RedTeamSafetyEvaluation {
+    pub schema_version: String,
+    pub candidate_id: PolicyCandidateId,
+    pub replay_checksum: String,
+    pub deterministic_pass: bool,
+    pub blocked_scenario_count: i32,
+    pub outcomes: Vec<RedTeamScenarioOutcome>,
+    pub evidence_checksum: String,
+}
+
+impl RedTeamSafetyEvaluation {
+    fn blocked_reasons(&self) -> Vec<String> {
+        self.outcomes
+            .iter()
+            .filter(|outcome| outcome.blocked)
+            .map(|outcome| outcome.reason.clone())
+            .collect()
+    }
+
+    fn normalized(&self) -> Self {
+        let mut outcomes = self
+            .outcomes
+            .iter()
+            .map(|outcome| RedTeamScenarioOutcome {
+                scenario: outcome.scenario.clone(),
+                blocked: outcome.blocked,
+                measured_value: outcome.measured_value,
+                threshold_value: outcome.threshold_value,
+                reason: outcome.reason.trim().to_string(),
+            })
+            .collect::<Vec<_>>();
+        outcomes.sort_by(|left, right| left.scenario.as_str().cmp(right.scenario.as_str()));
+
+        let blocked_scenario_count =
+            saturating_i64_to_i32(outcomes.iter().filter(|outcome| outcome.blocked).count() as i64);
+        let deterministic_pass = blocked_scenario_count == 0;
+        let candidate_id = PolicyCandidateId(self.candidate_id.0.trim().to_string());
+        let replay_checksum = self.replay_checksum.trim().to_ascii_lowercase();
+        let outcomes_json = match serde_json::to_string(&outcomes) {
+            Ok(serialized) => serialized,
+            Err(_) => "[]".to_string(),
+        };
+        let evidence_checksum = checksum_from_parts(&[
+            candidate_id.0.as_str(),
+            replay_checksum.as_str(),
+            outcomes_json.as_str(),
+        ]);
+
+        Self {
+            schema_version: RED_TEAM_EVALUATION_SCHEMA_VERSION.to_string(),
+            candidate_id,
+            replay_checksum,
+            deterministic_pass,
+            blocked_scenario_count,
+            outcomes,
+            evidence_checksum,
+        }
+    }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -804,6 +899,57 @@ impl PolicyCandidateDiffV1 {
                 "source_replay_evaluation_ids is required".to_string(),
             ));
         }
+        if let Some(safety_evaluation_json) = self.provenance.safety_evaluation_json.as_deref() {
+            if safety_evaluation_json.trim().is_empty() {
+                return Err(CandidateDiffValidationError::MissingProvenance(
+                    "safety_evaluation_json cannot be empty".to_string(),
+                ));
+            }
+
+            let parsed_raw = serde_json::from_str::<RedTeamSafetyEvaluation>(
+                safety_evaluation_json,
+            )
+            .map_err(|error| {
+                CandidateDiffValidationError::InvalidSafetyEvaluation(format!(
+                    "unable to parse safety evaluation JSON: {error}"
+                ))
+            })?;
+            if parsed_raw.schema_version.trim() != RED_TEAM_EVALUATION_SCHEMA_VERSION {
+                return Err(CandidateDiffValidationError::InvalidSafetyEvaluation(
+                    "unsupported safety evaluation schema version".to_string(),
+                ));
+            }
+            let parsed = parsed_raw.normalized();
+            if parsed_raw.evidence_checksum.trim().to_ascii_lowercase() != parsed.evidence_checksum
+            {
+                return Err(CandidateDiffValidationError::InvalidSafetyEvaluation(
+                    "safety evaluation evidence checksum mismatch".to_string(),
+                ));
+            }
+            if parsed.candidate_id != PolicyCandidateId(self.candidate_id.0.trim().to_string()) {
+                return Err(CandidateDiffValidationError::InvalidSafetyEvaluation(
+                    "safety evaluation candidate id does not match candidate section".to_string(),
+                ));
+            }
+            if parsed.replay_checksum
+                != self.projected_impact.replay_checksum.trim().to_ascii_lowercase()
+            {
+                return Err(CandidateDiffValidationError::InvalidSafetyEvaluation(
+                    "safety evaluation replay checksum does not match projected impact checksum"
+                        .to_string(),
+                ));
+            }
+            if parsed.outcomes.len() != 3 {
+                return Err(CandidateDiffValidationError::InvalidSafetyEvaluation(
+                    "safety evaluation must include all required red-team scenarios".to_string(),
+                ));
+            }
+            if !parsed.deterministic_pass || parsed.blocked_scenario_count > 0 {
+                return Err(CandidateDiffValidationError::InvalidSafetyEvaluation(
+                    "safety evaluation contains blocked scenarios".to_string(),
+                ));
+            }
+        }
 
         if self.rationale_summary.trim().is_empty() {
             return Err(CandidateDiffValidationError::EmptyRationaleSummary);
@@ -884,6 +1030,11 @@ impl PolicyCandidateDiffV1 {
                 ),
                 source_outcome_window: self.provenance.source_outcome_window.trim().to_string(),
                 generated_by: self.provenance.generated_by.trim().to_string(),
+                safety_evaluation_json: self
+                    .provenance
+                    .safety_evaluation_json
+                    .as_deref()
+                    .map(canonicalize_json),
             },
             rationale_summary: self.rationale_summary.trim().to_string(),
         }
@@ -914,6 +1065,8 @@ pub enum CandidateDiffValidationError {
     InvalidConfidenceBounds(String),
     #[error("provenance is incomplete: {0}")]
     MissingProvenance(String),
+    #[error("invalid safety evaluation payload: {0}")]
+    InvalidSafetyEvaluation(String),
     #[error("rationale summary cannot be empty")]
     EmptyRationaleSummary,
     #[error("candidate diff serialization failed: {details}")]
@@ -993,6 +1146,22 @@ impl PolicyCandidateGenerator {
             ))
         });
 
+        let safety_evaluation = build_red_team_safety_evaluation(
+            &request.candidate_id,
+            &request.replay_report,
+            &rule_diffs,
+        );
+        if !safety_evaluation.deterministic_pass {
+            return Err(CandidateGenerationError::UnsafeReplayEvidence {
+                reasons: safety_evaluation.blocked_reasons(),
+            });
+        }
+        let safety_evaluation_json = serde_json::to_string(&safety_evaluation).map_err(|err| {
+            CandidateDiffValidationError::SerializationError { details: err.to_string() }
+        })?;
+        let mut provenance = request.provenance;
+        provenance.safety_evaluation_json = Some(safety_evaluation_json);
+
         let rationale_summary =
             build_rationale_summary(&request.candidate_id, &rule_diffs, &request.replay_report);
 
@@ -1016,7 +1185,7 @@ impl PolicyCandidateGenerator {
                     .projected_hard_violation_delta,
             },
             confidence_bounds: request.confidence_bounds,
-            provenance: request.provenance,
+            provenance,
             rationale_summary: rationale_summary.clone(),
         };
 
@@ -1081,6 +1250,187 @@ fn build_rationale_summary(
         replay_report.projected_approval_load_delta_bps,
         replay_report.projected_hard_violation_delta,
     )
+}
+
+fn build_red_team_safety_evaluation(
+    candidate_id: &PolicyCandidateId,
+    replay_report: &ReplayImpactReport,
+    rule_diffs: &[CandidateRuleDiff],
+) -> RedTeamSafetyEvaluation {
+    let mut outcomes = vec![
+        evaluate_margin_collapse_scenario(replay_report),
+        evaluate_policy_bypass_scenario(rule_diffs),
+        evaluate_biased_cohort_regression_scenario(replay_report),
+    ];
+    outcomes.sort_by(|left, right| left.scenario.as_str().cmp(right.scenario.as_str()));
+
+    let blocked_scenario_count =
+        saturating_i64_to_i32(outcomes.iter().filter(|outcome| outcome.blocked).count() as i64);
+    let deterministic_pass = blocked_scenario_count == 0;
+    let normalized_candidate_id = PolicyCandidateId(candidate_id.0.trim().to_string());
+    let replay_checksum = replay_report.input_checksum.trim().to_ascii_lowercase();
+    let outcomes_json = match serde_json::to_string(&outcomes) {
+        Ok(serialized) => serialized,
+        Err(_) => "[]".to_string(),
+    };
+    let evidence_checksum = checksum_from_parts(&[
+        normalized_candidate_id.0.as_str(),
+        replay_checksum.as_str(),
+        outcomes_json.as_str(),
+    ]);
+
+    RedTeamSafetyEvaluation {
+        schema_version: RED_TEAM_EVALUATION_SCHEMA_VERSION.to_string(),
+        candidate_id: normalized_candidate_id,
+        replay_checksum,
+        deterministic_pass,
+        blocked_scenario_count,
+        outcomes,
+        evidence_checksum,
+    }
+}
+
+fn evaluate_margin_collapse_scenario(replay_report: &ReplayImpactReport) -> RedTeamScenarioOutcome {
+    let blocked = replay_report.projected_margin_delta_bps
+        <= RED_TEAM_MARGIN_COLLAPSE_MAX_DELTA_BPS
+        && replay_report.blast_radius.impacted_quote_ratio_bps
+            >= RED_TEAM_MARGIN_COLLAPSE_MIN_IMPACT_RATIO_BPS;
+
+    let reason = if blocked {
+        format!(
+            "red-team margin collapse block: projected margin delta {:+}bps with impacted quote ratio {}bps exceeds safe envelope.",
+            replay_report.projected_margin_delta_bps,
+            replay_report.blast_radius.impacted_quote_ratio_bps
+        )
+    } else {
+        format!(
+            "red-team margin collapse check passed: projected margin delta {:+}bps and impacted quote ratio {}bps stay within envelope.",
+            replay_report.projected_margin_delta_bps,
+            replay_report.blast_radius.impacted_quote_ratio_bps
+        )
+    };
+
+    RedTeamScenarioOutcome {
+        scenario: RedTeamScenarioCode::MarginCollapse,
+        blocked,
+        measured_value: replay_report.projected_margin_delta_bps,
+        threshold_value: RED_TEAM_MARGIN_COLLAPSE_MAX_DELTA_BPS,
+        reason,
+    }
+}
+
+fn evaluate_policy_bypass_scenario(rule_diffs: &[CandidateRuleDiff]) -> RedTeamScenarioOutcome {
+    let mut risky_surfaces = rule_diffs
+        .iter()
+        .filter(|rule_diff| is_policy_bypass_surface(rule_diff))
+        .map(|rule_diff| {
+            format!(
+                "{}:{}:{}",
+                rule_diff.rule_id.trim(),
+                rule_diff.field.trim(),
+                rule_diff.operation.as_str()
+            )
+        })
+        .collect::<Vec<_>>();
+    risky_surfaces.sort();
+    let blocked = !risky_surfaces.is_empty();
+
+    let reason = if blocked {
+        format!(
+            "red-team policy bypass block: manipulative control-surface changes detected [{}].",
+            risky_surfaces.join(", ")
+        )
+    } else {
+        "red-team policy bypass check passed: no manipulative control-surface changes detected."
+            .to_string()
+    };
+
+    RedTeamScenarioOutcome {
+        scenario: RedTeamScenarioCode::PolicyBypass,
+        blocked,
+        measured_value: saturating_i64_to_i32(risky_surfaces.len() as i64),
+        threshold_value: 0,
+        reason,
+    }
+}
+
+fn is_policy_bypass_surface(rule_diff: &CandidateRuleDiff) -> bool {
+    let rule_id = rule_diff.rule_id.trim().to_ascii_lowercase();
+    let field = rule_diff.field.trim().to_ascii_lowercase();
+    let control_surface = [
+        "approval",
+        "guardrail",
+        "violation",
+        "margin_floor",
+        "margin-floor",
+        "discount_cap",
+        "discount-cap",
+        "policy_gate",
+        "policy-gate",
+    ]
+    .iter()
+    .any(|keyword| rule_id.contains(keyword) || field.contains(keyword));
+
+    if rule_diff.operation == CandidateRuleOperation::Remove && control_surface {
+        return true;
+    }
+
+    if field.contains("enabled") {
+        return rule_diff
+            .to_value_json
+            .as_deref()
+            .map(value_represents_disabled_flag)
+            .unwrap_or(false);
+    }
+
+    false
+}
+
+fn value_represents_disabled_flag(raw: &str) -> bool {
+    let trimmed = raw.trim();
+    if trimmed.eq_ignore_ascii_case("false") {
+        return true;
+    }
+
+    match serde_json::from_str::<Value>(trimmed) {
+        Ok(Value::Bool(flag)) => !flag,
+        Ok(Value::Object(map)) => {
+            map.get("enabled").and_then(Value::as_bool) == Some(false)
+                || map.get("value").and_then(Value::as_bool) == Some(false)
+        }
+        _ => false,
+    }
+}
+
+fn evaluate_biased_cohort_regression_scenario(
+    replay_report: &ReplayImpactReport,
+) -> RedTeamScenarioOutcome {
+    let segment_count = replay_report.blast_radius.impacted_segment_keys.len();
+    let blocked = segment_count <= RED_TEAM_BIASED_COHORT_MAX_SEGMENTS
+        && replay_report.projected_win_rate_proxy_delta_bps
+            <= RED_TEAM_BIASED_COHORT_MIN_WIN_RATE_DROP_BPS;
+
+    let reason = if blocked {
+        format!(
+            "red-team biased cohort regression block: win-rate proxy delta {:+}bps concentrated in {} impacted segment(s).",
+            replay_report.projected_win_rate_proxy_delta_bps,
+            segment_count
+        )
+    } else {
+        format!(
+            "red-team biased cohort regression check passed: win-rate proxy delta {:+}bps across {} impacted segment(s).",
+            replay_report.projected_win_rate_proxy_delta_bps,
+            segment_count
+        )
+    };
+
+    RedTeamScenarioOutcome {
+        scenario: RedTeamScenarioCode::BiasedCohortRegression,
+        blocked,
+        measured_value: replay_report.projected_win_rate_proxy_delta_bps,
+        threshold_value: RED_TEAM_BIASED_COHORT_MIN_WIN_RATE_DROP_BPS,
+        reason,
+    }
 }
 
 const APPROVAL_PACKET_SCHEMA_VERSION: &str = "clo_approval_packet.v1";
@@ -2079,9 +2429,10 @@ mod tests {
         CandidateGenerationError, CandidateGenerationRequest, CandidateProvenance,
         CandidateRuleOperation, CandidateRuleSignal, InMemoryPolicyLifecycleEngine,
         PolicyApplyRequest, PolicyCandidateDiffV1, PolicyCandidateGenerator, PolicyCandidateStatus,
-        PolicyLifecycleError, PolicyReplayEngine, PolicyRollbackRequest, ReplayGuardrailBlock,
-        ReplayGuardrailCode, ReplayGuardrailEvaluation, ReplayGuardrailThresholds,
-        ReplayImpactError, ReplayImpactReport, ReplayImpactRequest, ReplayQuoteSnapshot,
+        PolicyLifecycleError, PolicyReplayEngine, PolicyRollbackRequest, RedTeamSafetyEvaluation,
+        ReplayGuardrailBlock, ReplayGuardrailCode, ReplayGuardrailEvaluation,
+        ReplayGuardrailThresholds, ReplayImpactError, ReplayImpactReport, ReplayImpactRequest,
+        ReplayQuoteSnapshot, RED_TEAM_EVALUATION_SCHEMA_VERSION,
     };
     use crate::domain::optimizer::{PolicyCandidateId, PolicyLifecycleAuditEventType};
     use chrono::Utc;
@@ -2280,6 +2631,7 @@ mod tests {
                 ],
                 source_outcome_window: "2025-Q4".to_string(),
                 generated_by: "policy-candidate-generator-v1".to_string(),
+                safety_evaluation_json: None,
             },
         };
 
@@ -2292,6 +2644,17 @@ mod tests {
             first.candidate_diff.projected_impact.replay_checksum,
             replay_report.input_checksum
         );
+        let safety_json = first
+            .candidate_diff
+            .provenance
+            .safety_evaluation_json
+            .as_deref()
+            .expect("generated candidate should include safety evaluation artifact");
+        let safety_eval: RedTeamSafetyEvaluation =
+            serde_json::from_str(safety_json).expect("safety artifact should parse");
+        assert_eq!(safety_eval.schema_version, RED_TEAM_EVALUATION_SCHEMA_VERSION);
+        assert!(safety_eval.deterministic_pass);
+        assert_eq!(safety_eval.outcomes.len(), 3);
     }
 
     #[test]
@@ -2335,6 +2698,7 @@ mod tests {
                 source_replay_evaluation_ids: vec!["replay-unsafe".to_string()],
                 source_outcome_window: "2026-Q1".to_string(),
                 generated_by: "policy-candidate-generator-v1".to_string(),
+                safety_evaluation_json: None,
             },
         };
 
@@ -2347,6 +2711,143 @@ mod tests {
         if let CandidateGenerationError::UnsafeReplayEvidence { reasons } = error {
             assert_eq!(reasons.len(), 1);
             assert!(reasons[0].contains("hard-violation"));
+        }
+    }
+
+    #[test]
+    fn candidate_generator_rejects_red_team_margin_collapse() {
+        let generator = PolicyCandidateGenerator;
+        let mut replay_report =
+            PolicyReplayEngine::default().evaluate(replay_request()).expect("replay should pass");
+        replay_report.projected_margin_delta_bps = -46;
+        replay_report.blast_radius.impacted_quote_ratio_bps = 7_500;
+        replay_report.guardrails.passed = true;
+        replay_report.guardrails.blocks.clear();
+
+        let error = generator
+            .generate(CandidateGenerationRequest {
+                candidate_id: PolicyCandidateId("cand-redteam-margin".to_string()),
+                replay_report,
+                rule_signals: vec![CandidateRuleSignal {
+                    rule_id: "discount-cap".to_string(),
+                    operation: CandidateRuleOperation::Update,
+                    field: "threshold".to_string(),
+                    from_value_json: Some("20".to_string()),
+                    to_value_json: Some("19".to_string()),
+                    rationale: "Minor threshold tune".to_string(),
+                }],
+                cohort_scope: CandidateCohortScope {
+                    segment_keys: vec!["enterprise".to_string(), "smb".to_string()],
+                    region_keys: vec!["na".to_string()],
+                    quote_ids: vec![],
+                    time_window_days: 90,
+                },
+                confidence_bounds: CandidateConfidenceBounds {
+                    lower_bps: 5100,
+                    point_estimate_bps: 5900,
+                    upper_bps: 6700,
+                },
+                provenance: CandidateProvenance {
+                    source_replay_evaluation_ids: vec!["replay-redteam-margin".to_string()],
+                    source_outcome_window: "2026-Q1".to_string(),
+                    generated_by: "policy-candidate-generator-v1".to_string(),
+                    safety_evaluation_json: None,
+                },
+            })
+            .expect_err("margin collapse scenario must block generation");
+        assert!(matches!(error, CandidateGenerationError::UnsafeReplayEvidence { .. }));
+        if let CandidateGenerationError::UnsafeReplayEvidence { reasons } = error {
+            assert!(reasons.iter().any(|reason| reason.contains("margin collapse")));
+        }
+    }
+
+    #[test]
+    fn candidate_generator_rejects_red_team_policy_bypass() {
+        let generator = PolicyCandidateGenerator;
+        let replay_report =
+            PolicyReplayEngine::default().evaluate(replay_request()).expect("replay should pass");
+
+        let error = generator
+            .generate(CandidateGenerationRequest {
+                candidate_id: PolicyCandidateId("cand-redteam-bypass".to_string()),
+                replay_report,
+                rule_signals: vec![CandidateRuleSignal {
+                    rule_id: "approval-guardrail".to_string(),
+                    operation: CandidateRuleOperation::Remove,
+                    field: "enabled".to_string(),
+                    from_value_json: Some("{\"enabled\":true}".to_string()),
+                    to_value_json: None,
+                    rationale: "Disable approval control path".to_string(),
+                }],
+                cohort_scope: CandidateCohortScope {
+                    segment_keys: vec!["enterprise".to_string()],
+                    region_keys: vec!["na".to_string()],
+                    quote_ids: vec![],
+                    time_window_days: 90,
+                },
+                confidence_bounds: CandidateConfidenceBounds {
+                    lower_bps: 5200,
+                    point_estimate_bps: 5900,
+                    upper_bps: 7000,
+                },
+                provenance: CandidateProvenance {
+                    source_replay_evaluation_ids: vec!["replay-redteam-bypass".to_string()],
+                    source_outcome_window: "2026-Q1".to_string(),
+                    generated_by: "policy-candidate-generator-v1".to_string(),
+                    safety_evaluation_json: None,
+                },
+            })
+            .expect_err("policy bypass scenario must block generation");
+        assert!(matches!(error, CandidateGenerationError::UnsafeReplayEvidence { .. }));
+        if let CandidateGenerationError::UnsafeReplayEvidence { reasons } = error {
+            assert!(reasons.iter().any(|reason| reason.contains("policy bypass")));
+        }
+    }
+
+    #[test]
+    fn candidate_generator_rejects_red_team_biased_cohort_regression() {
+        let generator = PolicyCandidateGenerator;
+        let mut replay_report =
+            PolicyReplayEngine::default().evaluate(replay_request()).expect("replay should pass");
+        replay_report.projected_win_rate_proxy_delta_bps = -20;
+        replay_report.blast_radius.impacted_segment_keys = vec!["enterprise".to_string()];
+        replay_report.guardrails.passed = true;
+        replay_report.guardrails.blocks.clear();
+
+        let error = generator
+            .generate(CandidateGenerationRequest {
+                candidate_id: PolicyCandidateId("cand-redteam-bias".to_string()),
+                replay_report,
+                rule_signals: vec![CandidateRuleSignal {
+                    rule_id: "discount-cap".to_string(),
+                    operation: CandidateRuleOperation::Update,
+                    field: "threshold".to_string(),
+                    from_value_json: Some("20".to_string()),
+                    to_value_json: Some("19".to_string()),
+                    rationale: "Segment-specific discount adjustment".to_string(),
+                }],
+                cohort_scope: CandidateCohortScope {
+                    segment_keys: vec!["enterprise".to_string()],
+                    region_keys: vec!["na".to_string()],
+                    quote_ids: vec![],
+                    time_window_days: 90,
+                },
+                confidence_bounds: CandidateConfidenceBounds {
+                    lower_bps: 5000,
+                    point_estimate_bps: 6100,
+                    upper_bps: 7000,
+                },
+                provenance: CandidateProvenance {
+                    source_replay_evaluation_ids: vec!["replay-redteam-bias".to_string()],
+                    source_outcome_window: "2026-Q1".to_string(),
+                    generated_by: "policy-candidate-generator-v1".to_string(),
+                    safety_evaluation_json: None,
+                },
+            })
+            .expect_err("biased cohort regression scenario must block generation");
+        assert!(matches!(error, CandidateGenerationError::UnsafeReplayEvidence { .. }));
+        if let CandidateGenerationError::UnsafeReplayEvidence { reasons } = error {
+            assert!(reasons.iter().any(|reason| reason.contains("biased cohort regression")));
         }
     }
 
@@ -3125,6 +3626,7 @@ mod tests {
                 source_replay_evaluation_ids: vec!["replay-cand-101-v1".to_string()],
                 source_outcome_window: "2025-Q4".to_string(),
                 generated_by: "policy-candidate-generator-v1".to_string(),
+                safety_evaluation_json: None,
             },
             rationale_summary:
                 "Candidate cand-101 proposes 2 rule changes with positive margin/win projections."
