@@ -754,6 +754,151 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
 
         summary
     }
+
+    fn fallback_pricing_only_response(
+        &self,
+        request_id: &ExplanationRequestId,
+        request: &CreateExplanationRequest,
+        pricing: &PricingSnapshot,
+    ) -> ExplanationResponse {
+        match request.request_type {
+            ExplanationRequestType::Line => {
+                if let Some(line_id) = request.line_id.as_ref() {
+                    if let Some(line) = pricing.line_items.iter().find(|line| line.line_id == line_id.0)
+                    {
+                        return ExplanationResponse {
+                            request_id: request_id.clone(),
+                            quote_id: request.quote_id.clone(),
+                            amount: line.line_subtotal,
+                            amount_description: format!("{} ({})", line.product_name, line.product_id),
+                            arithmetic_chain: self.build_line_arithmetic_chain(line),
+                            policy_evidence: vec![],
+                            source_references: vec![
+                                SourceReference {
+                                    source_type: "pricing_snapshot".to_string(),
+                                    source_id: pricing.quote_id.0.clone(),
+                                    source_version: request.quote_version.to_string(),
+                                    field_path: "line_items".to_string(),
+                                },
+                                SourceReference {
+                                    source_type: "quote".to_string(),
+                                    source_id: request.quote_id.0.clone(),
+                                    source_version: request.quote_version.to_string(),
+                                    field_path: "lines".to_string(),
+                                },
+                            ],
+                            user_summary:
+                                "Policy evidence unavailable. Showing pricing-only line explanation."
+                                    .to_string(),
+                        };
+                    }
+                }
+            }
+            ExplanationRequestType::Policy => {
+                return ExplanationResponse {
+                    request_id: request_id.clone(),
+                    quote_id: request.quote_id.clone(),
+                    amount: pricing.total,
+                    amount_description: format!("Policy evaluation for quote {}", request.quote_id.0),
+                    arithmetic_chain: vec![],
+                    policy_evidence: vec![],
+                    source_references: vec![SourceReference {
+                        source_type: "pricing_snapshot".to_string(),
+                        source_id: pricing.quote_id.0.clone(),
+                        source_version: request.quote_version.to_string(),
+                        field_path: "total".to_string(),
+                    }],
+                    user_summary:
+                        "Policy evidence unavailable. No policy assertions can be provided right now."
+                            .to_string(),
+                };
+            }
+            ExplanationRequestType::Total => {}
+        }
+
+        ExplanationResponse {
+            request_id: request_id.clone(),
+            quote_id: request.quote_id.clone(),
+            amount: pricing.total,
+            amount_description: format!("Total for quote {}", request.quote_id.0),
+            arithmetic_chain: self.build_total_arithmetic_chain(pricing),
+            policy_evidence: vec![],
+            source_references: vec![
+                SourceReference {
+                    source_type: "pricing_snapshot".to_string(),
+                    source_id: pricing.quote_id.0.clone(),
+                    source_version: request.quote_version.to_string(),
+                    field_path: "total".to_string(),
+                },
+                SourceReference {
+                    source_type: "quote".to_string(),
+                    source_id: request.quote_id.0.clone(),
+                    source_version: request.quote_version.to_string(),
+                    field_path: "lines".to_string(),
+                },
+            ],
+            user_summary:
+                "Policy evidence unavailable. Showing deterministic pricing breakdown only."
+                    .to_string(),
+        }
+    }
+
+    fn audit_event(
+        &self,
+        request_id: &ExplanationRequestId,
+        event_type: ExplanationEventType,
+        event_payload_json: String,
+        actor_id: &str,
+        correlation_id: &str,
+    ) -> ExplanationAuditEvent {
+        ExplanationAuditEvent {
+            id: format!("exp-audit-{}-{}", request_id.0, Utc::now().timestamp_millis()),
+            explanation_request_id: request_id.clone(),
+            event_type,
+            event_payload_json,
+            actor_type: "system".to_string(),
+            actor_id: actor_id.to_string(),
+            correlation_id: correlation_id.to_string(),
+            occurred_at: Utc::now(),
+        }
+    }
+
+    fn guardrail_payload(guardrail: &str, reason: &str, message: &str) -> String {
+        serde_json::json!({
+            "guardrail": guardrail,
+            "reason": reason,
+            "message": message
+        })
+        .to_string()
+    }
+
+    fn user_safe_message_for_error(error: &ExplanationError) -> String {
+        match error {
+            ExplanationError::MissingPricingSnapshot { .. } => {
+                "I can't explain this amount yet because pricing evidence is missing. Refresh the quote and try again."
+                    .to_string()
+            }
+            ExplanationError::MissingPolicyEvaluation { .. } => {
+                "I can't include policy reasoning right now because policy evidence is missing."
+                    .to_string()
+            }
+            ExplanationError::InvalidLineId { .. } => {
+                "I can't find that line item in this quote version. Pick a valid line and retry."
+                    .to_string()
+            }
+            ExplanationError::QuoteNotFound { .. } => {
+                "I can't find that quote. Confirm the quote context and try again.".to_string()
+            }
+            ExplanationError::VersionMismatch { .. } => {
+                "I can't explain this amount for that version. Refresh the quote and retry."
+                    .to_string()
+            }
+            ExplanationError::EvidenceGatheringFailed { .. } => {
+                "I couldn't gather deterministic evidence for this explanation. Retry shortly."
+                    .to_string()
+            }
+        }
+    }
 }
 
 /// In-memory implementation of pricing snapshot provider (for testing)
