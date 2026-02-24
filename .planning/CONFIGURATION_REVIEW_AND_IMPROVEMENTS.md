@@ -8,115 +8,198 @@
 
 ## Executive Summary
 
-Based on comprehensive research of the quotey codebase and the Dicklesworthstone ecosystem, this review identifies **22 improvement opportunities** across 6 categories. The project has a solid foundation but could significantly benefit from enhanced tooling integration, configuration hardening, and workflow optimizations.
+Based on comprehensive research of the quotey codebase and the Dicklesworthstone ecosystem, this review identifies **18 improvement opportunities** across 6 categories. The project has a solid foundation but could significantly benefit from enhanced tooling integration, configuration hardening, and workflow optimizations.
 
 ### Top 5 Priority Improvements
 
 | Priority | Improvement | Impact | Effort |
 |----------|-------------|--------|--------|
-| 1 | **Add GitHub Actions CI/CD** | Prevent broken main, automate quality gates | Medium |
+| 1 | **Enhanced local quality gates** | Prevent bad commits, automate verification | Medium |
 | 2 | **Integrate cass-memory** | Cross-agent learning, institutional knowledge | Medium |
-| 3 | **Add VS Code workspace settings** | Consistent dev experience, faster onboarding | Low |
-| 4 | **Configure cargo-deny in CI** | License compliance, security audit | Low |
-| 5 | **Add pre-commit hooks** | Prevent bad commits, automate beads sync | Low |
+| 3 | **Add pre-commit hooks** | Automate quality checks before commit | Low |
+| 4 | **Add VS Code workspace settings** | Consistent dev experience, faster onboarding | Low |
+| 5 | **Configuration validation** | Catch config errors at startup | Medium |
 
 ---
 
-## 1. CI/CD Configuration (Missing)
+## 1. Quality Gates & Automation (Needs Enhancement)
 
 ### Current State
-- ❌ No `.github/workflows/` directory
-- ❌ No automated testing on PR/push
-- ❌ No automated security audits
-- ❌ No automated documentation deployment
+- ✅ `deny.toml` for cargo-deny
+- ✅ `quality-gates.sh` script exists
+- ❌ No pre-commit hooks
+- ❌ No automated benchmark tracking
+- ❌ No code coverage reporting
 
 ### Research-Based Recommendations
 
-Based on `RESEARCH_DICKLESWORTHSTONE_PROJECTS.md` and industry best practices:
+#### 1.1 Enhanced Quality Gates Script (HIGH PRIORITY)
 
-#### 1.1 Add GitHub Actions Workflow (HIGH PRIORITY)
+**Current `scripts/quality-gates.sh` is minimal. Expand it:**
 
-```yaml
-# .github/workflows/ci.yml
-name: CI
+```bash
+#!/bin/bash
+# scripts/quality-gates.sh (enhanced)
 
-on:
-  push:
-    branches: [main]
-  pull_request:
-    branches: [main]
+set -e
 
-env:
-  CARGO_TERM_COLOR: always
-  RUST_BACKTRACE: 1
+echo "=== Quotey Quality Gates ==="
 
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      
-      - name: Install Rust
-        uses: dtolnay/rust-action@stable
-        with:
-          toolchain: stable
-          components: rustfmt, clippy
-      
-      - name: Cache cargo
-        uses: Swatinem/rust-cache@v2
-      
-      - name: Check formatting
-        run: cargo fmt --all -- --check
-      
-      - name: Run clippy
-        run: cargo clippy --all-targets --all-features -- -D warnings
-      
-      - name: Run tests
-        run: cargo test --all-features
-      
-      - name: Run cargo-deny
-        uses: EmbarkStudios/cargo-deny-action@v1
-        with:
-          command: check all
-      
-      - name: Verify beads synced
-        run: |
-          if [ -n "$(git status --porcelain .beads/)" ]; then
-            echo "Error: .beads/ not synced. Run 'br sync --flush-only'"
-            exit 1
-          fi
+# Format check
+echo "→ Checking formatting..."
+cargo fmt --all -- --check
+
+# Clippy
+echo "→ Running clippy..."
+cargo clippy --all-targets --all-features -- -D warnings
+
+# Tests
+echo "→ Running tests..."
+cargo test --all-features
+
+# Documentation tests
+echo "→ Testing documentation..."
+cargo test --doc
+
+# Security audit (if cargo-deny installed)
+if command -v cargo-deny &> /dev/null; then
+    echo "→ Running security audit..."
+    cargo deny check advisories
+    echo "→ Checking licenses..."
+    cargo deny check licenses
+else
+    echo "⚠️  cargo-deny not installed. Skipping security/license audit."
+    echo "   Install: cargo install cargo-deny"
+fi
+
+# Beads sync check
+echo "→ Checking beads sync..."
+if [ -n "$(git status --porcelain .beads/ 2>/dev/null)" ]; then
+    echo "⚠️  Warning: .beads/ directory not synced"
+    echo "   Run: br sync --flush-only"
+    exit 1
+fi
+
+# UBS check (if available)
+if command -v ubs &> /dev/null; then
+    echo "→ Running UBS static analysis..."
+    ubs .
+fi
+
+echo "✅ All quality gates passed"
 ```
 
-**Rationale:**
-- Prevents broken main branch
-- Ensures `cargo fmt`, `clippy`, tests pass before merge
-- Validates beads synchronization (per AGENTS.md requirements)
-- Automates license/security auditing with cargo-deny
+**Usage:**
+```bash
+# Make executable
+chmod +x scripts/quality-gates.sh
 
-#### 1.2 Add Release Workflow
+# Run before every commit
+./scripts/quality-gates.sh
+```
+
+#### 1.2 Add Pre-Commit Hooks (MEDIUM PRIORITY)
+
+Using [pre-commit](https://pre-commit.com/) framework:
 
 ```yaml
-# .github/workflows/release.yml
-name: Release
+# .pre-commit-config.yaml
+repos:
+  - repo: local
+    hooks:
+      - id: cargo-fmt
+        name: Cargo fmt
+        entry: cargo fmt --all -- --check
+        language: system
+        pass_filenames: false
+        files: \.rs$
+      
+      - id: cargo-clippy
+        name: Cargo clippy
+        entry: cargo clippy --all-targets --all-features -- -D warnings
+        language: system
+        pass_filenames: false
+        files: \.rs$
+      
+      - id: cargo-test
+        name: Cargo test
+        entry: cargo test --all-features
+        language: system
+        pass_filenames: false
+        files: \.rs$
+      
+      - id: beads-sync
+        name: Beads sync check
+        entry: scripts/check-beads-sync.sh
+        language: script
+        pass_filenames: false
+```
 
-on:
-  push:
-    tags:
-      - 'v*'
+**Setup script:**
+```bash
+# scripts/setup-precommit.sh
+#!/bin/bash
+pip install pre-commit
+pre-commit install
+```
 
-jobs:
-  release:
-    strategy:
-      matrix:
-        target: [x86_64-unknown-linux-gnu, x86_64-apple-darwin]
-    runs-on: ${{ matrix.target == 'x86_64-apple-darwin' && 'macos-latest' || 'ubuntu-latest' }}
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-action@stable
-      - run: cargo build --release --target ${{ matrix.target }}
-      - uses: softprops/action-gh-release@v1
-        with:
-          files: target/${{ matrix.target }}/release/quotey
+#### 1.3 Add Git Hook Directly (Alternative to pre-commit framework)
+
+```bash
+# .githooks/pre-commit
+#!/bin/bash
+# Local quality gates before commit
+
+echo "Running quality gates..."
+
+# Format check
+if ! cargo fmt --all -- --check; then
+    echo "❌ Formatting check failed. Run: cargo fmt --all"
+    exit 1
+fi
+
+# Clippy
+if ! cargo clippy --all-targets --all-features -- -D warnings; then
+    echo "❌ Clippy check failed"
+    exit 1
+fi
+
+# Tests (quick mode - skip integration tests)
+if ! cargo test --lib; then
+    echo "❌ Tests failed"
+    exit 1
+fi
+
+# Beads sync check
+if [ -n "$(git status --porcelain .beads/ 2>/dev/null)" ]; then
+    echo "❌ .beads/ not synced. Run: br sync --flush-only"
+    exit 1
+fi
+
+echo "✅ Quality gates passed"
+```
+
+**Enable git hooks:**
+```bash
+git config core.hooksPath .githooks
+chmod +x .githooks/pre-commit
+```
+
+#### 1.4 Add Code Coverage Tracking
+
+```bash
+# scripts/coverage.sh
+#!/bin/bash
+
+# Install tarpaulin if needed
+if ! command -v cargo-tarpaulin &> /dev/null; then
+    cargo install cargo-tarpaulin
+fi
+
+# Generate coverage report
+cargo tarpaulin --all-features --workspace --timeout 120 --out Html --output-dir ./coverage
+
+echo "Coverage report generated at: ./coverage/tarpaulin-report.html"
 ```
 
 ---
@@ -398,140 +481,67 @@ QUOTEY_PROFILE=production cargo run
 
 ---
 
-## 5. Quality Gates & Tooling (Partial)
+## 5. Security & Compliance (Needs Work)
 
 ### Current State
-- ✅ `deny.toml` for cargo-deny
-- ✅ `quality-gates.sh` script exists
-- ❌ No pre-commit hooks
-- ❌ No automated benchmark tracking
-- ❌ No code coverage reporting
+- ✅ `secrecy` crate in dependencies
+- ✅ cargo-deny for license checking
+- ❌ No `SECURITY.md`
+- ❌ No dependency vulnerability scanning
+- ❌ No secrets scanning
 
 ### Recommendations
 
-#### 5.1 Add Pre-Commit Hooks
+#### 5.1 Add SECURITY.md
 
-```yaml
-# .pre-commit-config.yaml
-repos:
-  - repo: local
-    hooks:
-      - id: cargo-fmt
-        name: Cargo fmt
-        entry: cargo fmt --all -- --check
-        language: system
-        pass_filenames: false
-      
-      - id: cargo-clippy
-        name: Cargo clippy
-        entry: cargo clippy --all-targets --all-features -- -D warnings
-        language: system
-        pass_filenames: false
-      
-      - id: cargo-test
-        name: Cargo test
-        entry: cargo test
-        language: system
-        pass_filenames: false
-      
-      - id: beads-sync
-        name: Beads sync check
-        entry: scripts/check-beads-sync.sh
-        language: script
-        pass_filenames: false
-      
-      - id: ubs-check
-        name: UBS static analysis
-        entry: ubs
-        language: system
-        files: \.rs$
+```markdown
+# Security Policy
+
+## Supported Versions
+
+| Version | Supported |
+|---------|-----------|
+| 0.1.x   | ✅ Yes |
+
+## Reporting a Vulnerability
+
+Please report vulnerabilities to: security@quotey.dev
+
+## Security Measures
+
+- All pricing decisions are deterministic and auditable
+- LLMs do not make financial decisions
+- All database access is through parameterized queries (sqlx)
+- Secrets use the `secrecy` crate for zeroization
 ```
 
-**Setup script:**
-```bash
-# scripts/setup-precommit.sh
-#!/bin/bash
-pip install pre-commit
-pre-commit install
-```
-
-#### 5.2 Enhanced Quality Gates Script
+#### 5.2 Add Local Security Auditing
 
 ```bash
+# scripts/security-audit.sh
 #!/bin/bash
-# scripts/quality-gates.sh (enhanced)
 
-set -e
+echo "=== Security Audit ==="
 
-echo "=== Quotey Quality Gates ==="
+# Install cargo-deny if needed
+if ! command -v cargo-deny &> /dev/null; then
+    echo "Installing cargo-deny..."
+    cargo install cargo-deny
+fi
 
-# Format check
-echo "→ Checking formatting..."
-cargo fmt --all -- --check
-
-# Clippy
-echo "→ Running clippy..."
-cargo clippy --all-targets --all-features -- -D warnings
-
-# Tests
-echo "→ Running tests..."
-cargo test --all-features
-
-# Documentation tests
-echo "→ Testing documentation..."
-cargo test --doc
-
-# Security audit
-echo "→ Running security audit..."
+# Check advisories
+echo "→ Checking security advisories..."
 cargo deny check advisories
 
-# License check
+# Check licenses
 echo "→ Checking licenses..."
 cargo deny check licenses
 
-# Beads sync check
-echo "→ Checking beads sync..."
-if [ -n "$(git status --porcelain .beads/ 2>/dev/null)" ]; then
-    echo "⚠️  Warning: .beads/ directory not synced"
-    echo "   Run: br sync --flush-only"
-fi
+# Check bans
+echo "→ Checking banned crates..."
+cargo deny check bans
 
-# UBS check (if available)
-if command -v ubs &> /dev/null; then
-    echo "→ Running UBS static analysis..."
-    ubs .
-fi
-
-echo "✅ All quality gates passed"
-```
-
-#### 5.3 Add Code Coverage
-
-```yaml
-# .github/workflows/coverage.yml
-name: Coverage
-
-on:
-  push:
-    branches: [main]
-
-jobs:
-  coverage:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-action@stable
-      
-      - name: Install tarpaulin
-        run: cargo install cargo-tarpaulin
-      
-      - name: Generate coverage
-        run: cargo tarpaulin --all-features --workspace --timeout 120 --out xml
-      
-      - name: Upload to Codecov
-        uses: codecov/codecov-action@v3
-        with:
-          files: ./cobertura.xml
+echo "✅ Security audit complete"
 ```
 
 ---
@@ -545,37 +555,12 @@ jobs:
 - ✅ `.planning/` with research documents
 - ❌ No `CONTRIBUTING.md`
 - ❌ No `CHANGELOG.md`
-- ❌ No security policy
 
 ### Recommendations
 
 #### 6.1 Add CONTRIBUTING.md
 
-```markdown
-# Contributing to Quotey
-
-## Development Setup
-
-1. Install Rust (1.75+)
-2. Install beads: `brew install dicklesworthstone/tap/br`
-3. Install cass-memory: `brew install dicklesworthstone/tap/cm`
-4. Run quality gates: `./scripts/quality-gates.sh`
-
-## Workflow
-
-1. Find work: `br ready --json`
-2. Claim: `br update <id> --status in_progress`
-3. Implement with tests
-4. Run quality gates
-5. Close: `br close <id> --reason "Implemented"`
-6. Commit `.beads/` with code
-
-## Research
-
-Before implementing, check:
-- `.planning/RESEARCH_*.md` for relevant research
-- `cm context "<task>" --json` for institutional memory
-```
+(See CONTRIBUTING.md already added to repo)
 
 #### 6.2 Add CHANGELOG.md
 
@@ -602,69 +587,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ---
 
-## 7. Security & Compliance (Needs Work)
+## 7. Crate Configuration Review
 
-### Current State
-- ✅ `secrecy` crate in dependencies
-- ✅ cargo-deny for license checking
-- ❌ No `SECURITY.md`
-- ❌ No dependency vulnerability scanning in CI
-- ❌ No secrets scanning
-
-### Recommendations
-
-#### 7.1 Add SECURITY.md
-
-```markdown
-# Security Policy
-
-## Supported Versions
-
-| Version | Supported |
-|---------|-----------|
-| 0.1.x   | ✅ Yes |
-
-## Reporting a Vulnerability
-
-Please report vulnerabilities to: security@quotey.dev
-
-## Security Measures
-
-- All pricing decisions are deterministic and auditable
-- LLMs do not make financial decisions
-- All database access is through parameterized queries (sqlx)
-- Secrets use the `secrecy` crate for zeroization
-```
-
-#### 7.2 Add Dependency Vulnerability Scanning
-
-```yaml
-# .github/workflows/security.yml
-name: Security Audit
-
-on:
-  schedule:
-    - cron: '0 0 * * *'  # Daily
-  push:
-    paths:
-      - '**/Cargo.toml'
-      - '**/Cargo.lock'
-
-jobs:
-  audit:
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: rustsec/audit-check@v1
-        with:
-          token: ${{ secrets.GITHUB_TOKEN }}
-```
-
----
-
-## 8. Crate Configuration Review
-
-### 8.1 Core Crate (crates/core/Cargo.toml)
+### 7.1 Core Crate (crates/core/Cargo.toml)
 
 **Current:**
 ```toml
@@ -681,7 +606,7 @@ rust_decimal.workspace = true
 - ✅ Good: Minimal dependencies (hmac, sha2 only for crypto)
 - ⚠️ Consider: Add `tracing` for structured logging
 
-### 8.2 DB Crate (crates/db/Cargo.toml)
+### 7.2 DB Crate (crates/db/Cargo.toml)
 
 **Current:**
 ```toml
@@ -694,7 +619,7 @@ sqlx.workspace = true
 - ✅ Good: sqlx with all required features
 - ⚠️ Consider: Add connection pooling metrics
 
-### 8.3 Feature Flags Strategy
+### 7.3 Feature Flags Strategy
 
 **Recommendation:** Add feature flags for optional functionality:
 
@@ -709,57 +634,41 @@ full = ["std", "ml"]
 
 ---
 
-## 9. Documentation Website (Future)
-
-### Recommendation: Use frankentui for CLI docs
-
-Based on `RESEARCH_DICKLESWORTHSTONE_PROJECTS.md`, frankentui provides:
-- Inline TUI mode (UI at top, logs scroll)
-- Deterministic rendering
-- Perfect for CLI documentation viewer
-
-**Future enhancement:**
-```bash
-quotey docs --tui  # Open interactive documentation viewer
-```
-
----
-
 ## Implementation Priority Matrix
 
 | Priority | Category | Improvement | Effort | Impact | Owner |
 |----------|----------|-------------|--------|--------|-------|
-| P0 | CI/CD | GitHub Actions workflow | M | 🔥 High | DevOps |
-| P0 | Quality | Pre-commit hooks | L | 🔥 High | Any |
+| P0 | Quality | Enhanced quality-gates.sh | M | 🔥 High | Any |
+| P0 | Quality | Git pre-commit hooks | L | 🔥 High | Any |
 | P1 | DevEnv | VS Code settings | L | Medium | Any |
 | P1 | Tooling | cass-memory integration | M | 🔥 High | Research |
 | P1 | Config | Config validation | M | Medium | Core |
 | P2 | Security | SECURITY.md | L | Medium | Any |
-| P2 | Security | Vulnerability scanning | L | Medium | DevOps |
-| P2 | Docs | CONTRIBUTING.md | L | Low | Any |
+| P2 | Security | security-audit.sh | L | Medium | Any |
+| P2 | Docs | CHANGELOG.md | L | Low | Any |
 | P3 | Tooling | frankensearch integration | M | Medium | ML |
-| P3 | Docs | CHANGELOG.md | L | Low | Any |
+| P3 | Tooling | frankentui CLI docs | H | Low | Future |
 
 ---
 
 ## Summary Checklist
 
 ### Must Do (P0)
-- [ ] Add `.github/workflows/ci.yml`
-- [ ] Add `.pre-commit-config.yaml`
-- [ ] Enhance `scripts/quality-gates.sh`
+- [x] Add enhanced `scripts/quality-gates.sh`
+- [ ] Add `.githooks/pre-commit`
+- [ ] Document git hooks setup in CONTRIBUTING.md
 
 ### Should Do (P1)
-- [ ] Add `.vscode/settings.json`
-- [ ] Add `.vscode/extensions.json`
+- [x] Add `.vscode/settings.json` ✅
+- [x] Add `.vscode/extensions.json` ✅
 - [ ] Add configuration validation (`validator` crate)
 - [ ] Document cass-memory integration in AGENTS.md
 
 ### Could Do (P2)
 - [ ] Add `SECURITY.md`
-- [ ] Add `CONTRIBUTING.md`
+- [ ] Add `scripts/security-audit.sh`
 - [ ] Add `CHANGELOG.md`
-- [ ] Add code coverage workflow
+- [ ] Add code coverage script
 
 ### Future (P3)
 - [ ] Integrate frankensearch for Deal DNA
@@ -780,9 +689,11 @@ quotey docs --tui  # Open interactive documentation viewer
 | `.planning/config.json` | Planning mode | ✅ Good |
 | `AGENTS.md` | Agent instructions | ✅ Comprehensive |
 | `CLAUDE.md` | Claude-specific | ✅ Focused |
+| `CONTRIBUTING.md` | Contribution guide | ✅ Added |
+| `.vscode/settings.json` | VS Code settings | ✅ Added |
 
 ---
 
-*Document Version: 1.0*  
+*Document Version: 1.1 (GitHub Actions removed)*  
 *Review Date: 2026-02-24*  
 *Next Review: After Wave 2 completion*
