@@ -22,7 +22,20 @@ pub enum BootstrapError {
     Migration(#[source] sqlx::migrate::MigrateError),
 }
 
+/// Bootstrap with a pre-loaded config - avoids double config loading
+pub async fn bootstrap_with_config(config: AppConfig) -> Result<Application, BootstrapError> {
+    bootstrap_from_config(config).await
+}
+
+/// Bootstrap by loading config from options (legacy - loads config internally)
+/// Kept for backward compatibility with tests
+#[allow(dead_code)]
 pub async fn bootstrap(options: LoadOptions) -> Result<Application, BootstrapError> {
+    let config = AppConfig::load(options)?;
+    bootstrap_from_config(config).await
+}
+
+async fn bootstrap_from_config(config: AppConfig) -> Result<Application, BootstrapError> {
     info!(
         event_name = "system.bootstrap.start",
         correlation_id = "bootstrap",
@@ -30,7 +43,6 @@ pub async fn bootstrap(options: LoadOptions) -> Result<Application, BootstrapErr
         thread_id = "unknown",
         "starting application bootstrap"
     );
-    let config = AppConfig::load(options)?;
 
     let db_pool = connect_with_settings(
         &config.database.url,

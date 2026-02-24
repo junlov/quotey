@@ -30,18 +30,21 @@ async fn main() -> Result<()> {
 }
 
 pub async fn run() -> Result<()> {
-    // Load config early for logging setup
-    let config = AppConfig::load(LoadOptions::default()).unwrap_or_else(|_| AppConfig::default());
-    init_logging(&config);
-
-    let app = bootstrap::bootstrap(LoadOptions {
+    // Load config once with all needed overrides
+    let load_options = LoadOptions {
         overrides: ConfigOverrides {
             database_url: Some("sqlite://quotey.db".to_string()),
             ..ConfigOverrides::default()
         },
         ..LoadOptions::default()
-    })
-    .await?;
+    };
+
+    // Load config and initialize logging before any other operations
+    let config = AppConfig::load(load_options)?;
+    init_logging(&config);
+
+    // Now bootstrap using the same config we already loaded
+    let app = bootstrap::bootstrap_with_config(config).await?;
 
     health::spawn(
         &app.config.server.bind_address,
