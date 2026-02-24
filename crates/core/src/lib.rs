@@ -30,14 +30,16 @@ pub use collab::{
     OperationalTransform, QuoteOperation, TransformResult,
 };
 pub use dna::{
-    ConfigurationFingerprint, DealOutcomeMetadata, DealOutcomeStatus, FingerprintGenerator,
-    SimilarDeal, SimilarityCandidate, SimilarityEngine,
+    ClosedDealOutcome, ConfigurationFingerprint, DealDnaLifecycleService, DealOutcomeMetadata,
+    DealOutcomeStatus, DnaLifecycleError, DnaLifecycleStore, FingerprintGenerator,
+    FingerprintSnapshot, SimilarDeal, SimilarityCandidate, SimilarityEngine,
 };
 pub use domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
 pub use domain::execution::{
     ExecutionTask, ExecutionTaskId, ExecutionTaskState, ExecutionTransitionEvent,
     ExecutionTransitionId, IdempotencyRecord, IdempotencyRecordState, OperationKey,
 };
+pub use domain::explanation::*;
 pub use domain::product::{Product, ProductId};
 pub use domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
 pub use errors::{ApplicationError, DomainError, InterfaceError};
@@ -45,15 +47,14 @@ pub use execution_engine::{
     ClaimResult, DeterministicExecutionEngine, ExecutionEngineConfig, ExecutionError,
     InMemoryExecutionEngine, RetryPolicy, TransitionResult,
 };
-pub use ghost::{
-    GhostQuote, GhostQuoteGenerator, InMemoryCustomerHistoryProvider, InMemoryGhostQuoteStore,
-    Signal, SignalDetector, SignalDetectorConfig,
-};
-pub use domain::explanation::*;
 pub use explanation::{
     AppliedRule, CalculationStep, ExplanationEngine, ExplanationError, InMemoryPolicyProvider,
     InMemoryPricingProvider, PolicyEvaluation, PolicyEvaluationProvider, PolicyViolation,
     PricingLineSnapshot, PricingSnapshot, PricingSnapshotProvider,
+};
+pub use ghost::{
+    GhostQuote, GhostQuoteGenerator, InMemoryCustomerHistoryProvider, InMemoryGhostQuoteStore,
+    Signal, SignalDetector, SignalDetectorConfig,
 };
 pub use ledger::{LedgerAction, LedgerEntry, LedgerService, VerificationResult};
 pub use policy::{ExplanationGenerator, ExplanationTemplate, GeneratedExplanation};

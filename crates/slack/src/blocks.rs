@@ -533,20 +533,20 @@ pub fn execution_task_progress_message(
             "⏳",
             "Queued for processing".to_string(),
             vec![ButtonElement::new("exec.refresh.v1", "Check Status")
-                .value(format!("{quote_id}:{task_id}"))],
+                .value(execution_action_value(quote_id, task_id, "refresh", &status))],
         ),
         ExecutionTaskStatus::Running { worker_id, started_at } => (
             "🔄",
             format!("Processing (worker: {worker_id}, started: {started_at})"),
             vec![ButtonElement::new("exec.refresh.v1", "Refresh")
-                .value(format!("{quote_id}:{task_id}"))],
+                .value(execution_action_value(quote_id, task_id, "refresh", &status))],
         ),
         ExecutionTaskStatus::Completed { result_summary } => (
             "✅",
             format!("Completed: {result_summary}"),
             vec![ButtonElement::new("exec.view_result.v1", "View Result")
                 .style(ButtonStyle::Primary)
-                .value(format!("{quote_id}:{task_id}"))],
+                .value(execution_action_value(quote_id, task_id, "view_result", &status))],
         ),
         ExecutionTaskStatus::RetryableFailed { error, retry_count, max_retries } => (
             "⚠️",
@@ -554,10 +554,10 @@ pub fn execution_task_progress_message(
             vec![
                 ButtonElement::new("exec.retry_now.v1", "Retry Now")
                     .style(ButtonStyle::Primary)
-                    .value(format!("{quote_id}:{task_id}")),
+                    .value(execution_action_value(quote_id, task_id, "retry_now", &status)),
                 ButtonElement::new("exec.cancel.v1", "Cancel")
                     .style(ButtonStyle::Danger)
-                    .value(format!("{quote_id}:{task_id}")),
+                    .value(execution_action_value(quote_id, task_id, "cancel", &status)),
             ],
         ),
         ExecutionTaskStatus::FailedTerminal { error } => (
@@ -565,16 +565,16 @@ pub fn execution_task_progress_message(
             format!("Failed permanently: {error}"),
             vec![
                 ButtonElement::new("exec.view_error.v1", "View Details")
-                    .value(format!("{quote_id}:{task_id}")),
+                    .value(execution_action_value(quote_id, task_id, "view_error", &status)),
                 ButtonElement::new("exec.contact_support.v1", "Contact Support")
-                    .value(format!("{quote_id}:{task_id}")),
+                    .value(execution_action_value(quote_id, task_id, "contact_support", &status)),
             ],
         ),
         ExecutionTaskStatus::Recovered { previous_error } => (
             "🔄",
             format!("Recovered from: {previous_error}"),
             vec![ButtonElement::new("exec.view_details.v1", "View Details")
-                .value(format!("{quote_id}:{task_id}"))],
+                .value(execution_action_value(quote_id, task_id, "view_details", &status))],
         ),
     };
 
@@ -593,7 +593,11 @@ pub fn execution_task_progress_message(
             }
         })
         .context("exec.status.context.v1", |context| {
-            context.plain(format!("Task ID: {task_id}"));
+            context
+                .plain(format!("Quote: {quote_id}"))
+                .plain(format!("Task ID: {task_id}"))
+                .plain(format!("Chronology state: {}", execution_status_token(&status)))
+                .plain("Controls are idempotent per quote/task/action/state.");
         })
         .build()
 }
@@ -644,12 +648,24 @@ pub fn execution_summary_message(
             ExecutionTaskStatus::FailedTerminal { .. } => ("❌", "failed".to_string()),
             ExecutionTaskStatus::Recovered { .. } => ("🔄", "recovered".to_string()),
         };
-        builder = builder.context("exec.summary.task.v1", |context| {
-            context.plain(format!("{icon} {operation_kind} ({task_id}): {status_str}"));
+        let chronology = execution_status_token(status);
+        let block_id = format!(
+            "exec.summary.task.{}.v1",
+            task_id.replace(|ch: char| !ch.is_ascii_alphanumeric(), "_")
+        );
+        builder = builder.context(block_id, |context| {
+            context
+                .plain(format!("{icon} {operation_kind} ({task_id}): {status_str} [{chronology}]"));
         });
     }
 
-    builder.build()
+    builder
+        .context("exec.summary.footer.v1", |context| {
+            context.plain(format!(
+                "Quote `{quote_id}` thread chronology preserved in listed task order."
+            ));
+        })
+        .build()
 }
 
 /// Build recovery notification message
@@ -673,10 +689,42 @@ pub fn execution_recovery_message(
             actions.button(
                 ButtonElement::new("exec.view_status.v1", "View Status")
                     .style(ButtonStyle::Primary)
-                    .value(format!("{quote_id}:{task_id}")),
+                    .value(execution_action_value(
+                        quote_id,
+                        task_id,
+                        "view_status",
+                        &ExecutionTaskStatus::Recovered {
+                            previous_error: previous_error.to_string(),
+                        },
+                    )),
             );
         })
         .build()
+}
+
+fn execution_status_token(status: &ExecutionTaskStatus) -> String {
+    match status {
+        ExecutionTaskStatus::Queued => "queued".to_string(),
+        ExecutionTaskStatus::Running { .. } => "running".to_string(),
+        ExecutionTaskStatus::Completed { .. } => "completed".to_string(),
+        ExecutionTaskStatus::RetryableFailed { retry_count, max_retries, .. } => {
+            format!("retryable_failed_{retry_count}_of_{max_retries}")
+        }
+        ExecutionTaskStatus::FailedTerminal { .. } => "failed_terminal".to_string(),
+        ExecutionTaskStatus::Recovered { .. } => "recovered".to_string(),
+    }
+}
+
+fn execution_action_value(
+    quote_id: &str,
+    task_id: &str,
+    action: &str,
+    status: &ExecutionTaskStatus,
+) -> String {
+    format!(
+        "quote={quote_id};task={task_id};action={action};state={}",
+        execution_status_token(status)
+    )
 }
 
 #[cfg(test)]
@@ -953,6 +1001,72 @@ mod tests {
     }
 
     #[test]
+    fn execution_task_progress_buttons_include_idempotent_action_payloads() {
+        let message = execution_task_progress_message(
+            "Q-2026-020",
+            "task-retry",
+            "pdf_generation",
+            ExecutionTaskStatus::RetryableFailed {
+                error: "Network timeout".to_string(),
+                retry_count: 2,
+                max_retries: 3,
+            },
+        );
+
+        let actions = message.blocks.iter().find_map(|block| match block {
+            Block::Actions { block_id, elements } if block_id == "exec.status.actions.v1" => {
+                Some(elements)
+            }
+            _ => None,
+        });
+        assert!(actions.is_some(), "expected actions block");
+        let actions = actions.expect("actions block asserted above");
+        assert!(
+            actions.iter().all(|button| {
+                let value = button.value.as_deref().unwrap_or_default();
+                value.contains("quote=Q-2026-020")
+                    && value.contains("task=task-retry")
+                    && value.contains("action=")
+                    && value.contains("state=retryable_failed_2_of_3")
+            }),
+            "all execution controls should carry idempotent state payloads"
+        );
+    }
+
+    #[test]
+    fn execution_task_progress_context_includes_quote_and_chronology() {
+        let message = execution_task_progress_message(
+            "Q-2026-021",
+            "task-run",
+            "crm_sync",
+            ExecutionTaskStatus::Running {
+                worker_id: "worker-009".to_string(),
+                started_at: "2026-02-24T00:00:00Z".to_string(),
+            },
+        );
+
+        let context = message.blocks.iter().find_map(|block| match block {
+            Block::Context { block_id, elements } if block_id == "exec.status.context.v1" => {
+                Some(elements)
+            }
+            _ => None,
+        });
+        assert!(context.is_some(), "expected execution context block");
+        let context = context.expect("context block asserted above");
+        let joined = context
+            .iter()
+            .map(|item| match item {
+                TextObject::Plain { text } | TextObject::Mrkdwn { text } => text.clone(),
+            })
+            .collect::<Vec<_>>()
+            .join(" | ");
+        assert!(joined.contains("Quote: Q-2026-021"));
+        assert!(joined.contains("Task ID: task-run"));
+        assert!(joined.contains("Chronology state: running"));
+        assert!(joined.contains("idempotent"));
+    }
+
+    #[test]
     fn execution_task_progress_shows_terminal_failure() {
         let message = execution_task_progress_message(
             "Q-2026-005",
@@ -963,6 +1077,70 @@ mod tests {
 
         assert!(message.fallback_text.contains("Failed permanently"));
         assert!(message.fallback_text.contains("Invalid configuration"));
+    }
+
+    #[test]
+    fn execution_summary_uses_unique_task_context_block_ids() {
+        let tasks = vec![
+            ("task-1".to_string(), "send_slack_message".to_string(), ExecutionTaskStatus::Queued),
+            (
+                "task-2".to_string(),
+                "crm_sync".to_string(),
+                ExecutionTaskStatus::RetryableFailed {
+                    error: "timeout".to_string(),
+                    retry_count: 1,
+                    max_retries: 3,
+                },
+            ),
+        ];
+
+        let message = super::execution_summary_message("Q-2026-099", &tasks);
+        let task_block_ids = message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Context { block_id, .. } if block_id.starts_with("exec.summary.task.") => {
+                    Some(block_id.clone())
+                }
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+
+        assert_eq!(task_block_ids.len(), 2);
+        assert_eq!(task_block_ids[0], "exec.summary.task.task_1.v1");
+        assert_eq!(task_block_ids[1], "exec.summary.task.task_2.v1");
+    }
+
+    #[test]
+    fn execution_task_actions_use_readable_labels_for_accessibility() {
+        let message = execution_task_progress_message(
+            "Q-2026-022",
+            "task-readable",
+            "pdf_generation",
+            ExecutionTaskStatus::RetryableFailed {
+                error: "timeout".to_string(),
+                retry_count: 1,
+                max_retries: 3,
+            },
+        );
+
+        let actions = message.blocks.iter().find_map(|block| match block {
+            Block::Actions { block_id, elements } if block_id == "exec.status.actions.v1" => {
+                Some(elements)
+            }
+            _ => None,
+        });
+        assert!(actions.is_some(), "expected actions block");
+        let actions = actions.expect("actions block asserted above");
+
+        assert!(
+            actions.iter().all(|button| match &button.text {
+                TextObject::Plain { text } | TextObject::Mrkdwn { text } => {
+                    text.chars().any(|ch| ch.is_ascii_alphabetic())
+                }
+            }),
+            "action labels should contain readable words, not icon-only text"
+        );
     }
 
     #[test]

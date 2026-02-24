@@ -7,8 +7,7 @@ use quotey_core::chrono::{DateTime, Utc};
 use quotey_core::domain::explanation::{
     CreateExplanationRequest, EvidenceType, ExplanationAuditEvent, ExplanationEventType,
     ExplanationEvidence, ExplanationEvidenceId, ExplanationRequest, ExplanationRequestId,
-    ExplanationRequestType,
-    ExplanationStats, ExplanationStatus,
+    ExplanationRequestType, ExplanationStats, ExplanationStatus,
 };
 use quotey_core::domain::quote::{QuoteId, QuoteLineId};
 use sqlx::{sqlite::SqliteRow, Row};
@@ -486,22 +485,13 @@ mod tests {
         let fetched = repo.get_request(&created.id).await.expect("get request");
         assert_eq!(fetched, Some(created.clone()));
 
-        let listed = repo
-            .list_requests_for_quote(&quote_id, 10)
-            .await
-            .expect("list requests");
+        let listed = repo.list_requests_for_quote(&quote_id, 10).await.expect("list requests");
         assert_eq!(listed.len(), 1);
         assert_eq!(listed[0].id, created.id);
 
-        repo.update_request_status(
-            &created.id,
-            ExplanationStatus::Success,
-            None,
-            None,
-            Some(120),
-        )
-        .await
-        .expect("update status");
+        repo.update_request_status(&created.id, ExplanationStatus::Success, None, None, Some(120))
+            .await
+            .expect("update status");
 
         let updated = repo
             .get_request(&created.id)
@@ -557,10 +547,7 @@ mod tests {
         .await
         .expect("add evidence");
 
-        let evidence = repo
-            .get_evidence_for_request(&request.id)
-            .await
-            .expect("get evidence");
+        let evidence = repo.get_evidence_for_request(&request.id).await.expect("get evidence");
         assert_eq!(evidence.len(), 2);
         assert_eq!(evidence[0].display_order, 0);
         assert_eq!(evidence[1].display_order, 1);
