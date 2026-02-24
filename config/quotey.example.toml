@@ -21,4 +21,4 @@ graceful_shutdown_secs = 15
 
 [logging]
 level = "info"
-format = "pretty"
+format = "compact"

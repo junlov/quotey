@@ -62,6 +62,7 @@ pub enum LlmProvider {
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LogFormat {
+    Compact,
     Pretty,
     Json,
 }
@@ -126,7 +127,7 @@ impl Default for AppConfig {
                 health_check_port: 8080,
                 graceful_shutdown_secs: 15,
             },
-            logging: LoggingConfig { level: "info".to_string(), format: LogFormat::Pretty },
+            logging: LoggingConfig { level: "info".to_string(), format: LogFormat::Compact },
         }
     }
 }
@@ -151,10 +152,11 @@ impl std::str::FromStr for LogFormat {
 
     fn from_str(value: &str) -> Result<Self, Self::Err> {
         match value.trim().to_ascii_lowercase().as_str() {
+            "compact" => Ok(Self::Compact),
             "pretty" => Ok(Self::Pretty),
             "json" => Ok(Self::Json),
             other => Err(ConfigError::Validation(format!(
-                "unsupported log format `{other}` (expected pretty|json)"
+                "unsupported log format `{other}` (expected compact|pretty|json)"
             ))),
         }
     }
@@ -676,7 +678,7 @@ level = "warn"
 
         assert!(!debug.contains("xapp-secret-value"));
         assert!(!debug.contains("xoxb-secret-value"));
-        assert!(matches!(config.logging.format, LogFormat::Pretty));
+        assert!(matches!(config.logging.format, LogFormat::Compact));
 
         env::remove_var("QUOTEY_SLACK_APP_TOKEN");
         env::remove_var("QUOTEY_SLACK_BOT_TOKEN");
