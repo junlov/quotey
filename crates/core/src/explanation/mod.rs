@@ -661,6 +661,7 @@ mod tests {
         }
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn explain_total_returns_complete_explanation() {
         let quote_id = create_test_quote_id("Q-2026-001");
@@ -683,6 +684,7 @@ mod tests {
         assert!(explanation.user_summary.contains("$180.00"));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn explain_line_returns_line_specific_explanation() {
         let quote_id = create_test_quote_id("Q-2026-002");
@@ -704,6 +706,7 @@ mod tests {
         assert!(!explanation.arithmetic_chain.is_empty());
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn explain_line_fails_for_invalid_line_id() {
         let quote_id = create_test_quote_id("Q-2026-003");
@@ -724,6 +727,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), ExplanationError::InvalidLineId { .. }));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn explain_policy_returns_policy_focused_explanation() {
         let quote_id = create_test_quote_id("Q-2026-004");
@@ -743,6 +747,7 @@ mod tests {
         assert!(explanation.arithmetic_chain.is_empty()); // Policy explanations don't have arithmetic
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn missing_pricing_snapshot_returns_error() {
         let quote_id = create_test_quote_id("Q-2026-005");
@@ -759,6 +764,7 @@ mod tests {
         assert!(matches!(result.unwrap_err(), ExplanationError::MissingPricingSnapshot { .. }));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn arithmetic_chain_contains_all_steps() {
         let quote_id = create_test_quote_id("Q-2026-006");
@@ -785,6 +791,7 @@ mod tests {
         assert_eq!(last.operation, "total");
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn policy_violations_are_included_in_evidence() {
         let quote_id = create_test_quote_id("Q-2026-007");
@@ -814,6 +821,7 @@ mod tests {
         assert!(explanation.user_summary.contains("⚡")); // Warning indicator
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn source_references_include_pricing_and_policy() {
         let quote_id = create_test_quote_id("Q-2026-008");

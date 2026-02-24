@@ -416,6 +416,7 @@ mod tests {
     };
     use crate::domain::quote::QuoteId;
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn allowed_flow_returns_ranked_precedents_with_audit_events() {
         let engine = DeterministicPrecedentEngine::default();
@@ -456,6 +457,7 @@ mod tests {
         assert_eq!(events[1].selected_count, 2);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn denied_flow_emits_user_safe_message_and_fallback_audit() {
         let engine = DeterministicPrecedentEngine::default();
@@ -499,6 +501,7 @@ mod tests {
         assert_eq!(events[0].fallback_path, Some("capture_quote_fingerprint"));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn degraded_flow_clamps_query_bounds_and_records_degraded_audit() {
         let engine = DeterministicPrecedentEngine::new(PrecedentGuardrailPolicy {
@@ -544,6 +547,7 @@ mod tests {
         assert_eq!(events[1].event_type.as_str(), "ranking_completed");
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn non_finite_min_similarity_is_degraded_to_guardrail_floor() {
         let engine = DeterministicPrecedentEngine::new(PrecedentGuardrailPolicy {
@@ -585,6 +589,7 @@ mod tests {
         assert_eq!(events[1].event_type.as_str(), "ranking_completed");
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn invalid_candidate_similarity_is_classified_and_audited_as_failure() {
         let engine = DeterministicPrecedentEngine::default();

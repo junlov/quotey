@@ -687,6 +687,7 @@ mod tests {
         );
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_finalization_generates_and_stores_fingerprint_snapshot() {
         let service = DealDnaLifecycleService::default();
@@ -716,6 +717,7 @@ mod tests {
         assert_eq!(store.snapshots[0], snapshot);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_reopened_quote_updates_existing_fingerprint_snapshot() {
         let service = DealDnaLifecycleService::default();
@@ -752,6 +754,7 @@ mod tests {
         assert_eq!(store.snapshots[0].final_price, Decimal::new(84_000, 2));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_records_won_or_lost_deal_outcomes() {
         let service = DealDnaLifecycleService::default();
@@ -789,6 +792,7 @@ mod tests {
         assert_eq!(store.outcomes[0].close_date.as_deref(), Some("2026-02-22"));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_backfill_processes_only_closed_quotes() {
         let service = DealDnaLifecycleService::default();

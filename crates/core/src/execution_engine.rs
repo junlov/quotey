@@ -849,6 +849,7 @@ mod tests {
         assert_eq!(stale[0].id, stale_task.id);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[test]
     fn in_memory_engine_tracks_tasks_and_transitions() {
         let mut engine = InMemoryExecutionEngine::new();
@@ -872,6 +873,7 @@ mod tests {
         assert_eq!(engine.get_transitions().len(), 2);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[test]
     fn idempotency_record_tracks_payload_hash() {
         let engine = DeterministicExecutionEngine::new();
@@ -889,6 +891,7 @@ mod tests {
         assert!(!idempotency.payload_hash.is_empty());
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[test]
     fn claim_conflict_occurs_when_task_already_claimed() {
         let mut engine = InMemoryExecutionEngine::new();

@@ -183,7 +183,7 @@ where
         };
 
         let normalized = normalize_quote_command(payload.clone())?;
-        let message = self.router.route(normalized).await?;
+        let message = self.router.route(normalized)?;
         Ok(HandlerResult::Responded(message))
     }
 }
@@ -365,6 +365,7 @@ mod tests {
     };
     use crate::commands::SlashCommandPayload;
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[tokio::test]
     async fn dispatcher_routes_slash_commands() {
         let dispatcher = default_dispatcher();
@@ -411,6 +412,7 @@ mod tests {
         assert_eq!(dispatcher.handler_count(), 3);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[tokio::test]
     async fn dispatcher_routes_reaction_added_for_supported_emoji() {
         let dispatcher = default_dispatcher();
@@ -433,6 +435,7 @@ mod tests {
         assert!(matches!(result, HandlerResult::Responded(_)));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[tokio::test]
     async fn dispatcher_processes_but_does_not_respond_for_non_approval_emoji() {
         let dispatcher = default_dispatcher();
@@ -455,6 +458,7 @@ mod tests {
         assert_eq!(result, HandlerResult::Processed);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[tokio::test]
     async fn dispatcher_accepts_colon_wrapped_case_variant_reaction_alias() {
         let dispatcher = default_dispatcher();

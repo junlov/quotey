@@ -3199,6 +3199,7 @@ mod tests {
         assert_eq!(event.idempotency_key, Some(parsed.idempotency_key));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn apply_requires_approved_action_and_matching_replay_checksum() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
@@ -3244,6 +3245,7 @@ mod tests {
         ));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn apply_and_rollback_are_idempotent_with_queryable_audit_history() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
@@ -3311,6 +3313,7 @@ mod tests {
         );
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn rollback_drill_report_contains_timing_checksum_and_safety_artifacts() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
@@ -3468,6 +3471,7 @@ mod tests {
         assert_eq!(first.alert_reasons.len(), 3);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_apply_idempotency_conflict_is_blocked() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
@@ -3519,6 +3523,7 @@ mod tests {
         );
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_apply_idempotency_conflict_is_blocked_for_action_identity_change() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
@@ -3562,6 +3567,7 @@ mod tests {
         );
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_rollback_idempotency_conflict_is_blocked() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
@@ -3611,6 +3617,7 @@ mod tests {
         );
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_rollback_uses_trimmed_idempotency_key_for_record_identity() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
@@ -3657,6 +3664,7 @@ mod tests {
         assert_eq!(second_rollback.rollback_record.id.0, "rollback:rollback-key");
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_missing_idempotency_key_is_rejected() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
@@ -3691,6 +3699,7 @@ mod tests {
         assert_eq!(rollback_error, PolicyLifecycleError::MissingIdempotencyKey);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_missing_signing_metadata_is_rejected() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
@@ -3786,6 +3795,7 @@ mod tests {
         assert_eq!(rollback_missing_secret_error, PolicyLifecycleError::MissingSigningSecret);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_apply_signature_preserves_signing_secret_bytes() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
@@ -3824,6 +3834,7 @@ mod tests {
         assert_ne!(apply_outcome.apply_record.apply_signature, trimmed_secret_signature);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn lifecycle_failure_paths_return_user_safe_remediation_messages() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(40);

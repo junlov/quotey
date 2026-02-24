@@ -382,6 +382,8 @@ mod tests {
         ProductRepository, QuoteRepository,
     };
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn in_memory_quote_repo_round_trip() {
         let repo = InMemoryQuoteRepository::default();
@@ -402,6 +404,8 @@ mod tests {
         assert_eq!(found, Some(quote));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn in_memory_product_repo_round_trip() {
         let repo = InMemoryProductRepository::default();
@@ -418,6 +422,8 @@ mod tests {
         assert_eq!(found, Some(product));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn in_memory_approval_repo_round_trip() {
         let repo = InMemoryApprovalRepository::default();
@@ -436,6 +442,8 @@ mod tests {
         assert_eq!(found, Some(approval));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn in_memory_execution_queue_repo_round_trip() {
         let repo = InMemoryExecutionQueueRepository::default();
@@ -484,6 +492,8 @@ mod tests {
         assert_eq!(transitions, vec![transition]);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn in_memory_idempotency_repo_round_trip() {
         let repo = InMemoryIdempotencyRepository::default();
@@ -510,6 +520,8 @@ mod tests {
         assert_eq!(found, Some(record));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
     async fn in_memory_policy_optimizer_repo_supports_lifecycle_queries() {
         let repo = InMemoryPolicyOptimizerRepository::default();

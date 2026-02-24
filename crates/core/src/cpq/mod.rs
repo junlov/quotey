@@ -98,6 +98,7 @@ mod tests {
         },
     };
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn deterministic_cpq_runtime_returns_all_three_engine_outputs() {
         let runtime = DeterministicCpqRuntime::new(
@@ -122,6 +123,7 @@ mod tests {
         assert_eq!(result.policy.approval_status, ApprovalStatus::Approved);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn runtime_supports_explicit_engine_interfaces() {
         #[derive(Default)]

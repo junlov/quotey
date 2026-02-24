@@ -65,6 +65,13 @@ mod tests {
         "policy_lifecycle_audit",
         "precedent_approval_path_evidence",
         "precedent_similarity_evidence",
+        "deal_autopsy",
+        "decision_fork",
+        "attribution_score",
+        "attribution_node",
+        "attribution_edge",
+        "genome_query_audit",
+        "counterfactual_simulation",
         "idx_quote_status",
         "idx_quote_created_at",
         "idx_quote_line_quote_id",
@@ -155,6 +162,21 @@ mod tests {
         "idx_precedent_similarity_source_fp_version",
         "idx_precedent_similarity_candidate_quote",
         "idx_precedent_similarity_correlation",
+        "idx_deal_autopsy_quote",
+        "idx_deal_autopsy_outcome_created",
+        "idx_decision_fork_autopsy_seq",
+        "idx_decision_fork_type_stage",
+        "idx_attribution_score_autopsy",
+        "idx_attribution_score_fork",
+        "idx_attribution_score_contribution",
+        "idx_attribution_node_type_stage_seg",
+        "idx_attribution_node_hash",
+        "idx_attribution_edge_source",
+        "idx_attribution_edge_target",
+        "idx_attribution_edge_weight",
+        "idx_genome_query_audit_type_queried",
+        "idx_counterfactual_quote",
+        "idx_counterfactual_autopsy",
     ];
 
     #[tokio::test]
@@ -546,6 +568,62 @@ mod tests {
         .expect("check precedent_similarity_evidence table")
         .get::<i64, _>("count");
 
+        let deal_autopsy_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'deal_autopsy'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check deal_autopsy table")
+        .get::<i64, _>("count");
+
+        let decision_fork_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'decision_fork'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check decision_fork table")
+        .get::<i64, _>("count");
+
+        let attribution_score_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'attribution_score'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check attribution_score table")
+        .get::<i64, _>("count");
+
+        let attribution_node_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'attribution_node'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check attribution_node table")
+        .get::<i64, _>("count");
+
+        let attribution_edge_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'attribution_edge'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check attribution_edge table")
+        .get::<i64, _>("count");
+
+        let genome_query_audit_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'genome_query_audit'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check genome_query_audit table")
+        .get::<i64, _>("count");
+
+        let counterfactual_simulation_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'counterfactual_simulation'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check counterfactual_simulation table")
+        .get::<i64, _>("count");
+
         assert_eq!(quote_count, 1);
         assert_eq!(flow_count, 1);
         assert_eq!(audit_count, 1);
@@ -594,6 +672,13 @@ mod tests {
         assert_eq!(policy_lifecycle_audit_count, 1);
         assert_eq!(precedent_approval_path_evidence_count, 1);
         assert_eq!(precedent_similarity_evidence_count, 1);
+        assert_eq!(deal_autopsy_count, 1);
+        assert_eq!(decision_fork_count, 1);
+        assert_eq!(attribution_score_count, 1);
+        assert_eq!(attribution_node_count, 1);
+        assert_eq!(attribution_edge_count, 1);
+        assert_eq!(genome_query_audit_count, 1);
+        assert_eq!(counterfactual_simulation_count, 1);
     }
 
     #[tokio::test]

@@ -250,6 +250,7 @@ mod tests {
     use crate::flows::engine::{FlowDefinition, FlowEngine, FlowTransitionError, NetNewFlow};
     use crate::flows::states::{FlowAction, FlowContext, FlowEvent, FlowState, FlowType};
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn net_new_flow_happy_path_without_approval() {
         let engine = FlowEngine::new(NetNewFlow);
@@ -279,6 +280,7 @@ mod tests {
         assert_eq!(state, FlowState::Sent);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn net_new_flow_approval_path() {
         let engine = FlowEngine::default();
@@ -310,6 +312,7 @@ mod tests {
         assert_eq!(sent, FlowState::Sent);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn finalized_or_sent_quotes_can_reopen_for_revision() {
         let engine = FlowEngine::default();
@@ -330,6 +333,7 @@ mod tests {
         assert!(from_sent.actions.contains(&FlowAction::EvaluatePricing));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn invalid_transition_is_rejected() {
         let engine = FlowEngine::default();
@@ -346,6 +350,7 @@ mod tests {
         ));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn missing_required_fields_are_rejected() {
         let engine = FlowEngine::default();
@@ -365,6 +370,7 @@ mod tests {
         assert!(matches!(error, FlowTransitionError::MissingRequiredFields { .. }));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn replay_is_deterministic_for_same_event_sequence() {
         let engine = FlowEngine::default();
@@ -396,6 +402,7 @@ mod tests {
         assert_eq!(NetNewFlow.flow_type(), FlowType::NetNew);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn flow_runtime_can_call_cpq_stubs() {
         let engine = FlowEngine::default();
@@ -426,6 +433,7 @@ mod tests {
         assert!(result.pricing.total > Decimal::ZERO);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn flow_transition_emits_audit_event() {
         let engine = FlowEngine::default();
