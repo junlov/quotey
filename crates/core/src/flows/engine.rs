@@ -181,8 +181,8 @@ fn transition_net_new(
     context: &FlowContext,
 ) -> Result<TransitionOutcome, FlowTransitionError> {
     use FlowAction::{
-        EvaluatePolicy, EvaluatePricing, FinalizeQuote, GenerateDeliveryArtifacts, MarkQuoteSent,
-        RouteApproval,
+        EvaluatePolicy, EvaluatePricing, FinalizeQuote, GenerateConfigurationFingerprint,
+        GenerateDeliveryArtifacts, MarkQuoteSent, RouteApproval,
     };
     use FlowEvent::{
         ApprovalDenied, ApprovalGranted, CancelRequested, PolicyClear, PolicyViolationDetected,
@@ -204,12 +204,19 @@ fn transition_net_new(
             (Validated, vec![EvaluatePricing])
         }
         (Validated, PricingCalculated) => (Priced, vec![EvaluatePolicy]),
-        (Priced, PolicyClear) => (Finalized, vec![FinalizeQuote, GenerateDeliveryArtifacts]),
+        (Priced, PolicyClear) => (
+            Finalized,
+            vec![FinalizeQuote, GenerateConfigurationFingerprint, GenerateDeliveryArtifacts],
+        ),
         (Priced, PolicyViolationDetected) => (Approval, vec![RouteApproval]),
-        (Approval, ApprovalGranted) => (Approved, vec![FinalizeQuote]),
+        (Approval, ApprovalGranted) => {
+            (Approved, vec![FinalizeQuote, GenerateConfigurationFingerprint])
+        }
         (Approval, ApprovalDenied) => (Rejected, Vec::new()),
         (Finalized, QuoteDelivered) | (Approved, QuoteDelivered) => (Sent, vec![MarkQuoteSent]),
-        (Rejected, ReviseRequested) => (Revised, vec![EvaluatePricing]),
+        (Rejected, ReviseRequested) | (Finalized, ReviseRequested) | (Sent, ReviseRequested) => {
+            (Revised, vec![GenerateConfigurationFingerprint, EvaluatePricing])
+        }
         (_, CancelRequested) => (Cancelled, Vec::new()),
         (Sent, QuoteExpired) | (Cancelled, QuoteExpired) => {
             return Err(FlowTransitionError::InvalidTransition {
@@ -261,6 +268,7 @@ mod tests {
             engine.apply(&state, &FlowEvent::PolicyClear, &context).expect("priced -> finalized");
 
         assert_eq!(finalized.to, FlowState::Finalized);
+        assert!(finalized.actions.contains(&FlowAction::GenerateConfigurationFingerprint));
         assert!(finalized.actions.contains(&FlowAction::GenerateDeliveryArtifacts));
 
         state = finalized.to;
@@ -292,13 +300,34 @@ mod tests {
 
         let approved = engine
             .apply(&approval.to, &FlowEvent::ApprovalGranted, &context)
-            .expect("approval -> approved")
-            .to;
+            .expect("approval -> approved");
+        assert!(approved.actions.contains(&FlowAction::GenerateConfigurationFingerprint));
+
         let sent = engine
-            .apply(&approved, &FlowEvent::QuoteDelivered, &context)
+            .apply(&approved.to, &FlowEvent::QuoteDelivered, &context)
             .expect("approved -> sent")
             .to;
         assert_eq!(sent, FlowState::Sent);
+    }
+
+    #[test]
+    fn finalized_or_sent_quotes_can_reopen_for_revision() {
+        let engine = FlowEngine::default();
+        let context = FlowContext::default();
+
+        let from_finalized = engine
+            .apply(&FlowState::Finalized, &FlowEvent::ReviseRequested, &context)
+            .expect("finalized -> revised");
+        assert_eq!(from_finalized.to, FlowState::Revised);
+        assert!(from_finalized.actions.contains(&FlowAction::GenerateConfigurationFingerprint));
+        assert!(from_finalized.actions.contains(&FlowAction::EvaluatePricing));
+
+        let from_sent = engine
+            .apply(&FlowState::Sent, &FlowEvent::ReviseRequested, &context)
+            .expect("sent -> revised");
+        assert_eq!(from_sent.to, FlowState::Revised);
+        assert!(from_sent.actions.contains(&FlowAction::GenerateConfigurationFingerprint));
+        assert!(from_sent.actions.contains(&FlowAction::EvaluatePricing));
     }
 
     #[test]

@@ -216,10 +216,10 @@ pub trait DnaLifecycleStore {
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
 pub enum DnaLifecycleError {
-    #[error("failed to persist fingerprint snapshot for quote {quote_id}: {source}")]
-    PersistFingerprintSnapshot { quote_id: String, source: String },
-    #[error("failed to persist deal outcome for quote {quote_id}: {source}")]
-    PersistDealOutcome { quote_id: String, source: String },
+    #[error("failed to persist fingerprint snapshot for quote {quote_id}: {details}")]
+    PersistFingerprintSnapshot { quote_id: String, details: String },
+    #[error("failed to persist deal outcome for quote {quote_id}: {details}")]
+    PersistDealOutcome { quote_id: String, details: String },
 }
 
 #[derive(Clone, Debug, Default)]
@@ -239,12 +239,12 @@ impl DealDnaLifecycleService {
         store: &mut S,
     ) -> Result<FingerprintSnapshot, DnaLifecycleError> {
         let snapshot = self.snapshot_for(quote, close_date);
-        store
-            .upsert_fingerprint_snapshot(snapshot.clone())
-            .map_err(|source| DnaLifecycleError::PersistFingerprintSnapshot {
+        store.upsert_fingerprint_snapshot(snapshot.clone()).map_err(|details| {
+            DnaLifecycleError::PersistFingerprintSnapshot {
                 quote_id: snapshot.quote_id.clone(),
-                source,
-            })?;
+                details,
+            }
+        })?;
 
         Ok(snapshot)
     }
@@ -271,12 +271,9 @@ impl DealDnaLifecycleService {
             close_date: Some(close_date),
         };
 
-        store
-            .upsert_deal_outcome(metadata.clone())
-            .map_err(|source| DnaLifecycleError::PersistDealOutcome {
-                quote_id: metadata.quote_id.clone(),
-                source,
-            })?;
+        store.upsert_deal_outcome(metadata.clone()).map_err(|details| {
+            DnaLifecycleError::PersistDealOutcome { quote_id: metadata.quote_id.clone(), details }
+        })?;
 
         Ok(metadata)
     }
@@ -307,7 +304,9 @@ impl DealDnaLifecycleService {
         }
 
         match transition.to {
-            FlowState::Finalized | FlowState::Sent => self.on_quote_closed(quote, None, store).map(Some),
+            FlowState::Finalized | FlowState::Sent => {
+                self.on_quote_closed(quote, None, store).map(Some)
+            }
             FlowState::Revised => self.on_quote_reopened_or_modified(quote, store).map(Some),
             _ => Ok(None),
         }

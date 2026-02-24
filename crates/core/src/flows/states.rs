@@ -48,6 +48,7 @@ pub enum FlowAction {
     EvaluatePolicy,
     RouteApproval,
     FinalizeQuote,
+    GenerateConfigurationFingerprint,
     GenerateDeliveryArtifacts,
     MarkQuoteSent,
 }
