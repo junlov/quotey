@@ -18,8 +18,7 @@ fn init_logging(config: &AppConfig) {
             tracing_subscriber::fmt().with_target(false).with_max_level(log_level).pretty().init();
         }
         Json => {
-            // JSON format requires the json feature - fall back to compact if not available
-            tracing_subscriber::fmt().with_target(false).with_max_level(log_level).compact().init();
+            tracing_subscriber::fmt().with_target(false).with_max_level(log_level).json().init();
         }
     }
 }
@@ -52,6 +51,15 @@ pub async fn run() -> Result<()> {
         app.db_pool.clone(),
     )
     .await?;
+
+    tracing::info!(
+        event_name = "system.server.slack_transport_mode",
+        transport_mode = if app.slack_runner.is_noop_transport() { "noop" } else { "socket" },
+        correlation_id = "bootstrap",
+        quote_id = "unknown",
+        thread_id = "unknown",
+        "slack runner transport mode initialized"
+    );
 
     let _ = &app.config;
     let _ = &app.db_pool;

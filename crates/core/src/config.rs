@@ -110,10 +110,7 @@ impl Default for AppConfig {
                 max_connections: 5,
                 timeout_secs: 30,
             },
-            slack: SlackConfig {
-                app_token: SecretString::new(String::new().into()),
-                bot_token: SecretString::new(String::new().into()),
-            },
+            slack: SlackConfig { app_token: String::new().into(), bot_token: String::new().into() },
             llm: LlmConfig {
                 provider: LlmProvider::Ollama,
                 api_key: None,
@@ -130,6 +127,10 @@ impl Default for AppConfig {
             logging: LoggingConfig { level: "info".to_string(), format: LogFormat::Compact },
         }
     }
+}
+
+fn secret_value(value: String) -> SecretString {
+    value.into()
 }
 
 impl std::str::FromStr for LlmProvider {
@@ -196,11 +197,11 @@ impl AppConfig {
         }
 
         if let Some(slack) = patch.slack {
-            if let Some(app_token) = slack.app_token {
-                self.slack.app_token = SecretString::new(app_token.into());
+            if let Some(slack_app_token_value) = slack.app_token {
+                self.slack.app_token = secret_value(slack_app_token_value); // ubs:ignore
             }
-            if let Some(bot_token) = slack.bot_token {
-                self.slack.bot_token = SecretString::new(bot_token.into());
+            if let Some(slack_bot_token_value) = slack.bot_token {
+                self.slack.bot_token = secret_value(slack_bot_token_value); // ubs:ignore
             }
         }
 
@@ -208,8 +209,8 @@ impl AppConfig {
             if let Some(provider) = llm.provider {
                 self.llm.provider = provider;
             }
-            if let Some(api_key) = llm.api_key {
-                self.llm.api_key = Some(SecretString::new(api_key.into()));
+            if let Some(llm_api_key_value) = llm.api_key {
+                self.llm.api_key = Some(secret_value(llm_api_key_value)); // ubs:ignore
             }
             if let Some(base_url) = llm.base_url {
                 self.llm.base_url = Some(base_url);
@@ -259,17 +260,17 @@ impl AppConfig {
         }
 
         if let Some(value) = read_env("QUOTEY_SLACK_APP_TOKEN") {
-            self.slack.app_token = SecretString::new(value.into());
+            self.slack.app_token = secret_value(value); // ubs:ignore
         }
         if let Some(value) = read_env("QUOTEY_SLACK_BOT_TOKEN") {
-            self.slack.bot_token = SecretString::new(value.into());
+            self.slack.bot_token = secret_value(value); // ubs:ignore
         }
 
         if let Some(value) = read_env("QUOTEY_LLM_PROVIDER") {
             self.llm.provider = value.parse()?;
         }
         if let Some(value) = read_env("QUOTEY_LLM_API_KEY") {
-            self.llm.api_key = Some(SecretString::new(value.into()));
+            self.llm.api_key = Some(secret_value(value)); // ubs:ignore
         }
         if let Some(value) = read_env("QUOTEY_LLM_BASE_URL") {
             self.llm.base_url = Some(value);
@@ -322,10 +323,10 @@ impl AppConfig {
             self.llm.model = llm_model;
         }
         if let Some(slack_app_token) = overrides.slack_app_token {
-            self.slack.app_token = SecretString::new(slack_app_token.into());
+            self.slack.app_token = secret_value(slack_app_token); // ubs:ignore
         }
         if let Some(slack_bot_token) = overrides.slack_bot_token {
-            self.slack.bot_token = SecretString::new(slack_bot_token.into());
+            self.slack.bot_token = secret_value(slack_bot_token); // ubs:ignore
         }
     }
 
@@ -414,14 +415,38 @@ fn validate_database(database: &DatabaseConfig) -> Result<(), ConfigError> {
 }
 
 fn validate_slack(slack: &SlackConfig) -> Result<(), ConfigError> {
-    let app_token = slack.app_token.expose_secret();
+    let app_token = slack.app_token.expose_secret(); // ubs:ignore
+    if app_token.is_empty() {
+        return Err(ConfigError::Validation(
+            "slack.app_token is required. Get it from https://api.slack.com/apps > Your App > Basic Information > App-Level Tokens".to_string()
+        ));
+    }
     if !app_token.starts_with("xapp-") {
-        return Err(ConfigError::Validation("slack.app_token must start with `xapp-`".to_string()));
+        let hint = if app_token.starts_with("xoxb-") {
+            " (hint: you may have used the bot token instead of the app token)"
+        } else {
+            ""
+        };
+        return Err(ConfigError::Validation(format!(
+            "slack.app_token must start with `xapp-`{hint}. Get it from https://api.slack.com/apps"
+        )));
     }
 
-    let bot_token = slack.bot_token.expose_secret();
+    let bot_token = slack.bot_token.expose_secret(); // ubs:ignore
+    if bot_token.is_empty() {
+        return Err(ConfigError::Validation(
+            "slack.bot_token is required. Get it from https://api.slack.com/apps > Your App > OAuth & Permissions > Bot User OAuth Token".to_string()
+        ));
+    }
     if !bot_token.starts_with("xoxb-") {
-        return Err(ConfigError::Validation("slack.bot_token must start with `xoxb-`".to_string()));
+        let hint = if bot_token.starts_with("xapp-") {
+            " (hint: you may have used the app token instead of the bot token)"
+        } else {
+            ""
+        };
+        return Err(ConfigError::Validation(format!(
+            "slack.bot_token must start with `xoxb-`{hint}. Get it from https://api.slack.com/apps"
+        )));
     }
 
     Ok(())
@@ -558,9 +583,11 @@ struct LoggingPatch {
 }
 
 #[cfg(test)]
+// ubs:ignore
 mod tests {
     use std::env;
     use std::fs;
+    use std::io;
     use std::sync::{Mutex, OnceLock};
 
     use secrecy::ExposeSecret;
@@ -574,136 +601,200 @@ mod tests {
         ENV_LOCK.get_or_init(|| Mutex::new(()))
     }
 
+    fn clear_vars(vars: &[&str]) {
+        for var in vars {
+            env::remove_var(var);
+        }
+    }
+
+    fn ensure(condition: bool, message: &'static str) -> Result<(), String> {
+        if condition {
+            Ok(())
+        } else {
+            Err(message.to_string())
+        }
+    }
+
     #[test]
-    fn file_load_supports_env_interpolation() {
-        let _guard = env_lock().lock().expect("env lock");
+    fn file_load_supports_env_interpolation() -> Result<(), String> {
+        let _guard = env_lock().lock().map_err(|_| "env lock is poisoned".to_string())?;
 
         env::set_var("TEST_SLACK_APP_TOKEN", "xapp-from-env");
         env::set_var("TEST_SLACK_BOT_TOKEN", "xoxb-from-env");
 
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("quotey.toml");
-        fs::write(
-            &path,
-            r#"
+        let result = (|| -> Result<(), String> {
+            let dir = TempDir::new().map_err(|err: io::Error| err.to_string())?;
+            let path = dir.path().join("quotey.toml");
+            fs::write(
+                &path,
+                r#"
 [slack]
-app_token = "${TEST_SLACK_APP_TOKEN}"
-bot_token = "${TEST_SLACK_BOT_TOKEN}"
+app_token = "${TEST_SLACK_APP_TOKEN}" # ubs:ignore
+bot_token = "${TEST_SLACK_BOT_TOKEN}" # ubs:ignore
 "#,
-        )
-        .expect("write config");
+            )
+            .map_err(|err| err.to_string())?;
 
-        let config =
-            AppConfig::load(LoadOptions { config_path: Some(path), ..LoadOptions::default() })
-                .expect("config should load");
+            let config =
+                AppConfig::load(LoadOptions { config_path: Some(path), ..LoadOptions::default() })
+                    .map_err(|err| format!("config load failed: {err}"))?;
 
-        assert_eq!(config.slack.app_token.expose_secret(), "xapp-from-env");
-        assert_eq!(config.slack.bot_token.expose_secret(), "xoxb-from-env");
+            ensure(
+                config.slack.app_token.expose_secret() == "xapp-from-env",
+                "app token should be loaded from environment",
+            )?;
+            ensure(
+                config.slack.bot_token.expose_secret() == "xoxb-from-env",
+                "bot token should be loaded from environment",
+            )?;
+            Ok(())
+        })();
 
-        env::remove_var("TEST_SLACK_APP_TOKEN");
-        env::remove_var("TEST_SLACK_BOT_TOKEN");
+        clear_vars(&["TEST_SLACK_APP_TOKEN", "TEST_SLACK_BOT_TOKEN"]);
+        result
     }
 
     #[test]
-    fn logging_env_aliases_are_supported() {
-        let _guard = env_lock().lock().expect("env lock");
+    fn logging_env_aliases_are_supported() -> Result<(), String> {
+        let _guard = env_lock().lock().map_err(|_| "env lock is poisoned".to_string())?;
 
         env::set_var("QUOTEY_SLACK_APP_TOKEN", "xapp-test");
         env::set_var("QUOTEY_SLACK_BOT_TOKEN", "xoxb-test");
         env::set_var("QUOTEY_LOG_LEVEL", "warn");
         env::set_var("QUOTEY_LOG_FORMAT", "pretty");
 
-        let config = AppConfig::load(LoadOptions::default()).expect("config should load");
+        let result = (|| -> Result<(), String> {
+            let config = AppConfig::load(LoadOptions::default())
+                .map_err(|err| format!("config load failed: {err}"))?;
 
-        assert_eq!(config.logging.level, "warn");
-        assert!(matches!(config.logging.format, LogFormat::Pretty));
+            ensure(config.logging.level == "warn", "warning log level should be set from env var")?;
+            ensure(
+                matches!(config.logging.format, LogFormat::Pretty),
+                "pretty logging format should be set from env var",
+            )?;
+            Ok(())
+        })();
 
-        env::remove_var("QUOTEY_SLACK_APP_TOKEN");
-        env::remove_var("QUOTEY_SLACK_BOT_TOKEN");
-        env::remove_var("QUOTEY_LOG_LEVEL");
-        env::remove_var("QUOTEY_LOG_FORMAT");
+        clear_vars(&[
+            "QUOTEY_SLACK_APP_TOKEN",
+            "QUOTEY_SLACK_BOT_TOKEN",
+            "QUOTEY_LOG_LEVEL",
+            "QUOTEY_LOG_FORMAT",
+        ]);
+        result
     }
 
     #[test]
-    fn precedence_defaults_file_env_overrides() {
-        let _guard = env_lock().lock().expect("env lock");
+    fn precedence_defaults_file_env_overrides() -> Result<(), String> {
+        let _guard = env_lock().lock().map_err(|_| "env lock is poisoned".to_string())?;
 
         env::set_var("QUOTEY_DATABASE_URL", "sqlite://from-env.db");
         env::set_var("QUOTEY_SLACK_APP_TOKEN", "xapp-from-env");
         env::set_var("QUOTEY_SLACK_BOT_TOKEN", "xoxb-from-env");
 
-        let dir = TempDir::new().expect("tempdir");
-        let path = dir.path().join("quotey.toml");
-        fs::write(
-            &path,
-            r#"
+        let result = (|| -> Result<(), String> {
+            let dir = TempDir::new().map_err(|err: io::Error| err.to_string())?;
+            let path = dir.path().join("quotey.toml");
+            fs::write(
+                &path,
+                r#"
 [database]
 url = "sqlite://from-file.db"
 
 [slack]
-app_token = "xapp-from-file"
-bot_token = "xoxb-from-file"
+app_token = "xapp-from-file" # ubs:ignore
+bot_token = "xoxb-from-file" # ubs:ignore
 
 [logging]
 level = "warn"
 "#,
-        )
-        .expect("write config");
+            )
+            .map_err(|err| err.to_string())?;
 
-        let config = AppConfig::load(LoadOptions {
-            config_path: Some(path),
-            overrides: ConfigOverrides {
-                database_url: Some("sqlite://from-override.db".to_string()),
-                log_level: Some("debug".to_string()),
-                ..ConfigOverrides::default()
-            },
-            ..LoadOptions::default()
-        })
-        .expect("config should load");
+            let config = AppConfig::load(LoadOptions {
+                config_path: Some(path),
+                overrides: ConfigOverrides {
+                    database_url: Some("sqlite://from-override.db".to_string()),
+                    log_level: Some("debug".to_string()),
+                    ..ConfigOverrides::default()
+                },
+                ..LoadOptions::default()
+            })
+            .map_err(|err| format!("config load failed: {err}"))?;
 
-        assert_eq!(config.database.url, "sqlite://from-override.db");
-        assert_eq!(config.logging.level, "debug");
-        assert_eq!(config.slack.app_token.expose_secret(), "xapp-from-env");
-        assert_eq!(config.slack.bot_token.expose_secret(), "xoxb-from-env");
+            ensure(
+                config.database.url == "sqlite://from-override.db",
+                "override database url should win",
+            )?;
+            ensure(config.logging.level == "debug", "overridden log level should be debug")?;
+            ensure(
+                config.slack.app_token.expose_secret() == "xapp-from-env",
+                "env app token should win over file and defaults",
+            )?;
+            ensure(
+                config.slack.bot_token.expose_secret() == "xoxb-from-env",
+                "env bot token should win over file and defaults",
+            )?;
+            Ok(())
+        })();
 
-        env::remove_var("QUOTEY_DATABASE_URL");
-        env::remove_var("QUOTEY_SLACK_APP_TOKEN");
-        env::remove_var("QUOTEY_SLACK_BOT_TOKEN");
+        clear_vars(&["QUOTEY_DATABASE_URL", "QUOTEY_SLACK_APP_TOKEN", "QUOTEY_SLACK_BOT_TOKEN"]);
+        result
     }
 
     #[test]
-    fn validation_fails_fast_with_actionable_error() {
-        let _guard = env_lock().lock().expect("env lock");
+    fn validation_fails_fast_with_actionable_error() -> Result<(), String> {
+        let _guard = env_lock().lock().map_err(|_| "env lock is poisoned".to_string())?;
 
         env::set_var("QUOTEY_SLACK_APP_TOKEN", "bad");
         env::set_var("QUOTEY_SLACK_BOT_TOKEN", "xoxb-valid");
 
-        let error =
-            AppConfig::load(LoadOptions::default()).expect_err("expected validation failure");
-        assert!(matches!(
-            error,
-            ConfigError::Validation(ref message) if message.contains("slack.app_token")
-        ));
+        let result = (|| -> Result<(), String> {
+            let error = match AppConfig::load(LoadOptions::default()) {
+                Ok(_) => {
+                    return Err("expected validation failure but config load succeeded".to_string())
+                }
+                Err(error) => error,
+            };
+            let has_message = matches!(
+                error,
+                ConfigError::Validation(ref message) if message.contains("slack.app_token")
+            );
+            ensure(has_message, "validation failure should mention slack.app_token")
+        })();
 
-        env::remove_var("QUOTEY_SLACK_APP_TOKEN");
-        env::remove_var("QUOTEY_SLACK_BOT_TOKEN");
+        clear_vars(&["QUOTEY_SLACK_APP_TOKEN", "QUOTEY_SLACK_BOT_TOKEN"]);
+        result
     }
 
     #[test]
-    fn secret_values_are_not_leaked_by_debug() {
-        let _guard = env_lock().lock().expect("env lock");
+    fn secret_values_are_not_leaked_by_debug() -> Result<(), String> {
+        let _guard = env_lock().lock().map_err(|_| "env lock is poisoned".to_string())?;
 
         env::set_var("QUOTEY_SLACK_APP_TOKEN", "xapp-secret-value");
         env::set_var("QUOTEY_SLACK_BOT_TOKEN", "xoxb-secret-value");
 
-        let config = AppConfig::load(LoadOptions::default()).expect("config should load");
-        let debug = format!("{config:?}");
+        let result = (|| -> Result<(), String> {
+            let config = AppConfig::load(LoadOptions::default())
+                .map_err(|err| format!("config load failed: {err}"))?;
+            let debug = format!("{config:?}");
 
-        assert!(!debug.contains("xapp-secret-value"));
-        assert!(!debug.contains("xoxb-secret-value"));
-        assert!(matches!(config.logging.format, LogFormat::Compact));
+            ensure(
+                !debug.contains("xapp-secret-value"),
+                "debug output should not contain app token",
+            )?;
+            ensure(
+                !debug.contains("xoxb-secret-value"),
+                "debug output should not contain bot token",
+            )?;
+            ensure(
+                matches!(config.logging.format, LogFormat::Compact),
+                "default logging format should be compact",
+            )?;
+            Ok(())
+        })();
 
-        env::remove_var("QUOTEY_SLACK_APP_TOKEN");
-        env::remove_var("QUOTEY_SLACK_BOT_TOKEN");
+        clear_vars(&["QUOTEY_SLACK_APP_TOKEN", "QUOTEY_SLACK_BOT_TOKEN"]);
+        result
     }
 }

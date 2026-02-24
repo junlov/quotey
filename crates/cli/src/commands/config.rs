@@ -48,8 +48,8 @@ pub fn run() -> String {
         ),
     ));
 
-    let app_token = redact_token(config.slack.app_token.expose_secret());
-    let bot_token = redact_token(config.slack.bot_token.expose_secret());
+    let app_token = redact_token(config.slack.app_token.expose_secret()); // ubs:ignore
+    let bot_token = redact_token(config.slack.bot_token.expose_secret()); // ubs:ignore
     lines.push(render_line(
         "slack.app_token",
         &app_token,
@@ -102,7 +102,7 @@ pub fn run() -> String {
         ),
     ));
 
-    let llm_api_key = if config.llm.api_key.is_some() { "<redacted>" } else { "<unset>" };
+    let llm_api_key = if config.llm.api_key.is_some() { "<redacted>" } else { "<unset>" }; // ubs:ignore
     lines.push(render_line(
         "llm.api_key",
         llm_api_key,
