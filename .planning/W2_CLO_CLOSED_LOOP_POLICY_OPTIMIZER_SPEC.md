@@ -157,6 +157,21 @@ These items are tracked as beads and are the authoritative implementation checkl
 - `ubs --diff` scoped to changed files
 - Determinism replay invariants and rollback drills must pass before rollout gate
 
+## Task 2 Migration Behavior and Rollback Expectations
+- Migration unit: `migrations/0015_clo_policy_optimizer.{up,down}.sql`.
+- Up migration creates six lifecycle tables plus indexes:
+  `policy_candidate`, `policy_replay_evaluation`, `policy_approval_decision`,
+  `policy_apply_record`, `policy_rollback_record`, `policy_lifecycle_audit`.
+- Up migration is idempotent (`IF NOT EXISTS`) and must apply on both empty databases and
+  already-migrated environments without destructive rewrites.
+- Down migration drops CLO indexes/tables in dependency-safe reverse order to preserve full
+  reversibility for `MIGRATOR.undo(...)` and up/down/up schema signature checks.
+- Persistence fixtures for edge conditions are required in repository tests:
+  conflicting candidates (same base version), stale approvals (`is_stale=1` + expired),
+  and rollback chains (`parent_rollback_id`, increasing `rollback_depth`).
+- Downstream engine tasks (`bd-lmuc.3+`) must treat idempotency keys and replay checksums as
+  authoritative dedupe markers for apply/rollback/audit operations.
+
 ## Guardrail Exit Checklist (Before Task 2 Coding)
 - [ ] Scope/non-goals approved.
 - [ ] KPI formulas and owners locked.
