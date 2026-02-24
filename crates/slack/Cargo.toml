@@ -9,6 +9,7 @@ authors.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+rust_decimal.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 tokio.workspace = true

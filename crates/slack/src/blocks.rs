@@ -192,6 +192,95 @@ pub fn quote_status_message(quote_id: &str, status: &str) -> MessageTemplate {
         .build()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimulationVariantView {
+    pub variant_key: String,
+    pub rank_order: i32,
+    pub total: f64,
+    pub total_delta: f64,
+    pub approval_required: bool,
+    pub summary: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct SimulationComparisonView {
+    pub quote_id: String,
+    pub baseline_total: f64,
+    pub variants: Vec<SimulationVariantView>,
+    pub request_id: String,
+}
+
+pub fn simulation_promotion_action_value(quote_id: &str, variant_key: &str) -> String {
+    format!(
+        "action=promote;quote={};variant={}",
+        encode_action_value_component(quote_id),
+        encode_action_value_component(variant_key)
+    )
+}
+
+pub fn simulation_comparison_message(view: &SimulationComparisonView) -> MessageTemplate {
+    let fallback = format!(
+        "Simulation comparison for {} ({} variant{})",
+        view.quote_id,
+        view.variants.len(),
+        if view.variants.len() == 1 { "" } else { "s" }
+    );
+
+    let mut builder = MessageBuilder::new(fallback)
+        .section("quote.simulation.header.v1", |section| {
+            section.mrkdwn(format!("🧪 *What-if Lab* for `{}`", view.quote_id));
+        })
+        .section("quote.simulation.baseline.v1", |section| {
+            section.mrkdwn(format!("*Baseline total:* {}", format_currency(view.baseline_total)));
+        });
+
+    for (index, variant) in view.variants.iter().enumerate() {
+        let variant_slug = sanitize_simulation_slug(&variant.variant_key);
+        let section_block_id = format!("quote.simulation.variant.{index}.{variant_slug}.v1");
+        let actions_block_id = format!("quote.simulation.actions.{index}.{variant_slug}.v1");
+        let delta_icon = if variant.total_delta < 0.0 {
+            "📉"
+        } else if variant.total_delta > 0.0 {
+            "📈"
+        } else {
+            "➖"
+        };
+        let approval = if variant.approval_required { "approval required" } else { "no approval" };
+
+        builder = builder
+            .section(section_block_id, |section| {
+                section.mrkdwn(format!(
+                    "*#{rank} `{key}`*\nTotal: {total} ({icon} {delta}) • {approval}\n{summary}",
+                    rank = variant.rank_order + 1,
+                    key = variant.variant_key,
+                    total = format_currency(variant.total),
+                    icon = delta_icon,
+                    delta = format_currency(variant.total_delta),
+                    approval = approval,
+                    summary = variant.summary
+                ));
+            })
+            .actions(actions_block_id, |actions| {
+                actions.button(
+                    ButtonElement::new("quote.simulate.promote.v1", "Promote Variant")
+                        .style(ButtonStyle::Primary)
+                        .value(simulation_promotion_action_value(
+                            &view.quote_id,
+                            &variant.variant_key,
+                        )),
+                );
+            });
+    }
+
+    builder
+        .context("quote.simulation.context.v1", |context| {
+            context
+                .plain(format!("Request ID: {}", view.request_id))
+                .plain("Scenario results are hypothetical until a variant is promoted.");
+        })
+        .build()
+}
+
 pub fn approval_request_message(quote_id: &str, approver_role: &str) -> MessageTemplate {
     MessageBuilder::new(format!("Approval required for quote {quote_id} ({approver_role})"))
         .section("quote.approval.summary.v1", |section| {
@@ -357,6 +446,130 @@ impl ApprovalRequestCard {
             })
             .build()
     }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct PolicyApprovalPacketView {
+    pub packet_id: String,
+    pub packet_version: String,
+    pub candidate_id: String,
+    pub proposed_policy_version: i32,
+    pub candidate_diff_summary: String,
+    pub replay_evidence_summary: String,
+    pub risk_score_bps: i32,
+    pub blast_radius_summary: String,
+    pub fallback_plan_summary: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum PolicyApprovalDecisionKind {
+    Approve,
+    Reject,
+    RequestChanges,
+}
+
+impl PolicyApprovalDecisionKind {
+    fn as_str(&self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+            Self::RequestChanges => "request_changes",
+        }
+    }
+
+    fn reason_required(&self) -> bool {
+        matches!(self, Self::Reject | Self::RequestChanges)
+    }
+}
+
+pub fn policy_approval_packet_action_value(
+    packet: &PolicyApprovalPacketView,
+    decision: PolicyApprovalDecisionKind,
+) -> String {
+    let idempotency_key = format!(
+        "pkt:{}:{}:{}:{}:{}",
+        encode_action_value_component(&packet.packet_id),
+        encode_action_value_component(&packet.packet_version),
+        encode_action_value_component(&packet.candidate_id),
+        packet.proposed_policy_version,
+        decision.as_str()
+    );
+
+    format!(
+        "action=policy_packet_review;version={};packet={};candidate={};proposed={};decision={};reason_required={};idempotency={}",
+        encode_action_value_component(&packet.packet_version),
+        encode_action_value_component(&packet.packet_id),
+        encode_action_value_component(&packet.candidate_id),
+        packet.proposed_policy_version,
+        decision.as_str(),
+        decision.reason_required(),
+        encode_action_value_component(&idempotency_key),
+    )
+}
+
+pub fn policy_approval_packet_message(packet: &PolicyApprovalPacketView) -> MessageTemplate {
+    let fallback = format!(
+        "Policy approval packet {} for candidate {} (v{})",
+        packet.packet_id, packet.candidate_id, packet.proposed_policy_version
+    );
+
+    MessageBuilder::new(fallback)
+        .section("policy.packet.header.v1", |section| {
+            section.mrkdwn(format!(
+                "*Policy Review Packet* `{}`\nCandidate `{}` targeting policy version `{}`",
+                packet.packet_id, packet.candidate_id, packet.proposed_policy_version
+            ));
+        })
+        .section("policy.packet.candidate_diff.v1", |section| {
+            section.mrkdwn(format!("*Candidate Diff*\n{}", packet.candidate_diff_summary));
+        })
+        .section("policy.packet.replay_evidence.v1", |section| {
+            section.mrkdwn(format!("*Replay Evidence*\n{}", packet.replay_evidence_summary));
+        })
+        .section("policy.packet.risk.v1", |section| {
+            section.mrkdwn(format!(
+                "*Risk Score:* {} bps\n*Blast Radius:* {}",
+                packet.risk_score_bps, packet.blast_radius_summary
+            ));
+        })
+        .section("policy.packet.fallback.v1", |section| {
+            section.mrkdwn(format!("*Fallback Plan*\n{}", packet.fallback_plan_summary));
+        })
+        .actions("policy.packet.actions.v1", |actions| {
+            actions
+                .button(
+                    ButtonElement::new("policy.packet.approve.v1", "Approve")
+                        .style(ButtonStyle::Primary)
+                        .value(policy_approval_packet_action_value(
+                            packet,
+                            PolicyApprovalDecisionKind::Approve,
+                        )),
+                )
+                .button(
+                    ButtonElement::new("policy.packet.reject.v1", "Reject (Reason Required)")
+                        .style(ButtonStyle::Danger)
+                        .value(policy_approval_packet_action_value(
+                            packet,
+                            PolicyApprovalDecisionKind::Reject,
+                        )),
+                )
+                .button(
+                    ButtonElement::new(
+                        "policy.packet.request_changes.v1",
+                        "Request Changes (Reason Required)",
+                    )
+                    .value(policy_approval_packet_action_value(
+                        packet,
+                        PolicyApprovalDecisionKind::RequestChanges,
+                    )),
+                );
+        })
+        .context("policy.packet.context.v1", |context| {
+            context
+                .plain(format!("Packet version: {}", packet.packet_version))
+                .plain("Actions are idempotent and version-bound.");
+        })
+        .build()
 }
 
 pub fn error_message(summary: &str, correlation_id: &str) -> MessageTemplate {
@@ -727,12 +940,40 @@ fn execution_action_value(
     )
 }
 
+fn encode_action_value_component(value: &str) -> String {
+    let mut encoded = String::with_capacity(value.len());
+    for byte in value.bytes() {
+        if byte.is_ascii_alphanumeric() || matches!(byte, b'-' | b'_' | b'.' | b'~') {
+            encoded.push(char::from(byte));
+        } else {
+            encoded.push_str(&format!("%{byte:02X}"));
+        }
+    }
+    encoded
+}
+
+fn sanitize_simulation_slug(value: &str) -> String {
+    let slug: String = value
+        .chars()
+        .map(|ch| if ch.is_ascii_alphanumeric() { ch.to_ascii_lowercase() } else { '_' })
+        .collect();
+
+    if slug.is_empty() {
+        "variant".to_owned()
+    } else {
+        slug
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         approval_request_message, error_message, execution_task_progress_message,
-        quote_status_message, Block, ButtonStyle, DealDnaCard, DealDnaSimilarDeal,
-        ExecutionTaskStatus, MessageBuilder, TextObject,
+        policy_approval_packet_action_value, policy_approval_packet_message, quote_status_message,
+        simulation_comparison_message, simulation_promotion_action_value, Block, ButtonStyle,
+        DealDnaCard, DealDnaSimilarDeal, ExecutionTaskStatus, MessageBuilder,
+        PolicyApprovalDecisionKind, PolicyApprovalPacketView, SimulationComparisonView,
+        SimulationVariantView, TextObject,
     };
 
     #[test]
@@ -814,6 +1055,155 @@ mod tests {
             elements.first(),
             Some(element) if element.action_id == "quote.refresh.v1"
         ));
+    }
+
+    #[test]
+    fn simulation_comparison_template_includes_promote_actions() {
+        let message = simulation_comparison_message(&SimulationComparisonView {
+            quote_id: "Q-2026-7777".to_string(),
+            baseline_total: 50_000.0,
+            request_id: "req-sim-1".to_string(),
+            variants: vec![
+                SimulationVariantView {
+                    variant_key: "discounted_10".to_string(),
+                    rank_order: 0,
+                    total: 45_000.0,
+                    total_delta: -5_000.0,
+                    approval_required: false,
+                    summary: "Lower total with no approval escalation.".to_string(),
+                },
+                SimulationVariantView {
+                    variant_key: "uplift_term_24".to_string(),
+                    rank_order: 1,
+                    total: 54_000.0,
+                    total_delta: 4_000.0,
+                    approval_required: true,
+                    summary: "Higher total but manager approval required.".to_string(),
+                },
+            ],
+        });
+
+        let promote_buttons: Vec<_> = message
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                Block::Actions { elements, .. } => elements.first(),
+                _ => None,
+            })
+            .collect();
+
+        assert_eq!(promote_buttons.len(), 2);
+        assert_eq!(promote_buttons[0].action_id, "quote.simulate.promote.v1");
+        assert_eq!(
+            promote_buttons[0].value.as_deref(),
+            Some("action=promote;quote=Q-2026-7777;variant=discounted_10")
+        );
+    }
+
+    #[test]
+    fn simulation_comparison_template_keeps_variant_chronology_and_context() {
+        let message = simulation_comparison_message(&SimulationComparisonView {
+            quote_id: "Q-2026-9001".to_string(),
+            baseline_total: 120_000.0,
+            request_id: "req-sim-chronology".to_string(),
+            variants: vec![
+                SimulationVariantView {
+                    variant_key: "A/B test".to_string(),
+                    rank_order: 0,
+                    total: 118_000.0,
+                    total_delta: -2_000.0,
+                    approval_required: false,
+                    summary: "Minor discount".to_string(),
+                },
+                SimulationVariantView {
+                    variant_key: "renewal+uplift".to_string(),
+                    rank_order: 1,
+                    total: 126_500.0,
+                    total_delta: 6_500.0,
+                    approval_required: true,
+                    summary: "Higher term uplift".to_string(),
+                },
+            ],
+        });
+
+        let mut variant_section_ids = Vec::new();
+        let mut variant_action_ids = Vec::new();
+        let mut saw_request_context = false;
+        let mut saw_hypothetical_notice = false;
+
+        for block in &message.blocks {
+            match block {
+                Block::Section { block_id, .. }
+                    if block_id.starts_with("quote.simulation.variant.") =>
+                {
+                    variant_section_ids.push(block_id.clone());
+                }
+                Block::Actions { block_id, elements }
+                    if block_id.starts_with("quote.simulation.actions.") =>
+                {
+                    variant_action_ids.push(block_id.clone());
+                    assert!(matches!(
+                        elements.first(),
+                        Some(button)
+                            if button.action_id == "quote.simulate.promote.v1"
+                                && button.text == TextObject::Plain {
+                                    text: "Promote Variant".to_owned()
+                                }
+                    ));
+                }
+                Block::Context { block_id, elements }
+                    if block_id == "quote.simulation.context.v1" =>
+                {
+                    saw_request_context = elements.iter().any(|element| {
+                        matches!(
+                            element,
+                            TextObject::Plain { text } if text == "Request ID: req-sim-chronology"
+                        )
+                    });
+                    saw_hypothetical_notice = elements.iter().any(|element| {
+                        matches!(
+                            element,
+                            TextObject::Plain { text }
+                                if text == "Scenario results are hypothetical until a variant is promoted."
+                        )
+                    });
+                }
+                _ => {}
+            }
+        }
+
+        assert_eq!(
+            variant_section_ids,
+            vec![
+                "quote.simulation.variant.0.a_b_test.v1".to_string(),
+                "quote.simulation.variant.1.renewal_uplift.v1".to_string(),
+            ]
+        );
+        assert_eq!(
+            variant_action_ids,
+            vec![
+                "quote.simulation.actions.0.a_b_test.v1".to_string(),
+                "quote.simulation.actions.1.renewal_uplift.v1".to_string(),
+            ]
+        );
+        assert!(saw_request_context);
+        assert!(saw_hypothetical_notice);
+    }
+
+    #[test]
+    fn simulation_promote_value_builder_is_idempotent() {
+        assert_eq!(
+            simulation_promotion_action_value("Q-2026-8888", "variant_alpha"),
+            "action=promote;quote=Q-2026-8888;variant=variant_alpha"
+        );
+    }
+
+    #[test]
+    fn simulation_promote_value_builder_encodes_delimiters() {
+        assert_eq!(
+            simulation_promotion_action_value("Q-2026-8888", "variant;x=1=2/need review",),
+            "action=promote;quote=Q-2026-8888;variant=variant%3Bx%3D1%3D2%2Fneed%20review"
+        );
     }
 
     #[test]
@@ -1264,5 +1654,82 @@ mod tests {
             matches!(block, Block::Context { block_id, .. } if block_id == "quote.approval_card.footer.v1")
         });
         assert!(footer.is_some(), "expected footer context block");
+    }
+
+    #[test]
+    fn policy_packet_action_payloads_are_idempotent_and_reason_aware() {
+        let packet = policy_packet_fixture();
+
+        let approve_value =
+            policy_approval_packet_action_value(&packet, PolicyApprovalDecisionKind::Approve);
+        let approve_value_again =
+            policy_approval_packet_action_value(&packet, PolicyApprovalDecisionKind::Approve);
+        assert_eq!(approve_value, approve_value_again);
+        assert!(approve_value.contains("decision=approve"));
+        assert!(approve_value.contains("reason_required=false"));
+
+        let reject_value =
+            policy_approval_packet_action_value(&packet, PolicyApprovalDecisionKind::Reject);
+        assert!(reject_value.contains("decision=reject"));
+        assert!(reject_value.contains("reason_required=true"));
+
+        let request_changes_value = policy_approval_packet_action_value(
+            &packet,
+            PolicyApprovalDecisionKind::RequestChanges,
+        );
+        assert!(request_changes_value.contains("decision=request_changes"));
+        assert!(request_changes_value.contains("reason_required=true"));
+    }
+
+    #[test]
+    fn policy_packet_message_renders_required_sections_and_actions() {
+        let message = policy_approval_packet_message(&policy_packet_fixture());
+
+        let required_sections = [
+            "policy.packet.header.v1",
+            "policy.packet.candidate_diff.v1",
+            "policy.packet.replay_evidence.v1",
+            "policy.packet.risk.v1",
+            "policy.packet.fallback.v1",
+        ];
+        for block_id in required_sections {
+            let present = message.blocks.iter().any(
+                |block| matches!(block, Block::Section { block_id: id, .. } if id == block_id),
+            );
+            assert!(present, "missing required section block: {block_id}");
+        }
+
+        let actions = message.blocks.iter().find_map(|block| match block {
+            Block::Actions { block_id, elements } if block_id == "policy.packet.actions.v1" => {
+                Some(elements)
+            }
+            _ => None,
+        });
+        assert!(actions.is_some(), "expected policy packet actions block");
+        let actions = actions.expect("actions block asserted above");
+        assert_eq!(actions.len(), 3);
+        assert!(actions.iter().any(|button| button.action_id == "policy.packet.approve.v1"));
+        assert!(actions.iter().any(|button| button.action_id == "policy.packet.reject.v1"));
+        assert!(actions
+            .iter()
+            .any(|button| button.action_id == "policy.packet.request_changes.v1"));
+    }
+
+    fn policy_packet_fixture() -> PolicyApprovalPacketView {
+        PolicyApprovalPacketView {
+            packet_id: "pktv1:abc123".to_string(),
+            packet_version: "clo_approval_packet.v1".to_string(),
+            candidate_id: "cand-101".to_string(),
+            proposed_policy_version: 42,
+            candidate_diff_summary:
+                "2 rule updates: discount-cap threshold 20->18; margin-floor 25->27".to_string(),
+            replay_evidence_summary:
+                "Cohort size 240; projected margin +55bps; win-rate proxy +20bps.".to_string(),
+            risk_score_bps: 1800,
+            blast_radius_summary: "18% impacted quotes across smb+enterprise".to_string(),
+            fallback_plan_summary:
+                "Rollback to v41 with signed apply rollback within 15m if drift exceeds threshold."
+                    .to_string(),
+        }
     }
 }
