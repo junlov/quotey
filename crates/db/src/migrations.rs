@@ -38,6 +38,7 @@ mod tests {
         "session_operations",
         "quote_ledger",
         "ledger_verifications",
+        "quote_pricing_snapshot",
         "constraint_nodes",
         "constraint_edges",
         "archaeology_queries",
@@ -104,6 +105,8 @@ mod tests {
         "idx_quote_ledger_quote_id",
         "idx_quote_ledger_content_hash",
         "idx_ledger_verifications_entry_id",
+        "idx_quote_pricing_snapshot_quote_version",
+        "idx_quote_pricing_snapshot_ledger_entry",
         "idx_constraint_nodes_config_id",
         "idx_constraint_nodes_node_key",
         "idx_constraint_edges_config_id",
@@ -325,6 +328,14 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("check ledger_verifications table")
+        .get::<i64, _>("count");
+
+        let quote_pricing_snapshot_count = sqlx::query(
+            "SELECT COUNT(*) AS count FROM sqlite_master WHERE type = 'table' AND name = 'quote_pricing_snapshot'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("check quote_pricing_snapshot table")
         .get::<i64, _>("count");
 
         let constraint_nodes_count = sqlx::query(
@@ -556,6 +567,7 @@ mod tests {
         assert_eq!(session_operations_count, 1);
         assert_eq!(quote_ledger_count, 1);
         assert_eq!(ledger_verifications_count, 1);
+        assert_eq!(quote_pricing_snapshot_count, 1);
         assert_eq!(constraint_nodes_count, 1);
         assert_eq!(constraint_edges_count, 1);
         assert_eq!(archaeology_queries_count, 1);

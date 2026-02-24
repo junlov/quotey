@@ -1374,6 +1374,7 @@ dependencies = [
 name = "quotey-core"
 version = "0.1.1"
 dependencies = [
+ "async-trait",
  "chrono",
  "hmac",
  "rust_decimal",
@@ -1383,6 +1384,7 @@ dependencies = [
  "sha2",
  "tempfile",
  "thiserror",
+ "tokio",
  "toml",
  "uuid",
 ]
@@ -1395,6 +1397,8 @@ dependencies = [
  "chrono",
  "quotey-core",
  "rust_decimal",
+ "serde",
+ "serde_json",
  "sqlx",
  "thiserror",
  "tokio",
