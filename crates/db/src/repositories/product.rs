@@ -4,24 +4,28 @@ use super::{ProductRepository, RepositoryError};
 use crate::DbPool;
 
 pub struct SqlProductRepository {
-    pool: DbPool,
+    _pool: DbPool,
 }
 
 impl SqlProductRepository {
     pub fn new(pool: DbPool) -> Self {
-        Self { pool }
+        Self { _pool: pool }
     }
 }
 
 #[async_trait::async_trait]
 impl ProductRepository for SqlProductRepository {
     async fn find_by_id(&self, _id: &ProductId) -> Result<Option<Product>, RepositoryError> {
-        let _pool = &self.pool;
-        Ok(None)
+        Err(RepositoryError::Decode(
+            "SqlProductRepository is unavailable: product catalog tables are not present in current schema"
+                .to_string(),
+        ))
     }
 
     async fn save(&self, _product: Product) -> Result<(), RepositoryError> {
-        let _pool = &self.pool;
-        Ok(())
+        Err(RepositoryError::Decode(
+            "SqlProductRepository is unavailable: product catalog tables are not present in current schema"
+                .to_string(),
+        ))
     }
 }
