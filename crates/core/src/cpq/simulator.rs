@@ -134,6 +134,8 @@ pub enum SimulatorGuardrailError {
     EmptyProductId,
     #[error("quantity delta {quantity_delta} exceeds guardrail bounds")]
     QuantityDeltaOutOfBounds { quantity_delta: i32 },
+    #[error("aggregated quantity delta {quantity_delta} for product {product_id} exceeds guardrail bounds")]
+    AggregatedQuantityDeltaOutOfBounds { product_id: String, quantity_delta: i64 },
     #[error("conflicting unit price overrides for product {product_id}")]
     ConflictingUnitPriceOverride { product_id: String },
     #[error("quantity underflow for product {product_id} in variant {variant_key}")]
@@ -161,6 +163,11 @@ impl SimulatorGuardrailError {
             Self::EmptyProductId => "A scenario line is missing product identity.".to_string(),
             Self::QuantityDeltaOutOfBounds { .. } => {
                 "Quantity changes are outside allowed bounds for safe simulation.".to_string()
+            }
+            Self::AggregatedQuantityDeltaOutOfBounds { product_id, .. } => {
+                format!(
+                    "Aggregated quantity changes for '{product_id}' exceed safe simulation bounds."
+                )
             }
             Self::ConflictingUnitPriceOverride { product_id } => {
                 format!("Conflicting unit-price overrides were provided for '{product_id}'.")
@@ -209,13 +216,13 @@ pub fn normalize_variations(
             return Err(SimulatorGuardrailError::DuplicateVariantKey { variant_key });
         }
 
-        let mut grouped: BTreeMap<String, (i32, Option<Decimal>)> = BTreeMap::new();
+        let mut grouped: BTreeMap<String, (i64, Option<Decimal>)> = BTreeMap::new();
         for line in variation.line_variations {
             if line.product_id.0.trim().is_empty() {
                 return Err(SimulatorGuardrailError::EmptyProductId);
             }
 
-            if line.quantity_delta.abs() > MAX_QUANTITY_DELTA {
+            if line.quantity_delta.unsigned_abs() > MAX_QUANTITY_DELTA as u32 {
                 return Err(SimulatorGuardrailError::QuantityDeltaOutOfBounds {
                     quantity_delta: line.quantity_delta,
                 });
@@ -223,8 +230,27 @@ pub fn normalize_variations(
 
             let entry = grouped
                 .entry(line.product_id.0.clone())
-                .or_insert((0_i32, line.unit_price_override));
-            entry.0 += line.quantity_delta;
+                .or_insert((0_i64, line.unit_price_override));
+            let updated_delta =
+                entry.0.checked_add(i64::from(line.quantity_delta)).ok_or_else(|| {
+                    SimulatorGuardrailError::AggregatedQuantityDeltaOutOfBounds {
+                        product_id: line.product_id.0.clone(),
+                        quantity_delta: if line.quantity_delta.is_negative() {
+                            i64::MIN
+                        } else {
+                            i64::MAX
+                        },
+                    }
+                })?;
+            if updated_delta < -i64::from(MAX_QUANTITY_DELTA)
+                || updated_delta > i64::from(MAX_QUANTITY_DELTA)
+            {
+                return Err(SimulatorGuardrailError::AggregatedQuantityDeltaOutOfBounds {
+                    product_id: line.product_id.0.clone(),
+                    quantity_delta: updated_delta,
+                });
+            }
+            entry.0 = updated_delta;
 
             match (entry.1, line.unit_price_override) {
                 (Some(existing), Some(candidate)) if existing != candidate => {
@@ -245,6 +271,12 @@ pub fn normalize_variations(
                 continue;
             }
 
+            let quantity_delta = i32::try_from(quantity_delta).map_err(|_| {
+                SimulatorGuardrailError::AggregatedQuantityDeltaOutOfBounds {
+                    product_id: product_id.clone(),
+                    quantity_delta,
+                }
+            })?;
             line_variations.push(LineVariation {
                 product_id: ProductId(product_id),
                 quantity_delta,
@@ -564,6 +596,9 @@ fn simulator_guardrail_error_code(error: &SimulatorGuardrailError) -> &'static s
         SimulatorGuardrailError::EmptyVariantChanges { .. } => "empty_variant_changes",
         SimulatorGuardrailError::EmptyProductId => "empty_product_id",
         SimulatorGuardrailError::QuantityDeltaOutOfBounds { .. } => "quantity_delta_out_of_bounds",
+        SimulatorGuardrailError::AggregatedQuantityDeltaOutOfBounds { .. } => {
+            "aggregated_quantity_delta_out_of_bounds"
+        }
         SimulatorGuardrailError::ConflictingUnitPriceOverride { .. } => {
             "conflicting_unit_price_override"
         }
@@ -698,6 +733,52 @@ mod tests {
 
         let error = normalize_variations(variations, 3).expect_err("must fail");
         assert!(matches!(error, SimulatorGuardrailError::DuplicateVariantKey { .. }));
+    }
+
+    #[test]
+    fn normalizer_rejects_aggregated_quantity_delta_above_guardrail() {
+        let variations = vec![ScenarioVariation {
+            variant_key: "burst".to_string(),
+            line_variations: vec![
+                LineVariation {
+                    product_id: ProductId("plan-pro".to_string()),
+                    quantity_delta: 700_000,
+                    unit_price_override: None,
+                },
+                LineVariation {
+                    product_id: ProductId("plan-pro".to_string()),
+                    quantity_delta: 700_000,
+                    unit_price_override: None,
+                },
+            ],
+            requested_discount_pct_override: None,
+            minimum_margin_pct_override: None,
+            deal_value_override: None,
+        }];
+
+        let error = normalize_variations(variations, 3).expect_err("must fail");
+        assert!(matches!(
+            error,
+            SimulatorGuardrailError::AggregatedQuantityDeltaOutOfBounds { .. }
+        ));
+    }
+
+    #[test]
+    fn normalizer_rejects_extreme_negative_delta_without_panicking() {
+        let variations = vec![ScenarioVariation {
+            variant_key: "extreme-neg".to_string(),
+            line_variations: vec![LineVariation {
+                product_id: ProductId("plan-pro".to_string()),
+                quantity_delta: i32::MIN,
+                unit_price_override: None,
+            }],
+            requested_discount_pct_override: None,
+            minimum_margin_pct_override: None,
+            deal_value_override: None,
+        }];
+
+        let error = normalize_variations(variations, 3).expect_err("must fail");
+        assert!(matches!(error, SimulatorGuardrailError::QuantityDeltaOutOfBounds { .. }));
     }
 
     #[test]
