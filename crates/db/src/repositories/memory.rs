@@ -381,11 +381,12 @@ mod tests {
         InMemoryProductRepository, InMemoryQuoteRepository, PolicyOptimizerRepository,
         ProductRepository, QuoteRepository,
     };
+    type TestResult<T> = Result<T, String>;
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
-    async fn in_memory_quote_repo_round_trip() {
+    async fn in_memory_quote_repo_round_trip() -> TestResult<()> {
         let repo = InMemoryQuoteRepository::default();
         let quote = Quote {
             id: QuoteId("Q-1".to_string()),
@@ -398,16 +399,20 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        repo.save(quote.clone()).await.expect("save quote");
-        let found = repo.find_by_id(&quote.id).await.expect("find quote");
+        repo.save(quote.clone()).await.map_err(|error| format!("save quote: {error}"))?;
+        let found =
+            repo.find_by_id(&quote.id).await.map_err(|error| format!("find quote: {error}"))?;
 
-        assert_eq!(found, Some(quote));
+        if found != Some(quote) {
+            return Err("in-memory quote round-trip mismatch".to_string());
+        }
+        Ok(())
     }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
-    async fn in_memory_product_repo_round_trip() {
+    async fn in_memory_product_repo_round_trip() -> TestResult<()> {
         let repo = InMemoryProductRepository::default();
         let product = Product {
             id: ProductId("plan-pro".to_string()),
@@ -416,16 +421,20 @@ mod tests {
             active: true,
         };
 
-        repo.save(product.clone()).await.expect("save product");
-        let found = repo.find_by_id(&product.id).await.expect("find product");
+        repo.save(product.clone()).await.map_err(|error| format!("save product: {error}"))?;
+        let found =
+            repo.find_by_id(&product.id).await.map_err(|error| format!("find product: {error}"))?;
 
-        assert_eq!(found, Some(product));
+        if found != Some(product) {
+            return Err("in-memory product round-trip mismatch".to_string());
+        }
+        Ok(())
     }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
-    async fn in_memory_approval_repo_round_trip() {
+    async fn in_memory_approval_repo_round_trip() -> TestResult<()> {
         let repo = InMemoryApprovalRepository::default();
         let approval = ApprovalRequest {
             id: ApprovalId("APR-1".to_string()),
@@ -436,16 +445,22 @@ mod tests {
             created_at: Utc::now(),
         };
 
-        repo.save(approval.clone()).await.expect("save approval");
-        let found = repo.find_by_id(&approval.id).await.expect("find approval");
+        repo.save(approval.clone()).await.map_err(|error| format!("save approval: {error}"))?;
+        let found = repo
+            .find_by_id(&approval.id)
+            .await
+            .map_err(|error| format!("find approval: {error}"))?;
 
-        assert_eq!(found, Some(approval));
+        if found != Some(approval) {
+            return Err("in-memory approval round-trip mismatch".to_string());
+        }
+        Ok(())
     }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
-    async fn in_memory_execution_queue_repo_round_trip() {
+    async fn in_memory_execution_queue_repo_round_trip() -> TestResult<()> {
         let repo = InMemoryExecutionQueueRepository::default();
         let task = ExecutionTask {
             id: ExecutionTaskId("task-1".to_string()),
@@ -466,9 +481,12 @@ mod tests {
             updated_at: Utc::now(),
         };
 
-        repo.save_task(task.clone()).await.expect("save task");
-        let found = repo.find_task_by_id(&task.id).await.expect("find task");
-        assert_eq!(found, Some(task.clone()));
+        repo.save_task(task.clone()).await.map_err(|error| format!("save task: {error}"))?;
+        let found =
+            repo.find_task_by_id(&task.id).await.map_err(|error| format!("find task: {error}"))?;
+        if found != Some(task.clone()) {
+            return Err("in-memory execution task round-trip mismatch".to_string());
+        }
 
         let transition = ExecutionTransitionEvent {
             id: ExecutionTransitionId("transition-1".to_string()),
@@ -487,15 +505,23 @@ mod tests {
             occurred_at: Utc::now(),
         };
 
-        repo.append_transition(transition.clone()).await.expect("append transition");
-        let transitions = repo.list_transitions_for_task(&task.id).await.expect("list transitions");
-        assert_eq!(transitions, vec![transition]);
+        repo.append_transition(transition.clone())
+            .await
+            .map_err(|error| format!("append transition: {error}"))?;
+        let transitions = repo
+            .list_transitions_for_task(&task.id)
+            .await
+            .map_err(|error| format!("list transitions: {error}"))?;
+        if transitions != vec![transition] {
+            return Err("in-memory transition round-trip mismatch".to_string());
+        }
+        Ok(())
     }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
-    async fn in_memory_idempotency_repo_round_trip() {
+    async fn in_memory_idempotency_repo_round_trip() -> TestResult<()> {
         let repo = InMemoryIdempotencyRepository::default();
         let record = IdempotencyRecord {
             operation_key: OperationKey("op-1".to_string()),
@@ -514,16 +540,24 @@ mod tests {
             updated_by_component: "socket".to_string(),
         };
 
-        repo.save_operation(record.clone()).await.expect("save operation");
-        let found = repo.find_operation(&record.operation_key).await.expect("find operation");
+        repo.save_operation(record.clone())
+            .await
+            .map_err(|error| format!("save operation: {error}"))?;
+        let found = repo
+            .find_operation(&record.operation_key)
+            .await
+            .map_err(|error| format!("find operation: {error}"))?;
 
-        assert_eq!(found, Some(record));
+        if found != Some(record) {
+            return Err("in-memory operation round-trip mismatch".to_string());
+        }
+        Ok(())
     }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[tokio::test]
-    async fn in_memory_policy_optimizer_repo_supports_lifecycle_queries() {
+    async fn in_memory_policy_optimizer_repo_supports_lifecycle_queries() -> TestResult<()> {
         let repo = InMemoryPolicyOptimizerRepository::default();
         let candidate = PolicyCandidate {
             id: PolicyCandidateId("cand-1".to_string()),
@@ -545,7 +579,9 @@ mod tests {
             monitoring_started_at: None,
             rolled_back_at: None,
         };
-        repo.save_candidate(candidate.clone()).await.expect("save candidate");
+        repo.save_candidate(candidate.clone())
+            .await
+            .map_err(|error| format!("save candidate: {error}"))?;
 
         let replay = ReplayEvaluation {
             id: ReplayEvaluationId("replay-1".to_string()),
@@ -564,7 +600,9 @@ mod tests {
             idempotency_key: "idem-replay-1".to_string(),
             replayed_at: Utc::now(),
         };
-        repo.save_replay_evaluation(replay.clone()).await.expect("save replay");
+        repo.save_replay_evaluation(replay.clone())
+            .await
+            .map_err(|error| format!("save replay: {error}"))?;
 
         let approval = PolicyApprovalDecision {
             id: PolicyApprovalDecisionId("approval-1".to_string()),
@@ -583,7 +621,9 @@ mod tests {
             expires_at: Some(Utc::now()),
             is_stale: true,
         };
-        repo.save_approval_decision(approval.clone()).await.expect("save approval");
+        repo.save_approval_decision(approval.clone())
+            .await
+            .map_err(|error| format!("save approval decision: {error}"))?;
 
         let apply_record = PolicyApplyRecord {
             id: PolicyApplyRecordId("apply-1".to_string()),
@@ -600,7 +640,9 @@ mod tests {
             apply_audit_json: "{}".to_string(),
             applied_at: Utc::now(),
         };
-        repo.save_apply_record(apply_record.clone()).await.expect("save apply");
+        repo.save_apply_record(apply_record.clone())
+            .await
+            .map_err(|error| format!("save apply: {error}"))?;
 
         let rollback = PolicyRollbackRecord {
             id: PolicyRollbackRecordId("rollback-1".to_string()),
@@ -618,7 +660,9 @@ mod tests {
             rollback_metadata_json: "{}".to_string(),
             rolled_back_at: Utc::now(),
         };
-        repo.save_rollback_record(rollback.clone()).await.expect("save rollback");
+        repo.save_rollback_record(rollback.clone())
+            .await
+            .map_err(|error| format!("save rollback: {error}"))?;
 
         let audit_event = PolicyLifecycleAuditEvent {
             id: PolicyLifecycleAuditId("audit-1".to_string()),
@@ -635,37 +679,57 @@ mod tests {
             idempotency_key: Some("idem-audit-1".to_string()),
             occurred_at: Utc::now(),
         };
-        repo.append_lifecycle_audit_event(audit_event.clone()).await.expect("append audit event");
+        repo.append_lifecycle_audit_event(audit_event.clone())
+            .await
+            .map_err(|error| format!("append lifecycle audit event: {error}"))?;
 
         let candidates = repo
             .list_candidates_by_status(Some(PolicyCandidateStatus::Draft), 10)
             .await
-            .expect("list candidates");
-        assert_eq!(candidates, vec![candidate]);
+            .map_err(|error| format!("list candidates: {error}"))?;
+        if candidates != vec![candidate] {
+            return Err("in-memory candidate list mismatch".to_string());
+        }
 
         let replay_lookup = repo
             .find_replay_evaluation_by_checksum(&replay.candidate_id, &replay.replay_checksum)
             .await
-            .expect("find replay by checksum");
-        assert_eq!(replay_lookup, Some(replay));
+            .map_err(|error| format!("find replay by checksum: {error}"))?;
+        if replay_lookup != Some(replay) {
+            return Err("in-memory replay lookup mismatch".to_string());
+        }
 
-        let stale_approvals =
-            repo.list_stale_approval_decisions(Utc::now()).await.expect("list stale approvals");
-        assert_eq!(stale_approvals, vec![approval]);
+        let stale_approvals = repo
+            .list_stale_approval_decisions(Utc::now())
+            .await
+            .map_err(|error| format!("list stale approvals: {error}"))?;
+        if stale_approvals != vec![approval] {
+            return Err("in-memory stale approvals mismatch".to_string());
+        }
 
-        let apply_lookup = repo.get_apply_record(&apply_record.id).await.expect("get apply record");
-        assert_eq!(apply_lookup, Some(apply_record.clone()));
+        let apply_lookup = repo
+            .get_apply_record(&apply_record.id)
+            .await
+            .map_err(|error| format!("get apply record: {error}"))?;
+        if apply_lookup != Some(apply_record.clone()) {
+            return Err("in-memory apply lookup mismatch".to_string());
+        }
 
         let rollback_chain = repo
             .list_rollback_chain_for_apply(&apply_record.id)
             .await
-            .expect("list rollback chain");
-        assert_eq!(rollback_chain, vec![rollback]);
+            .map_err(|error| format!("list rollback chain: {error}"))?;
+        if rollback_chain != vec![rollback] {
+            return Err("in-memory rollback chain mismatch".to_string());
+        }
 
         let lifecycle_events = repo
             .list_lifecycle_audit_for_candidate(&PolicyCandidateId("cand-1".to_string()))
             .await
-            .expect("list lifecycle events");
-        assert_eq!(lifecycle_events, vec![audit_event]);
+            .map_err(|error| format!("list lifecycle events: {error}"))?;
+        if lifecycle_events != vec![audit_event] {
+            return Err("in-memory lifecycle events mismatch".to_string());
+        }
+        Ok(())
     }
 }

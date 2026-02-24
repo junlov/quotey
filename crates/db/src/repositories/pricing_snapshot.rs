@@ -554,44 +554,94 @@ mod tests {
     };
     use crate::{connect_with_settings, migrations, DbPool};
 
+    type TestResult<T> = Result<T, String>;
+
     #[tokio::test]
-    async fn get_snapshot_returns_cached_snapshot_when_present() {
-        let pool = setup_pool().await;
+    async fn get_snapshot_returns_cached_snapshot_when_present() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-PS-CACHED-001".to_string());
-        insert_quote(&pool, &quote_id, "USD").await;
-        insert_ledger_entry(&pool, &quote_id, 1, "led-1", "hash-1", None).await;
+        insert_quote(&pool, &quote_id, "USD").await?;
+        insert_ledger_entry(&pool, &quote_id, 1, "led-1", "hash-1", None).await?;
 
         let snapshot = sample_snapshot(&quote_id, 1, "USD", "2026-02-24T00:00:00Z");
-        insert_snapshot(&pool, &snapshot, "led-1", "hash-1").await;
+        insert_snapshot(&pool, &snapshot, "led-1", "hash-1").await?;
 
         let repo = SqlPricingSnapshotRepository::new(pool.clone());
-        let fetched = repo.get_snapshot(&quote_id, 1).await.expect("fetch cached snapshot");
-
-        assert_eq!(fetched.quote_id, quote_id);
-        assert_eq!(fetched.version, 1);
-        assert_eq!(fetched.total, Decimal::new(9000, 2));
-        assert_eq!(fetched.line_items.len(), 1);
-        assert_eq!(fetched.line_items[0].line_id, "line-1");
+        let fetched = repo
+            .get_snapshot(&quote_id, 1)
+            .await
+            .map_err(|error| format!("fetch cached snapshot: {error}"))?;
+        if fetched.quote_id != quote_id {
+            return Err(format!(
+                "snapshot quote_id mismatch: {:?} != {:?}",
+                fetched.quote_id, quote_id
+            ));
+        }
+        if fetched.version != 1 {
+            return Err(format!("snapshot version mismatch: {} != {}", fetched.version, 1));
+        }
+        if fetched.total != Decimal::new(9000, 2) {
+            return Err(format!(
+                "snapshot total mismatch: {} != {}",
+                fetched.total,
+                Decimal::new(9000, 2)
+            ));
+        }
+        if fetched.line_items.len() != 1 {
+            return Err(format!("snapshot line item count mismatch: {}", fetched.line_items.len()));
+        }
+        if fetched.line_items[0].line_id != "line-1" {
+            return Err(format!(
+                "snapshot line_id mismatch: {:?} != {:?}",
+                fetched.line_items[0].line_id, "line-1"
+            ));
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn get_snapshot_builds_and_caches_fallback_when_missing() {
-        let pool = setup_pool().await;
+    async fn get_snapshot_builds_and_caches_fallback_when_missing() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-PS-FALLBACK-001".to_string());
-        insert_quote(&pool, &quote_id, "USD").await;
-        insert_quote_line(&pool, &quote_id, "line-1", "plan-pro", 2, "50.00", Some("100.00")).await;
-        insert_quote_line(&pool, &quote_id, "line-2", "support", 1, "25.00", None).await;
-        insert_ledger_entry(&pool, &quote_id, 1, "led-fallback-1", "hash-fallback-1", None).await;
+        insert_quote(&pool, &quote_id, "USD").await?;
+        insert_quote_line(&pool, &quote_id, "line-1", "plan-pro", 2, "50.00", Some("100.00"))
+            .await?;
+        insert_quote_line(&pool, &quote_id, "line-2", "support", 1, "25.00", None).await?;
+        insert_ledger_entry(&pool, &quote_id, 1, "led-fallback-1", "hash-fallback-1", None).await?;
 
         let repo = SqlPricingSnapshotRepository::new(pool.clone());
-        let first = repo.get_snapshot(&quote_id, 1).await.expect("fallback snapshot");
-        assert_eq!(first.subtotal, Decimal::new(12500, 2));
-        assert_eq!(first.discount_total, Decimal::ZERO);
-        assert_eq!(first.tax_total, Decimal::ZERO);
-        assert_eq!(first.total, Decimal::new(12500, 2));
-        assert_eq!(first.line_items.len(), 2);
+        let first = repo
+            .get_snapshot(&quote_id, 1)
+            .await
+            .map_err(|error| format!("fallback snapshot: {error}"))?;
+        if first.subtotal != Decimal::new(12500, 2) {
+            return Err(format!(
+                "fallback snapshot subtotal mismatch: {} != {}",
+                first.subtotal,
+                Decimal::new(12500, 2)
+            ));
+        }
+        if first.discount_total != Decimal::ZERO {
+            return Err("fallback snapshot discount_total should be zero".to_string());
+        }
+        if first.tax_total != Decimal::ZERO {
+            return Err("fallback snapshot tax_total should be zero".to_string());
+        }
+        if first.total != Decimal::new(12500, 2) {
+            return Err(format!(
+                "fallback snapshot total mismatch: {} != {}",
+                first.total,
+                Decimal::new(12500, 2)
+            ));
+        }
+        if first.line_items.len() != 2 {
+            return Err(format!(
+                "fallback snapshot line item count mismatch: {}",
+                first.line_items.len()
+            ));
+        }
 
         let count: i64 = sqlx::query_scalar(
             "SELECT COUNT(*) FROM quote_pricing_snapshot WHERE quote_id = ? AND version = 1",
@@ -599,38 +649,64 @@ mod tests {
         .bind(&quote_id.0)
         .fetch_one(&pool)
         .await
-        .expect("snapshot count");
-        assert_eq!(count, 1);
+        .map_err(|error| format!("snapshot count: {error}"))?;
+        if count != 1 {
+            return Err(format!("snapshot count mismatch: {}", count));
+        }
 
-        let second = repo.get_snapshot(&quote_id, 1).await.expect("cached snapshot");
-        assert_eq!(second.total, first.total);
-        assert_eq!(second.line_items.len(), first.line_items.len());
+        let second = repo
+            .get_snapshot(&quote_id, 1)
+            .await
+            .map_err(|error| format!("cached snapshot: {error}"))?;
+        if second.total != first.total {
+            return Err(format!(
+                "cached snapshot total mismatch: {} != {}",
+                second.total, first.total
+            ));
+        }
+        if second.line_items.len() != first.line_items.len() {
+            return Err(format!(
+                "cached snapshot line item count mismatch: {} != {}",
+                second.line_items.len(),
+                first.line_items.len()
+            ));
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn get_snapshot_returns_version_mismatch_for_missing_ledger_version() {
-        let pool = setup_pool().await;
+    async fn get_snapshot_returns_version_mismatch_for_missing_ledger_version() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-PS-VERSION-001".to_string());
-        insert_quote(&pool, &quote_id, "USD").await;
-        insert_ledger_entry(&pool, &quote_id, 1, "led-version-1", "hash-version-1", None).await;
+        insert_quote(&pool, &quote_id, "USD").await?;
+        insert_ledger_entry(&pool, &quote_id, 1, "led-version-1", "hash-version-1", None).await?;
 
         let repo = SqlPricingSnapshotRepository::new(pool.clone());
-        let error = repo.get_snapshot(&quote_id, 2).await.expect_err("version mismatch");
-        assert!(matches!(
-            error,
-            quotey_core::ExplanationError::VersionMismatch { expected: 2, actual: 1 }
-        ));
+        let snapshot_result = repo.get_snapshot(&quote_id, 2).await;
+        match snapshot_result {
+            Ok(_) => return Err("expected version mismatch error, got snapshot".to_string()),
+            Err(error) => match error {
+                quotey_core::ExplanationError::VersionMismatch { expected, actual } => {
+                    if expected != 2 || actual != 1 {
+                        return Err(format!("unexpected version mismatch values: expected {expected}, actual {actual}"));
+                    }
+                }
+                other => return Err(format!("expected version mismatch error, got {other}")),
+            },
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn get_snapshot_reports_ledger_version_overflow_when_latest_exceeds_i32() {
-        let pool = setup_pool().await;
+    async fn get_snapshot_reports_ledger_version_overflow_when_latest_exceeds_i32() -> TestResult<()>
+    {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-PS-VERSION-OVERFLOW-001".to_string());
-        insert_quote(&pool, &quote_id, "USD").await;
+        insert_quote(&pool, &quote_id, "USD").await?;
 
         let timestamp = "2026-02-24T00:00:00Z";
         sqlx::query(
@@ -648,103 +724,125 @@ mod tests {
         .bind(timestamp)
         .execute(&pool)
         .await
-        .expect("insert overflow ledger");
+        .map_err(|error| format!("insert overflow ledger: {error}"))?;
 
         let repo = SqlPricingSnapshotRepository::new(pool.clone());
-        let error = repo
-            .get_snapshot(&quote_id, 1)
-            .await
-            .expect_err("overflowed latest version should fail loudly");
-        assert!(matches!(
-            error,
-            quotey_core::ExplanationError::EvidenceGatheringFailed { reason }
-                if reason.contains("latest ledger version")
-        ));
+        let snapshot_result = repo.get_snapshot(&quote_id, 1).await;
+        match snapshot_result {
+            Ok(_) => return Err("expected overflow snapshot to fail".to_string()),
+            Err(error) => match error {
+                quotey_core::ExplanationError::EvidenceGatheringFailed { reason } => {
+                    if !reason.contains("latest ledger version") {
+                        return Err(format!("expected latest ledger version reason, got {reason}"));
+                    }
+                }
+                other => return Err(format!("expected EvidenceGatheringFailed, got {other}")),
+            },
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn get_snapshot_requires_persisted_snapshot_for_non_latest_version() {
-        let pool = setup_pool().await;
+    async fn get_snapshot_requires_persisted_snapshot_for_non_latest_version() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-PS-HIST-001".to_string());
-        insert_quote(&pool, &quote_id, "USD").await;
+        insert_quote(&pool, &quote_id, "USD").await?;
         insert_quote_line(&pool, &quote_id, "line-1", "plan-pro", 1, "100.00", Some("100.00"))
-            .await;
-        insert_ledger_entry(&pool, &quote_id, 1, "led-hist-1", "hash-hist-1", None).await;
+            .await?;
+        insert_ledger_entry(&pool, &quote_id, 1, "led-hist-1", "hash-hist-1", None).await?;
         insert_ledger_entry(&pool, &quote_id, 2, "led-hist-2", "hash-hist-2", Some("hash-hist-1"))
-            .await;
+            .await?;
 
         let repo = SqlPricingSnapshotRepository::new(pool.clone());
-        let error = repo
-            .get_snapshot(&quote_id, 1)
-            .await
-            .expect_err("historical fallback should be rejected");
-        assert!(matches!(
-            error,
-            quotey_core::ExplanationError::MissingPricingSnapshot { quote_id: QuoteId(id) }
-                if id == "Q-PS-HIST-001"
-        ));
+        let snapshot_result = repo.get_snapshot(&quote_id, 1).await;
+        match snapshot_result {
+            Ok(_) => return Err("expected non-latest version snapshot to fail".to_string()),
+            Err(quotey_core::ExplanationError::MissingPricingSnapshot { quote_id }) => {
+                if quote_id.0 != "Q-PS-HIST-001" {
+                    return Err(format!("unexpected quote id in error: {quote_id:?}"));
+                }
+            }
+            Err(other) => {
+                return Err(format!("expected MissingPricingSnapshot error, got {other}"))
+            }
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn get_snapshot_rejects_negative_quantity_in_fallback_rows() {
-        let pool = setup_pool().await;
+    async fn get_snapshot_rejects_negative_quantity_in_fallback_rows() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-PS-NEG-001".to_string());
-        insert_quote(&pool, &quote_id, "USD").await;
+        insert_quote(&pool, &quote_id, "USD").await?;
         insert_quote_line(&pool, &quote_id, "line-neg", "plan-pro", -3, "25.00", Some("-75.00"))
-            .await;
-        insert_ledger_entry(&pool, &quote_id, 1, "led-neg-1", "hash-neg-1", None).await;
+            .await?;
+        insert_ledger_entry(&pool, &quote_id, 1, "led-neg-1", "hash-neg-1", None).await?;
 
         let repo = SqlPricingSnapshotRepository::new(pool.clone());
-        let error = repo
-            .get_snapshot(&quote_id, 1)
-            .await
-            .expect_err("negative quantity fallback reconstruction must fail");
-        assert!(matches!(
-            error,
-            quotey_core::ExplanationError::EvidenceGatheringFailed { reason }
-                if reason.contains("negative quantity")
-        ));
+        let snapshot_result = repo.get_snapshot(&quote_id, 1).await;
+        match snapshot_result {
+            Ok(_) => return Err("expected negative quantity to fail".to_string()),
+            Err(quotey_core::ExplanationError::EvidenceGatheringFailed { reason }) => {
+                if !reason.contains("negative quantity") {
+                    return Err(format!("unexpected reason: {reason}"));
+                }
+            }
+            Err(other) => return Err(format!("expected EvidenceGatheringFailed, got {other}")),
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn get_snapshot_returns_quote_not_found_when_quote_missing() {
-        let pool = setup_pool().await;
+    async fn get_snapshot_returns_quote_not_found_when_quote_missing() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-PS-MISSING-001".to_string());
         let repo = SqlPricingSnapshotRepository::new(pool.clone());
 
-        let error = repo.get_snapshot(&quote_id, 1).await.expect_err("quote missing");
-        assert!(matches!(
-            error,
-            quotey_core::ExplanationError::QuoteNotFound { quote_id: QuoteId(id) } if id == "Q-PS-MISSING-001"
-        ));
+        let snapshot_result = repo.get_snapshot(&quote_id, 1).await;
+        match snapshot_result {
+            Ok(_) => return Err("expected missing quote to fail".to_string()),
+            Err(quotey_core::ExplanationError::QuoteNotFound { quote_id }) => {
+                if quote_id.0 != "Q-PS-MISSING-001" {
+                    return Err(format!("unexpected quote id in error: {quote_id:?}"));
+                }
+            }
+            Err(other) => return Err(format!("expected QuoteNotFound, got {other}")),
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn get_snapshot_detects_ledger_mismatch_on_cached_snapshot() {
-        let pool = setup_pool().await;
+    async fn get_snapshot_detects_ledger_mismatch_on_cached_snapshot() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-PS-MISMATCH-001".to_string());
-        insert_quote(&pool, &quote_id, "USD").await;
-        insert_ledger_entry(&pool, &quote_id, 1, "led-match-1", "hash-match-1", None).await;
+        insert_quote(&pool, &quote_id, "USD").await?;
+        insert_ledger_entry(&pool, &quote_id, 1, "led-match-1", "hash-match-1", None).await?;
 
         let snapshot = sample_snapshot(&quote_id, 1, "USD", "2026-02-24T00:00:00Z");
-        insert_snapshot(&pool, &snapshot, "led-match-1", "hash-other").await;
+        insert_snapshot(&pool, &snapshot, "led-match-1", "hash-other").await?;
 
         let repo = SqlPricingSnapshotRepository::new(pool.clone());
-        let error = repo.get_snapshot(&quote_id, 1).await.expect_err("ledger mismatch");
-        assert!(matches!(
-            error,
-            quotey_core::ExplanationError::EvidenceGatheringFailed { reason } if reason.contains("ledger mismatch")
-        ));
+        let snapshot_result = repo.get_snapshot(&quote_id, 1).await;
+        match snapshot_result {
+            Ok(_) => return Err("expected ledger mismatch to fail".to_string()),
+            Err(quotey_core::ExplanationError::EvidenceGatheringFailed { reason }) => {
+                if !reason.contains("ledger mismatch") {
+                    return Err(format!("unexpected reason: {reason}"));
+                }
+            }
+            Err(other) => return Err(format!("expected EvidenceGatheringFailed, got {other}")),
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     fn sample_snapshot(
@@ -776,15 +874,15 @@ mod tests {
         }
     }
 
-    async fn setup_pool() -> DbPool {
+    async fn setup_pool() -> TestResult<DbPool> {
         let pool = connect_with_settings("sqlite::memory:?cache=shared", 1, 30)
             .await
-            .expect("connect test pool");
-        migrations::run_pending(&pool).await.expect("run migrations");
-        pool
+            .map_err(|error| format!("connect test pool: {error}"))?;
+        migrations::run_pending(&pool).await.map_err(|error| format!("run migrations: {error}"))?;
+        Ok(pool)
     }
 
-    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId, currency: &str) {
+    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId, currency: &str) -> TestResult<()> {
         let timestamp = "2026-02-24T00:00:00Z";
         sqlx::query(
             "INSERT INTO quote (id, status, currency, created_by, created_at, updated_at)
@@ -796,7 +894,8 @@ mod tests {
         .bind(timestamp)
         .execute(pool)
         .await
-        .expect("insert quote");
+        .map_err(|error| format!("insert quote: {error}"))?;
+        Ok(())
     }
 
     async fn insert_quote_line(
@@ -807,7 +906,7 @@ mod tests {
         quantity: i32,
         unit_price: &str,
         subtotal: Option<&str>,
-    ) {
+    ) -> TestResult<()> {
         let timestamp = "2026-02-24T00:00:00Z";
         sqlx::query(
             r#"
@@ -826,7 +925,8 @@ mod tests {
         .bind(timestamp)
         .execute(pool)
         .await
-        .expect("insert quote line");
+        .map_err(|error| format!("insert quote line: {error}"))?;
+        Ok(())
     }
 
     async fn insert_ledger_entry(
@@ -836,7 +936,7 @@ mod tests {
         entry_id: &str,
         content_hash: &str,
         prev_hash: Option<&str>,
-    ) {
+    ) -> TestResult<()> {
         let timestamp = "2026-02-24T00:00:00Z";
         sqlx::query(
             r#"
@@ -853,7 +953,8 @@ mod tests {
         .bind(timestamp)
         .execute(pool)
         .await
-        .expect("insert ledger");
+        .map_err(|error| format!("insert ledger: {error}"))?;
+        Ok(())
     }
 
     async fn insert_snapshot(
@@ -861,9 +962,10 @@ mod tests {
         snapshot: &PricingSnapshot,
         ledger_entry_id: &str,
         ledger_content_hash: &str,
-    ) {
+    ) -> TestResult<()> {
         let payload = PersistedPricingTrace::from_snapshot(snapshot);
-        let payload_json = serde_json::to_string(&payload).expect("serialize payload");
+        let payload_json = serde_json::to_string(&payload)
+            .map_err(|error| format!("serialize payload: {error}"))?;
         sqlx::query(
             r#"
             INSERT INTO quote_pricing_snapshot (
@@ -887,6 +989,7 @@ mod tests {
         .bind(&snapshot.created_at)
         .execute(pool)
         .await
-        .expect("insert snapshot");
+        .map_err(|error| format!("insert snapshot: {error}"))?;
+        Ok(())
     }
 }

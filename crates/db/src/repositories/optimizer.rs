@@ -836,25 +836,33 @@ mod tests {
 
     use super::{PolicyOptimizerRepository, SqlPolicyOptimizerRepository};
     use crate::{connect_with_settings, migrations, DbPool};
+    type TestResult<T> = Result<T, String>;
 
     #[tokio::test]
-    async fn sql_optimizer_repo_supports_conflicting_candidates_and_replay_lookup() {
-        let pool = setup_pool().await;
+    async fn sql_optimizer_repo_supports_conflicting_candidates_and_replay_lookup() -> TestResult<()>
+    {
+        let pool = setup_pool().await?;
         let repo = SqlPolicyOptimizerRepository::new(pool.clone());
 
         let candidate_a =
-            sample_candidate("cand-conflict-a", "idem-cand-a", "U-A", "2026-02-24T01:00:00Z");
+            sample_candidate("cand-conflict-a", "idem-cand-a", "U-A", "2026-02-24T01:00:00Z")?;
         let candidate_b =
-            sample_candidate("cand-conflict-b", "idem-cand-b", "U-B", "2026-02-24T01:01:00Z");
+            sample_candidate("cand-conflict-b", "idem-cand-b", "U-B", "2026-02-24T01:01:00Z")?;
 
-        repo.save_candidate(candidate_a.clone()).await.expect("save candidate a");
-        repo.save_candidate(candidate_b.clone()).await.expect("save candidate b");
+        repo.save_candidate(candidate_a.clone())
+            .await
+            .map_err(|error| format!("save candidate a: {error}"))?;
+        repo.save_candidate(candidate_b.clone())
+            .await
+            .map_err(|error| format!("save candidate b: {error}"))?;
 
         let draft_candidates = repo
             .list_candidates_by_status(Some(PolicyCandidateStatus::Draft), 10)
             .await
-            .expect("list draft candidates");
-        assert_eq!(draft_candidates.len(), 2);
+            .map_err(|error| format!("list draft candidates: {error}"))?;
+        if draft_candidates.len() != 2 {
+            return Err("conflicting candidates: expected exactly two candidates".to_string());
+        }
 
         let replay = ReplayEvaluation {
             id: ReplayEvaluationId("replay-cand-a-v1".to_string()),
@@ -871,28 +879,35 @@ mod tests {
             risk_flags_json: "[]".to_string(),
             deterministic_pass: true,
             idempotency_key: "idem-replay-a-1".to_string(),
-            replayed_at: parse_ts("2026-02-24T01:02:00Z"),
+            replayed_at: parse_ts("2026-02-24T01:02:00Z")?,
         };
 
-        repo.save_replay_evaluation(replay.clone()).await.expect("save replay");
+        repo.save_replay_evaluation(replay.clone())
+            .await
+            .map_err(|error| format!("save replay: {error}"))?;
 
         let replay_lookup = repo
             .find_replay_evaluation_by_checksum(&candidate_a.id, &replay.replay_checksum)
             .await
-            .expect("lookup replay by checksum");
-        assert_eq!(replay_lookup, Some(replay));
+            .map_err(|error| format!("lookup replay by checksum: {error}"))?;
+        if replay_lookup != Some(replay) {
+            return Err("replay lookup mismatch".to_string());
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn sql_optimizer_repo_lists_stale_approval_decisions() {
-        let pool = setup_pool().await;
+    async fn sql_optimizer_repo_lists_stale_approval_decisions() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let repo = SqlPolicyOptimizerRepository::new(pool.clone());
 
         let candidate =
-            sample_candidate("cand-stale", "idem-cand-stale", "U-C", "2026-02-24T01:10:00Z");
-        repo.save_candidate(candidate.clone()).await.expect("save candidate");
+            sample_candidate("cand-stale", "idem-cand-stale", "U-C", "2026-02-24T01:10:00Z")?;
+        repo.save_candidate(candidate.clone())
+            .await
+            .map_err(|error| format!("save candidate: {error}"))?;
 
         let fresh = PolicyApprovalDecision {
             id: PolicyApprovalDecisionId("apr-fresh".to_string()),
@@ -907,8 +922,8 @@ mod tests {
             signature: Some("sig-fresh".to_string()),
             signature_key_id: Some("kms-key-1".to_string()),
             idempotency_key: "idem-apr-fresh".to_string(),
-            decided_at: parse_ts("2026-02-24T01:11:00Z"),
-            expires_at: Some(parse_ts("2026-02-25T01:11:00Z")),
+            decided_at: parse_ts("2026-02-24T01:11:00Z")?,
+            expires_at: Some(parse_ts("2026-02-25T01:11:00Z")?),
             is_stale: false,
         };
 
@@ -925,32 +940,40 @@ mod tests {
             signature: None,
             signature_key_id: None,
             idempotency_key: "idem-apr-stale".to_string(),
-            decided_at: parse_ts("2026-02-24T01:12:00Z"),
-            expires_at: Some(parse_ts("2026-02-24T01:20:00Z")),
+            decided_at: parse_ts("2026-02-24T01:12:00Z")?,
+            expires_at: Some(parse_ts("2026-02-24T01:20:00Z")?),
             is_stale: true,
         };
 
-        repo.save_approval_decision(fresh).await.expect("save fresh approval");
-        repo.save_approval_decision(stale.clone()).await.expect("save stale approval");
+        repo.save_approval_decision(fresh)
+            .await
+            .map_err(|error| format!("save fresh approval: {error}"))?;
+        repo.save_approval_decision(stale.clone())
+            .await
+            .map_err(|error| format!("save stale approval: {error}"))?;
 
         let stale_rows = repo
-            .list_stale_approval_decisions(parse_ts("2026-02-24T02:00:00Z"))
+            .list_stale_approval_decisions(parse_ts("2026-02-24T02:00:00Z")?)
             .await
-            .expect("list stale approvals");
-
-        assert_eq!(stale_rows, vec![stale]);
+            .map_err(|error| format!("list stale approvals: {error}"))?;
+        if stale_rows != vec![stale] {
+            return Err("stale approval rows mismatch".to_string());
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn sql_optimizer_repo_persists_apply_and_rollback_chains() {
-        let pool = setup_pool().await;
+    async fn sql_optimizer_repo_persists_apply_and_rollback_chains() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let repo = SqlPolicyOptimizerRepository::new(pool.clone());
 
         let candidate =
-            sample_candidate("cand-chain", "idem-cand-chain", "U-CHAIN", "2026-02-24T02:00:00Z");
-        repo.save_candidate(candidate.clone()).await.expect("save candidate");
+            sample_candidate("cand-chain", "idem-cand-chain", "U-CHAIN", "2026-02-24T02:00:00Z")?;
+        repo.save_candidate(candidate.clone())
+            .await
+            .map_err(|error| format!("save candidate: {error}"))?;
 
         let approval = PolicyApprovalDecision {
             id: PolicyApprovalDecisionId("apr-chain".to_string()),
@@ -965,11 +988,13 @@ mod tests {
             signature: Some("sig-approval".to_string()),
             signature_key_id: Some("kms-key-2".to_string()),
             idempotency_key: "idem-apr-chain".to_string(),
-            decided_at: parse_ts("2026-02-24T02:05:00Z"),
+            decided_at: parse_ts("2026-02-24T02:05:00Z")?,
             expires_at: None,
             is_stale: false,
         };
-        repo.save_approval_decision(approval.clone()).await.expect("save approval");
+        repo.save_approval_decision(approval.clone())
+            .await
+            .map_err(|error| format!("save approval: {error}"))?;
 
         let apply = PolicyApplyRecord {
             id: PolicyApplyRecordId("apply-chain".to_string()),
@@ -984,9 +1009,11 @@ mod tests {
             idempotency_key: "idem-apply-chain".to_string(),
             verification_checksum: "sha256:verify-apply".to_string(),
             apply_audit_json: "{}".to_string(),
-            applied_at: parse_ts("2026-02-24T02:10:00Z"),
+            applied_at: parse_ts("2026-02-24T02:10:00Z")?,
         };
-        repo.save_apply_record(apply.clone()).await.expect("save apply");
+        repo.save_apply_record(apply.clone())
+            .await
+            .map_err(|error| format!("save apply: {error}"))?;
 
         let rollback_one = PolicyRollbackRecord {
             id: PolicyRollbackRecordId("rb-chain-1".to_string()),
@@ -1002,7 +1029,7 @@ mod tests {
             parent_rollback_id: None,
             rollback_depth: 0,
             rollback_metadata_json: "{}".to_string(),
-            rolled_back_at: parse_ts("2026-02-24T02:15:00Z"),
+            rolled_back_at: parse_ts("2026-02-24T02:15:00Z")?,
         };
 
         let rollback_two = PolicyRollbackRecord {
@@ -1019,30 +1046,46 @@ mod tests {
             parent_rollback_id: Some(rollback_one.id.clone()),
             rollback_depth: 1,
             rollback_metadata_json: "{}".to_string(),
-            rolled_back_at: parse_ts("2026-02-24T02:20:00Z"),
+            rolled_back_at: parse_ts("2026-02-24T02:20:00Z")?,
         };
 
-        repo.save_rollback_record(rollback_one.clone()).await.expect("save rollback one");
-        repo.save_rollback_record(rollback_two.clone()).await.expect("save rollback two");
+        repo.save_rollback_record(rollback_one.clone())
+            .await
+            .map_err(|error| format!("save rollback one: {error}"))?;
+        repo.save_rollback_record(rollback_two.clone())
+            .await
+            .map_err(|error| format!("save rollback two: {error}"))?;
 
-        let rollback_chain =
-            repo.list_rollback_chain_for_apply(&apply.id).await.expect("list rollback chain");
-        assert_eq!(rollback_chain, vec![rollback_one, rollback_two]);
+        let rollback_chain = repo
+            .list_rollback_chain_for_apply(&apply.id)
+            .await
+            .map_err(|error| format!("list rollback chain: {error}"))?;
+        if rollback_chain != vec![rollback_one, rollback_two] {
+            return Err("rollback chain mismatch".to_string());
+        }
 
-        let apply_lookup = repo.get_apply_record(&apply.id).await.expect("get apply record");
-        assert_eq!(apply_lookup, Some(apply));
+        let apply_lookup = repo
+            .get_apply_record(&apply.id)
+            .await
+            .map_err(|error| format!("get apply record: {error}"))?;
+        if apply_lookup != Some(apply) {
+            return Err("apply record mismatch".to_string());
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn sql_optimizer_repo_appends_and_lists_lifecycle_audit_events() {
-        let pool = setup_pool().await;
+    async fn sql_optimizer_repo_appends_and_lists_lifecycle_audit_events() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let repo = SqlPolicyOptimizerRepository::new(pool.clone());
 
         let candidate =
-            sample_candidate("cand-audit", "idem-cand-audit", "U-AUD", "2026-02-24T03:00:00Z");
-        repo.save_candidate(candidate.clone()).await.expect("save candidate");
+            sample_candidate("cand-audit", "idem-cand-audit", "U-AUD", "2026-02-24T03:00:00Z")?;
+        repo.save_candidate(candidate.clone())
+            .await
+            .map_err(|error| format!("save candidate: {error}"))?;
 
         let created_event = PolicyLifecycleAuditEvent {
             id: PolicyLifecycleAuditId("audit-created".to_string()),
@@ -1057,7 +1100,7 @@ mod tests {
             actor_id: "optimizer".to_string(),
             correlation_id: "corr-audit-1".to_string(),
             idempotency_key: Some("idem-audit-created".to_string()),
-            occurred_at: parse_ts("2026-02-24T03:01:00Z"),
+            occurred_at: parse_ts("2026-02-24T03:01:00Z")?,
         };
 
         let stale_event = PolicyLifecycleAuditEvent {
@@ -1073,30 +1116,35 @@ mod tests {
             actor_id: "policy-monitor".to_string(),
             correlation_id: "corr-audit-2".to_string(),
             idempotency_key: Some("idem-audit-stale".to_string()),
-            occurred_at: parse_ts("2026-02-24T03:02:00Z"),
+            occurred_at: parse_ts("2026-02-24T03:02:00Z")?,
         };
 
         repo.append_lifecycle_audit_event(created_event.clone())
             .await
-            .expect("append created event");
-        repo.append_lifecycle_audit_event(stale_event.clone()).await.expect("append stale event");
+            .map_err(|error| format!("append created event: {error}"))?;
+        repo.append_lifecycle_audit_event(stale_event.clone())
+            .await
+            .map_err(|error| format!("append stale event: {error}"))?;
 
         let events = repo
             .list_lifecycle_audit_for_candidate(&candidate.id)
             .await
-            .expect("list lifecycle events");
+            .map_err(|error| format!("list lifecycle events: {error}"))?;
 
-        assert_eq!(events, vec![created_event, stale_event]);
+        if events != vec![created_event, stale_event] {
+            return Err("lifecycle audit events mismatch".to_string());
+        }
 
         pool.close().await;
+        Ok(())
     }
 
-    async fn setup_pool() -> DbPool {
+    async fn setup_pool() -> TestResult<DbPool> {
         let pool = connect_with_settings("sqlite::memory:?cache=shared", 1, 30)
             .await
-            .expect("connect test pool");
-        migrations::run_pending(&pool).await.expect("run migrations");
-        pool
+            .map_err(|error| format!("connect test pool: {error}"))?;
+        migrations::run_pending(&pool).await.map_err(|error| format!("run migrations: {error}"))?;
+        Ok(pool)
     }
 
     fn sample_candidate(
@@ -1104,8 +1152,8 @@ mod tests {
         idempotency_key: &str,
         actor: &str,
         created_at: &str,
-    ) -> PolicyCandidate {
-        PolicyCandidate {
+    ) -> TestResult<PolicyCandidate> {
+        Ok(PolicyCandidate {
             id: PolicyCandidateId(id.to_string()),
             base_policy_version: 7,
             proposed_policy_version: 8,
@@ -1117,17 +1165,19 @@ mod tests {
             latest_replay_checksum: None,
             idempotency_key: idempotency_key.to_string(),
             created_by_actor_id: actor.to_string(),
-            created_at: parse_ts(created_at),
-            updated_at: parse_ts(created_at),
+            created_at: parse_ts(created_at)?,
+            updated_at: parse_ts(created_at)?,
             review_ready_at: None,
             approved_at: None,
             applied_at: None,
             monitoring_started_at: None,
             rolled_back_at: None,
-        }
+        })
     }
 
-    fn parse_ts(value: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(value).expect("valid rfc3339").with_timezone(&Utc)
+    fn parse_ts(value: &str) -> TestResult<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(value)
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+            .map_err(|error| format!("invalid timestamp `{value}`: {error}"))
     }
 }

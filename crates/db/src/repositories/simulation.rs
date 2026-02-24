@@ -812,8 +812,10 @@ mod tests {
     };
     use crate::{connect_with_settings, migrations, DbPool};
 
+    type TestResult<T> = Result<T, String>;
+
     #[test]
-    fn scenario_run_record_round_trip() {
+    fn scenario_run_record_round_trip() -> TestResult<()> {
         let run = ScenarioRun {
             id: ScenarioRunId("sim-run-1".to_string()),
             quote_id: QuoteId("Q-100".to_string()),
@@ -830,16 +832,35 @@ mod tests {
             completed_at: None,
         };
 
-        let round_trip =
-            ScenarioRun::try_from(ScenarioRunRecord::from(run.clone())).expect("decode run");
-        assert_eq!(round_trip.id, run.id);
-        assert_eq!(round_trip.quote_id, run.quote_id);
-        assert_eq!(round_trip.status, run.status);
-        assert_eq!(round_trip.variant_count, run.variant_count);
+        let round_trip = ScenarioRun::try_from(ScenarioRunRecord::from(run.clone()))
+            .map_err(|error| format!("decode run: {error}"))?;
+        if round_trip.id != run.id {
+            return Err(format!("run id mismatch: {:?} != {:?}", round_trip.id, run.id));
+        }
+        if round_trip.quote_id != run.quote_id {
+            return Err(format!(
+                "run quote_id mismatch: {:?} != {:?}",
+                round_trip.quote_id, run.quote_id
+            ));
+        }
+        if round_trip.status != run.status {
+            return Err(format!(
+                "run status mismatch: {:?} != {:?}",
+                round_trip.status, run.status
+            ));
+        }
+        if round_trip.variant_count != run.variant_count {
+            return Err(format!(
+                "run variant_count mismatch: {:?} != {:?}",
+                round_trip.variant_count, run.variant_count
+            ));
+        }
+
+        Ok(())
     }
 
     #[test]
-    fn scenario_variant_record_round_trip() {
+    fn scenario_variant_record_round_trip() -> TestResult<()> {
         let variant = ScenarioVariant {
             id: ScenarioVariantId("sim-var-1".to_string()),
             scenario_run_id: ScenarioRunId("sim-run-1".to_string()),
@@ -857,14 +878,25 @@ mod tests {
         };
 
         let round_trip = ScenarioVariant::try_from(ScenarioVariantRecord::from(variant.clone()))
-            .expect("decode variant");
-        assert_eq!(round_trip.id, variant.id);
-        assert_eq!(round_trip.scenario_run_id, variant.scenario_run_id);
-        assert!(round_trip.selected_for_promotion);
+            .map_err(|error| format!("decode variant: {error}"))?;
+        if round_trip.id != variant.id {
+            return Err(format!("variant id mismatch: {:?} != {:?}", round_trip.id, variant.id));
+        }
+        if round_trip.scenario_run_id != variant.scenario_run_id {
+            return Err(format!(
+                "variant scenario_run_id mismatch: {:?} != {:?}",
+                round_trip.scenario_run_id, variant.scenario_run_id
+            ));
+        }
+        if !round_trip.selected_for_promotion {
+            return Err("selected_for_promotion should remain true".to_string());
+        }
+
+        Ok(())
     }
 
     #[test]
-    fn scenario_delta_record_round_trip() {
+    fn scenario_delta_record_round_trip() -> TestResult<()> {
         let delta = ScenarioDelta {
             id: ScenarioDeltaId("sim-delta-1".to_string()),
             scenario_variant_id: ScenarioVariantId("sim-var-1".to_string()),
@@ -874,13 +906,23 @@ mod tests {
         };
 
         let round_trip = ScenarioDelta::try_from(ScenarioDeltaRecord::from(delta.clone()))
-            .expect("decode delta");
-        assert_eq!(round_trip.id, delta.id);
-        assert_eq!(round_trip.delta_type, ScenarioDeltaType::Policy);
+            .map_err(|error| format!("decode delta: {error}"))?;
+        if round_trip.id != delta.id {
+            return Err(format!("delta id mismatch: {:?} != {:?}", round_trip.id, delta.id));
+        }
+        if round_trip.delta_type != ScenarioDeltaType::Policy {
+            return Err(format!(
+                "delta type mismatch: {:?} != {:?}",
+                round_trip.delta_type,
+                ScenarioDeltaType::Policy
+            ));
+        }
+
+        Ok(())
     }
 
     #[test]
-    fn scenario_audit_record_round_trip() {
+    fn scenario_audit_record_round_trip() -> TestResult<()> {
         let event = ScenarioAuditEvent {
             id: ScenarioAuditEventId("sim-audit-1".to_string()),
             scenario_run_id: ScenarioRunId("sim-run-1".to_string()),
@@ -895,17 +937,32 @@ mod tests {
 
         let round_trip =
             ScenarioAuditEvent::try_from(ScenarioAuditEventRecord::from(event.clone()))
-                .expect("decode audit");
-        assert_eq!(round_trip.id, event.id);
-        assert_eq!(round_trip.event_type, ScenarioAuditEventType::VariantGenerated);
-        assert_eq!(round_trip.scenario_variant_id, event.scenario_variant_id);
+                .map_err(|error| format!("decode audit: {error}"))?;
+        if round_trip.id != event.id {
+            return Err(format!("audit event id mismatch: {:?} != {:?}", round_trip.id, event.id));
+        }
+        if round_trip.event_type != ScenarioAuditEventType::VariantGenerated {
+            return Err(format!(
+                "audit event type mismatch: {:?} != {:?}",
+                round_trip.event_type,
+                ScenarioAuditEventType::VariantGenerated
+            ));
+        }
+        if round_trip.scenario_variant_id != event.scenario_variant_id {
+            return Err(format!(
+                "audit scenario_variant_id mismatch: {:?} != {:?}",
+                round_trip.scenario_variant_id, event.scenario_variant_id
+            ));
+        }
+
+        Ok(())
     }
 
     #[tokio::test]
-    async fn sql_scenario_repo_round_trip_for_run_lifecycle() {
-        let pool = setup_pool().await;
+    async fn sql_scenario_repo_round_trip_for_run_lifecycle() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-SIM-001".to_string());
-        insert_quote(&pool, &quote_id).await;
+        insert_quote(&pool, &quote_id).await?;
         let repo = SqlScenarioRepository::new(pool.clone());
 
         let run = repo
@@ -919,11 +976,21 @@ mod tests {
                 variant_count: 2,
             })
             .await
-            .expect("create run");
+            .map_err(|error| format!("create run: {error}"))?;
 
-        let fetched = repo.get_run(&run.id).await.expect("get run");
-        assert_eq!(fetched.as_ref().map(|r| r.id.clone()), Some(run.id.clone()));
-        assert_eq!(fetched.as_ref().map(|r| r.status.clone()), Some(ScenarioRunStatus::Pending));
+        let fetched = repo.get_run(&run.id).await.map_err(|error| format!("get run: {error}"))?;
+        let fetched =
+            fetched.ok_or_else(|| "run should be present after create_run".to_string())?;
+        if fetched.id != run.id {
+            return Err(format!("fetched run id mismatch: {:?} != {:?}", fetched.id, run.id));
+        }
+        if fetched.status != ScenarioRunStatus::Pending {
+            return Err(format!(
+                "fetched run status mismatch: {:?} != {:?}",
+                fetched.status,
+                ScenarioRunStatus::Pending
+            ));
+        }
 
         repo.update_run_status(
             &run.id,
@@ -932,24 +999,44 @@ mod tests {
             Some("all variants generated".to_string()),
         )
         .await
-        .expect("update run status");
+        .map_err(|error| format!("update run status: {error}"))?;
 
-        let updated = repo.get_run(&run.id).await.expect("re-fetch run").expect("run exists");
-        assert_eq!(updated.status, ScenarioRunStatus::Success);
-        assert!(updated.completed_at.is_some());
+        let updated =
+            repo.get_run(&run.id).await.map_err(|error| format!("re-fetch run: {error}"))?;
+        let updated =
+            updated.ok_or_else(|| "run should still exist after status update".to_string())?;
+        if updated.status != ScenarioRunStatus::Success {
+            return Err(format!(
+                "run status after update mismatch: {:?} != {:?}",
+                updated.status,
+                ScenarioRunStatus::Success
+            ));
+        }
+        if updated.completed_at.is_none() {
+            return Err("run should have completion timestamp after success".to_string());
+        }
 
-        let listed = repo.list_runs_for_quote(&quote_id, 10).await.expect("list runs");
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, run.id);
+        let listed = repo
+            .list_runs_for_quote(&quote_id, 10)
+            .await
+            .map_err(|error| format!("list runs: {error}"))?;
+        if listed.len() != 1 {
+            return Err(format!("expected 1 run, got {}", listed.len()));
+        }
+        if listed[0].id != run.id {
+            return Err(format!("listed run id mismatch: {:?} != {:?}", listed[0].id, run.id));
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn sql_scenario_repo_round_trip_for_variant_delta_audit_and_promotion() {
-        let pool = setup_pool().await;
+    async fn sql_scenario_repo_round_trip_for_variant_delta_audit_and_promotion() -> TestResult<()>
+    {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-SIM-002".to_string());
-        insert_quote(&pool, &quote_id).await;
+        insert_quote(&pool, &quote_id).await?;
         let repo = SqlScenarioRepository::new(pool.clone());
 
         let run = repo
@@ -963,7 +1050,7 @@ mod tests {
                 variant_count: 2,
             })
             .await
-            .expect("create run");
+            .map_err(|error| format!("create run: {error}"))?;
 
         let baseline = repo
             .add_variant(
@@ -979,7 +1066,7 @@ mod tests {
                 0,
             )
             .await
-            .expect("add baseline variant");
+            .map_err(|error| format!("add baseline variant: {error}"))?;
 
         let discounted = repo
             .add_variant(
@@ -995,7 +1082,7 @@ mod tests {
                 1,
             )
             .await
-            .expect("add discounted variant");
+            .map_err(|error| format!("add discounted variant: {error}"))?;
 
         repo.add_delta(
             &discounted.id,
@@ -1003,7 +1090,7 @@ mod tests {
             "{\"total_delta\":\"-100.00\"}".to_string(),
         )
         .await
-        .expect("add price delta");
+        .map_err(|error| format!("add price delta: {error}"))?;
 
         repo.append_audit_event(
             &run.id,
@@ -1015,48 +1102,88 @@ mod tests {
             "corr-sim-2".to_string(),
         )
         .await
-        .expect("append audit event");
+        .map_err(|error| format!("append audit event: {error}"))?;
 
-        repo.promote_variant(&run.id, &discounted.id).await.expect("promote discounted variant");
+        repo.promote_variant(&run.id, &discounted.id)
+            .await
+            .map_err(|error| format!("promote discounted variant: {error}"))?;
 
-        let variants = repo.list_variants_for_run(&run.id).await.expect("list variants");
-        assert_eq!(variants.len(), 2);
-        assert!(
-            variants
-                .iter()
-                .find(|variant| variant.id == discounted.id)
-                .expect("discounted variant exists")
-                .selected_for_promotion
-        );
-        assert!(
-            !variants
-                .iter()
-                .find(|variant| variant.id == baseline.id)
-                .expect("baseline variant exists")
-                .selected_for_promotion
-        );
+        let variants = repo
+            .list_variants_for_run(&run.id)
+            .await
+            .map_err(|error| format!("list variants: {error}"))?;
+        if variants.len() != 2 {
+            return Err(format!("expected 2 variants, got {}", variants.len()));
+        }
+        let discounted_variant = variants
+            .iter()
+            .find(|variant| variant.id == discounted.id)
+            .ok_or_else(|| "discounted variant exists".to_string())?;
+        if !discounted_variant.selected_for_promotion {
+            return Err("discounted variant should be selected".to_string());
+        }
+        let baseline_variant = variants
+            .iter()
+            .find(|variant| variant.id == baseline.id)
+            .ok_or_else(|| "baseline variant exists".to_string())?;
+        if baseline_variant.selected_for_promotion {
+            return Err("baseline variant should not be selected".to_string());
+        }
 
-        let deltas = repo.list_deltas_for_variant(&discounted.id).await.expect("list deltas");
-        assert_eq!(deltas.len(), 1);
-        assert_eq!(deltas[0].delta_type, ScenarioDeltaType::Price);
+        let deltas = repo
+            .list_deltas_for_variant(&discounted.id)
+            .await
+            .map_err(|error| format!("list deltas: {error}"))?;
+        if deltas.len() != 1 {
+            return Err(format!("expected 1 delta, got {}", deltas.len()));
+        }
+        if deltas[0].delta_type != ScenarioDeltaType::Price {
+            return Err(format!(
+                "delta type mismatch: {:?} != {:?}",
+                deltas[0].delta_type,
+                ScenarioDeltaType::Price
+            ));
+        }
 
-        let audit = repo.list_audit_for_run(&run.id).await.expect("list audit");
-        assert_eq!(audit.len(), 1);
-        assert_eq!(audit[0].event_type, ScenarioAuditEventType::VariantGenerated);
+        let audit = repo
+            .list_audit_for_run(&run.id)
+            .await
+            .map_err(|error| format!("list audit: {error}"))?;
+        if audit.len() != 1 {
+            return Err(format!("expected 1 audit row, got {}", audit.len()));
+        }
+        if audit[0].event_type != ScenarioAuditEventType::VariantGenerated {
+            return Err(format!(
+                "audit event type mismatch: {:?} != {:?}",
+                audit[0].event_type,
+                ScenarioAuditEventType::VariantGenerated
+            ));
+        }
 
         let promoted_run =
-            repo.get_run(&run.id).await.expect("get promoted run").expect("run exists");
-        assert_eq!(promoted_run.status, ScenarioRunStatus::Promoted);
-        assert!(promoted_run.completed_at.is_some());
+            repo.get_run(&run.id).await.map_err(|error| format!("get promoted run: {error}"))?;
+        let promoted_run =
+            promoted_run.ok_or_else(|| "run should exist after promotion".to_string())?;
+        if promoted_run.status != ScenarioRunStatus::Promoted {
+            return Err(format!(
+                "run status mismatch: {:?} != {:?}",
+                promoted_run.status,
+                ScenarioRunStatus::Promoted
+            ));
+        }
+        if promoted_run.completed_at.is_none() {
+            return Err("promoted run should have completion timestamp".to_string());
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn sql_scenario_repo_promote_missing_variant_returns_decode_error() {
-        let pool = setup_pool().await;
+    async fn sql_scenario_repo_promote_missing_variant_returns_decode_error() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-SIM-003".to_string());
-        insert_quote(&pool, &quote_id).await;
+        insert_quote(&pool, &quote_id).await?;
         let repo = SqlScenarioRepository::new(pool.clone());
 
         let run = repo
@@ -1070,26 +1197,31 @@ mod tests {
                 variant_count: 1,
             })
             .await
-            .expect("create run");
+            .map_err(|error| format!("create run: {error}"))?;
 
-        let error = repo
-            .promote_variant(&run.id, &ScenarioVariantId("sim-var-missing".to_string()))
-            .await
-            .expect_err("promote missing variant should fail");
-        assert!(matches!(error, RepositoryError::Decode(message) if message.contains("not found")));
+        let promote_result =
+            repo.promote_variant(&run.id, &ScenarioVariantId("sim-var-missing".to_string())).await;
+        let error = match promote_result {
+            Ok(_) => return Err("promote missing variant should return an error".to_string()),
+            Err(error) => error,
+        };
+        if !matches!(&error, RepositoryError::Decode(message) if message.contains("not found")) {
+            return Err(format!("unexpected promote error: {error}"));
+        }
 
         pool.close().await;
+        Ok(())
     }
 
-    async fn setup_pool() -> DbPool {
+    async fn setup_pool() -> TestResult<DbPool> {
         let pool = connect_with_settings("sqlite::memory:?cache=shared", 1, 30)
             .await
-            .expect("connect test pool");
-        migrations::run_pending(&pool).await.expect("run migrations");
-        pool
+            .map_err(|error| format!("connect test pool: {error}"))?;
+        migrations::run_pending(&pool).await.map_err(|error| format!("run migrations: {error}"))?;
+        Ok(pool)
     }
 
-    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId) {
+    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId) -> TestResult<()> {
         let timestamp = "2026-02-24T01:00:00Z";
         sqlx::query(
             "INSERT INTO quote (id, status, currency, created_by, created_at, updated_at)
@@ -1100,6 +1232,7 @@ mod tests {
         .bind(timestamp)
         .execute(pool)
         .await
-        .expect("insert quote");
+        .map_err(|error| format!("insert quote: {error}"))?;
+        Ok(())
     }
 }
