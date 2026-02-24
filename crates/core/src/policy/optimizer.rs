@@ -1858,6 +1858,229 @@ pub struct RollbackDrillReport {
     pub final_policy_version: i32,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RealizedOutcomeObservation {
+    pub candidate_id: PolicyCandidateId,
+    pub realized_margin_delta_bps: i32,
+    pub realized_win_rate_delta_bps: i32,
+    pub realized_approval_latency_delta_seconds: i32,
+    pub observed_at: DateTime<Utc>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyLifecycleTelemetryThresholds {
+    pub max_rollback_rate_bps: i32,
+    pub max_false_positive_rate_bps: i32,
+    pub max_projected_realized_margin_gap_bps: i32,
+}
+
+impl Default for PolicyLifecycleTelemetryThresholds {
+    fn default() -> Self {
+        Self {
+            max_rollback_rate_bps: 1_500,
+            max_false_positive_rate_bps: 1_000,
+            max_projected_realized_margin_gap_bps: 200,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyLifecycleKpiSnapshot {
+    pub candidate_throughput_count: i32,
+    pub review_decision_count: i32,
+    pub approved_count: i32,
+    pub adoption_rate_bps: i32,
+    pub rollback_rate_bps: i32,
+    pub false_positive_rate_bps: i32,
+    pub avg_approval_latency_seconds: i32,
+    pub projected_outcome_sample_count: i32,
+    pub realized_outcome_sample_count: i32,
+    pub projected_vs_realized_sample_size: i32,
+    pub avg_projected_margin_delta_bps: i32,
+    pub avg_realized_margin_delta_bps: i32,
+    pub avg_projected_vs_realized_margin_gap_bps: i32,
+    pub rollback_spike_alert: bool,
+    pub false_positive_alert: bool,
+    pub margin_gap_alert: bool,
+    pub alert_reasons: Vec<String>,
+}
+
+pub fn compute_policy_lifecycle_kpis(
+    lifecycle_events: &[PolicyLifecycleAuditEvent],
+    replay_reports: &[ReplayImpactReport],
+    realized_outcomes: &[RealizedOutcomeObservation],
+    thresholds: PolicyLifecycleTelemetryThresholds,
+) -> PolicyLifecycleKpiSnapshot {
+    let mut candidate_throughput_count = 0_i64;
+    let mut review_decision_count = 0_i64;
+    let mut approved_count = 0_i64;
+
+    let mut review_started_by_candidate: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
+    let mut first_decision_by_candidate: BTreeMap<String, DateTime<Utc>> = BTreeMap::new();
+    let mut applied_candidates = BTreeSet::new();
+    let mut rolled_back_candidates = BTreeSet::new();
+
+    for event in lifecycle_events {
+        let candidate_key = event.candidate_id.0.trim().to_string();
+        match event.event_type {
+            PolicyLifecycleAuditEventType::CandidateCreated => {
+                candidate_throughput_count += 1;
+            }
+            PolicyLifecycleAuditEventType::ReviewPacketBuilt => {
+                review_started_by_candidate
+                    .entry(candidate_key)
+                    .and_modify(|current| {
+                        if event.occurred_at < *current {
+                            *current = event.occurred_at;
+                        }
+                    })
+                    .or_insert(event.occurred_at);
+            }
+            PolicyLifecycleAuditEventType::Approved
+            | PolicyLifecycleAuditEventType::Rejected
+            | PolicyLifecycleAuditEventType::ChangesRequested => {
+                review_decision_count += 1;
+                if matches!(event.event_type, PolicyLifecycleAuditEventType::Approved) {
+                    approved_count += 1;
+                }
+                first_decision_by_candidate
+                    .entry(candidate_key)
+                    .and_modify(|current| {
+                        if event.occurred_at < *current {
+                            *current = event.occurred_at;
+                        }
+                    })
+                    .or_insert(event.occurred_at);
+            }
+            PolicyLifecycleAuditEventType::Applied => {
+                applied_candidates.insert(candidate_key);
+            }
+            PolicyLifecycleAuditEventType::RolledBack => {
+                rolled_back_candidates.insert(candidate_key);
+            }
+            _ => {}
+        }
+    }
+
+    let mut approval_latency_sum = 0_i64;
+    let mut approval_latency_count = 0_i64;
+    for (candidate_key, review_started_at) in &review_started_by_candidate {
+        if let Some(decision_at) = first_decision_by_candidate.get(candidate_key) {
+            let latency_seconds = (*decision_at - *review_started_at).num_seconds().max(0);
+            approval_latency_sum += latency_seconds;
+            approval_latency_count += 1;
+        }
+    }
+    let avg_approval_latency_seconds =
+        round_divide_i64(approval_latency_sum, approval_latency_count);
+
+    let mut projected_margin_by_candidate = BTreeMap::new();
+    for report in replay_reports {
+        projected_margin_by_candidate
+            .insert(report.candidate_id.0.trim().to_string(), report.projected_margin_delta_bps);
+    }
+    let projected_outcome_sample_count =
+        saturating_i64_to_i32(projected_margin_by_candidate.len() as i64);
+    let projected_margin_sum = projected_margin_by_candidate
+        .values()
+        .fold(0_i64, |accumulator, value| accumulator + i64::from(*value));
+    let avg_projected_margin_delta_bps =
+        round_divide_i64(projected_margin_sum, i64::from(projected_outcome_sample_count));
+
+    let mut realized_margin_by_candidate: BTreeMap<String, (DateTime<Utc>, i32)> = BTreeMap::new();
+    for outcome in realized_outcomes {
+        let candidate_key = outcome.candidate_id.0.trim().to_string();
+        realized_margin_by_candidate
+            .entry(candidate_key)
+            .and_modify(|current| {
+                if outcome.observed_at > current.0 {
+                    *current = (outcome.observed_at, outcome.realized_margin_delta_bps);
+                }
+            })
+            .or_insert((outcome.observed_at, outcome.realized_margin_delta_bps));
+    }
+    let realized_outcome_sample_count =
+        saturating_i64_to_i32(realized_margin_by_candidate.len() as i64);
+    let realized_margin_sum = realized_margin_by_candidate
+        .values()
+        .fold(0_i64, |accumulator, (_, value)| accumulator + i64::from(*value));
+    let avg_realized_margin_delta_bps =
+        round_divide_i64(realized_margin_sum, i64::from(realized_outcome_sample_count));
+
+    let mut projected_realized_gap_sum = 0_i64;
+    let mut projected_realized_gap_count = 0_i64;
+    for (candidate_key, projected_margin_delta_bps) in &projected_margin_by_candidate {
+        if let Some((_, realized_margin_delta_bps)) =
+            realized_margin_by_candidate.get(candidate_key)
+        {
+            projected_realized_gap_sum +=
+                i64::from(*projected_margin_delta_bps) - i64::from(*realized_margin_delta_bps);
+            projected_realized_gap_count += 1;
+        }
+    }
+    let avg_projected_vs_realized_margin_gap_bps =
+        round_divide_i64(projected_realized_gap_sum, projected_realized_gap_count);
+    let projected_vs_realized_sample_size = saturating_i64_to_i32(projected_realized_gap_count);
+
+    let adoption_rate_bps = ratio_to_basis_points(approved_count, review_decision_count);
+    let rollback_rate_bps =
+        ratio_to_basis_points(rolled_back_candidates.len() as i64, applied_candidates.len() as i64);
+    let false_positive_count = applied_candidates
+        .iter()
+        .filter(|candidate_key| rolled_back_candidates.contains(*candidate_key))
+        .count() as i64;
+    let false_positive_rate_bps =
+        ratio_to_basis_points(false_positive_count, applied_candidates.len() as i64);
+
+    let rollback_spike_alert = rollback_rate_bps > thresholds.max_rollback_rate_bps;
+    let false_positive_alert = false_positive_rate_bps > thresholds.max_false_positive_rate_bps;
+    let margin_gap_alert = projected_realized_gap_count > 0
+        && i64::from(avg_projected_vs_realized_margin_gap_bps).abs()
+            > i64::from(thresholds.max_projected_realized_margin_gap_bps);
+
+    let mut alert_reasons = Vec::new();
+    if rollback_spike_alert {
+        alert_reasons.push(format!(
+            "rollback_rate_bps {} exceeds threshold {}",
+            rollback_rate_bps, thresholds.max_rollback_rate_bps
+        ));
+    }
+    if false_positive_alert {
+        alert_reasons.push(format!(
+            "false_positive_rate_bps {} exceeds threshold {}",
+            false_positive_rate_bps, thresholds.max_false_positive_rate_bps
+        ));
+    }
+    if margin_gap_alert {
+        alert_reasons.push(format!(
+            "projected_vs_realized_margin_gap_bps {} exceeds threshold {}",
+            avg_projected_vs_realized_margin_gap_bps,
+            thresholds.max_projected_realized_margin_gap_bps
+        ));
+    }
+    alert_reasons.sort();
+
+    PolicyLifecycleKpiSnapshot {
+        candidate_throughput_count: saturating_i64_to_i32(candidate_throughput_count),
+        review_decision_count: saturating_i64_to_i32(review_decision_count),
+        approved_count: saturating_i64_to_i32(approved_count),
+        adoption_rate_bps,
+        rollback_rate_bps,
+        false_positive_rate_bps,
+        avg_approval_latency_seconds,
+        projected_outcome_sample_count,
+        realized_outcome_sample_count,
+        projected_vs_realized_sample_size,
+        avg_projected_margin_delta_bps,
+        avg_realized_margin_delta_bps,
+        avg_projected_vs_realized_margin_gap_bps,
+        rollback_spike_alert,
+        false_positive_alert,
+        margin_gap_alert,
+        alert_reasons,
+    }
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum PolicyLifecycleError {
     #[error("invalid approval packet: {0}")]
@@ -2423,18 +2646,23 @@ fn sign_lifecycle_payload(signature_key_id: &str, signing_secret: &str, payload:
 #[cfg(test)]
 mod tests {
     use super::{
-        sign_lifecycle_payload, ApprovalPacket, ApprovalPacketActionError,
-        ApprovalPacketActionPayload, ApprovalPacketDecision, ApprovalPacketValidationError,
-        CandidateCohortScope, CandidateConfidenceBounds, CandidateDiffValidationError,
-        CandidateGenerationError, CandidateGenerationRequest, CandidateProvenance,
-        CandidateRuleOperation, CandidateRuleSignal, InMemoryPolicyLifecycleEngine,
-        PolicyApplyRequest, PolicyCandidateDiffV1, PolicyCandidateGenerator, PolicyCandidateStatus,
-        PolicyLifecycleError, PolicyReplayEngine, PolicyRollbackRequest, RedTeamSafetyEvaluation,
-        ReplayGuardrailBlock, ReplayGuardrailCode, ReplayGuardrailEvaluation,
-        ReplayGuardrailThresholds, ReplayImpactError, ReplayImpactReport, ReplayImpactRequest,
-        ReplayQuoteSnapshot, RED_TEAM_EVALUATION_SCHEMA_VERSION,
+        compute_policy_lifecycle_kpis, sign_lifecycle_payload, ApprovalPacket,
+        ApprovalPacketActionError, ApprovalPacketActionPayload, ApprovalPacketDecision,
+        ApprovalPacketValidationError, CandidateCohortScope, CandidateConfidenceBounds,
+        CandidateDiffValidationError, CandidateGenerationError, CandidateGenerationRequest,
+        CandidateProvenance, CandidateRuleOperation, CandidateRuleSignal,
+        InMemoryPolicyLifecycleEngine, PolicyApplyRequest, PolicyCandidateDiffV1,
+        PolicyCandidateGenerator, PolicyCandidateStatus, PolicyLifecycleError,
+        PolicyLifecycleTelemetryThresholds, PolicyReplayEngine, PolicyRollbackRequest,
+        RealizedOutcomeObservation, RedTeamSafetyEvaluation, ReplayGuardrailBlock,
+        ReplayGuardrailCode, ReplayGuardrailEvaluation, ReplayGuardrailThresholds,
+        ReplayImpactError, ReplayImpactReport, ReplayImpactRequest, ReplayQuoteSnapshot,
+        RED_TEAM_EVALUATION_SCHEMA_VERSION,
     };
-    use crate::domain::optimizer::{PolicyCandidateId, PolicyLifecycleAuditEventType};
+    use crate::domain::optimizer::{
+        PolicyCandidateId, PolicyLifecycleAuditEvent, PolicyLifecycleAuditEventType,
+        PolicyLifecycleAuditId,
+    };
     use chrono::Utc;
 
     #[test]
@@ -3118,6 +3346,129 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_kpis_compute_deterministic_rates_latency_and_alerts() {
+        let base = Utc::now();
+        let events = vec![
+            lifecycle_event_fixture(
+                "cand-a",
+                PolicyLifecycleAuditEventType::CandidateCreated,
+                base,
+            ),
+            lifecycle_event_fixture(
+                "cand-b",
+                PolicyLifecycleAuditEventType::CandidateCreated,
+                base + chrono::Duration::seconds(10),
+            ),
+            lifecycle_event_fixture(
+                "cand-c",
+                PolicyLifecycleAuditEventType::CandidateCreated,
+                base + chrono::Duration::seconds(20),
+            ),
+            lifecycle_event_fixture(
+                "cand-a",
+                PolicyLifecycleAuditEventType::ReviewPacketBuilt,
+                base + chrono::Duration::seconds(100),
+            ),
+            lifecycle_event_fixture(
+                "cand-b",
+                PolicyLifecycleAuditEventType::ReviewPacketBuilt,
+                base + chrono::Duration::seconds(200),
+            ),
+            lifecycle_event_fixture(
+                "cand-a",
+                PolicyLifecycleAuditEventType::Approved,
+                base + chrono::Duration::seconds(500),
+            ),
+            lifecycle_event_fixture(
+                "cand-b",
+                PolicyLifecycleAuditEventType::Rejected,
+                base + chrono::Duration::seconds(800),
+            ),
+            lifecycle_event_fixture(
+                "cand-a",
+                PolicyLifecycleAuditEventType::Applied,
+                base + chrono::Duration::seconds(550),
+            ),
+            lifecycle_event_fixture(
+                "cand-a",
+                PolicyLifecycleAuditEventType::RolledBack,
+                base + chrono::Duration::seconds(900),
+            ),
+        ];
+
+        let mut replay_a = replay_report_fixture();
+        replay_a.candidate_id = PolicyCandidateId("cand-a".to_string());
+        replay_a.projected_margin_delta_bps = 100;
+        replay_a.input_checksum = "sha256:proj-cand-a".to_string();
+        let mut replay_b = replay_report_fixture();
+        replay_b.candidate_id = PolicyCandidateId("cand-b".to_string());
+        replay_b.projected_margin_delta_bps = -20;
+        replay_b.input_checksum = "sha256:proj-cand-b".to_string();
+        let replay_reports = vec![replay_a.clone(), replay_b.clone()];
+
+        let realized_outcomes = vec![
+            RealizedOutcomeObservation {
+                candidate_id: PolicyCandidateId("cand-a".to_string()),
+                realized_margin_delta_bps: -200,
+                realized_win_rate_delta_bps: -30,
+                realized_approval_latency_delta_seconds: 600,
+                observed_at: base + chrono::Duration::seconds(2_000),
+            },
+            RealizedOutcomeObservation {
+                candidate_id: PolicyCandidateId("cand-b".to_string()),
+                realized_margin_delta_bps: -30,
+                realized_win_rate_delta_bps: -10,
+                realized_approval_latency_delta_seconds: 800,
+                observed_at: base + chrono::Duration::seconds(2_500),
+            },
+        ];
+
+        let thresholds = PolicyLifecycleTelemetryThresholds {
+            max_rollback_rate_bps: 5_000,
+            max_false_positive_rate_bps: 5_000,
+            max_projected_realized_margin_gap_bps: 100,
+        };
+        let first = compute_policy_lifecycle_kpis(
+            &events,
+            &replay_reports,
+            &realized_outcomes,
+            thresholds.clone(),
+        );
+
+        let mut reversed_events = events.clone();
+        reversed_events.reverse();
+        let mut reversed_replay = replay_reports.clone();
+        reversed_replay.reverse();
+        let mut reversed_realized = realized_outcomes.clone();
+        reversed_realized.reverse();
+        let second = compute_policy_lifecycle_kpis(
+            &reversed_events,
+            &reversed_replay,
+            &reversed_realized,
+            thresholds,
+        );
+        assert_eq!(first, second);
+
+        assert_eq!(first.candidate_throughput_count, 3);
+        assert_eq!(first.review_decision_count, 2);
+        assert_eq!(first.approved_count, 1);
+        assert_eq!(first.adoption_rate_bps, 5_000);
+        assert_eq!(first.rollback_rate_bps, 10_000);
+        assert_eq!(first.false_positive_rate_bps, 10_000);
+        assert_eq!(first.avg_approval_latency_seconds, 500);
+        assert_eq!(first.projected_outcome_sample_count, 2);
+        assert_eq!(first.realized_outcome_sample_count, 2);
+        assert_eq!(first.projected_vs_realized_sample_size, 2);
+        assert_eq!(first.avg_projected_margin_delta_bps, 40);
+        assert_eq!(first.avg_realized_margin_delta_bps, -115);
+        assert_eq!(first.avg_projected_vs_realized_margin_gap_bps, 155);
+        assert!(first.rollback_spike_alert);
+        assert!(first.false_positive_alert);
+        assert!(first.margin_gap_alert);
+        assert_eq!(first.alert_reasons.len(), 3);
+    }
+
+    #[test]
     fn lifecycle_apply_idempotency_conflict_is_blocked() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(41);
         let packet = approval_packet_fixture();
@@ -3651,5 +4002,32 @@ mod tests {
             "Fallback to version 41, pause apply jobs, and notify #deal-desk.",
         )
         .expect("packet fixture should build")
+    }
+
+    fn lifecycle_event_fixture(
+        candidate_id: &str,
+        event_type: PolicyLifecycleAuditEventType,
+        occurred_at: chrono::DateTime<Utc>,
+    ) -> PolicyLifecycleAuditEvent {
+        PolicyLifecycleAuditEvent {
+            id: PolicyLifecycleAuditId(format!(
+                "audit:{}:{}:{}",
+                candidate_id,
+                event_type.as_str(),
+                occurred_at.timestamp_millis()
+            )),
+            candidate_id: PolicyCandidateId(candidate_id.to_string()),
+            replay_evaluation_id: None,
+            approval_decision_id: None,
+            apply_record_id: None,
+            rollback_record_id: None,
+            event_type,
+            event_payload_json: "{}".to_string(),
+            actor_type: "system".to_string(),
+            actor_id: "tester".to_string(),
+            correlation_id: format!("corr:{candidate_id}"),
+            idempotency_key: None,
+            occurred_at,
+        }
     }
 }
