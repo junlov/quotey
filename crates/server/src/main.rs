@@ -2,7 +2,7 @@ mod bootstrap;
 mod health;
 
 use anyhow::Result;
-use quotey_core::config::{AppConfig, ConfigOverrides, LoadOptions};
+use quotey_core::config::{AppConfig, LoadOptions};
 
 fn init_logging(config: &AppConfig) {
     use quotey_core::config::LogFormat::*;
@@ -29,17 +29,8 @@ async fn main() -> Result<()> {
 }
 
 pub async fn run() -> Result<()> {
-    // Load config once with all needed overrides
-    let load_options = LoadOptions {
-        overrides: ConfigOverrides {
-            database_url: Some("sqlite://quotey.db".to_string()),
-            ..ConfigOverrides::default()
-        },
-        ..LoadOptions::default()
-    };
-
     // Load config and initialize logging before any other operations
-    let config = AppConfig::load(load_options)?;
+    let config = AppConfig::load(LoadOptions::default())?;
     init_logging(&config);
 
     // Now bootstrap using the same config we already loaded
