@@ -140,7 +140,7 @@ pub fn run() -> String {
         &config.logging.level,
         field_source(
             "logging.level",
-            Some("QUOTEY_LOG_LEVEL"),
+            Some("QUOTEY_LOGGING_LEVEL"),
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),
@@ -150,7 +150,7 @@ pub fn run() -> String {
         &format!("{:?}", config.logging.format),
         field_source(
             "logging.format",
-            Some("QUOTEY_LOG_FORMAT"),
+            Some("QUOTEY_LOGGING_FORMAT"),
             config_file_doc.as_ref(),
             config_file_path.as_deref(),
         ),

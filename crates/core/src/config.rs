@@ -295,10 +295,13 @@ impl AppConfig {
                 parse_u64("QUOTEY_SERVER_GRACEFUL_SHUTDOWN_SECS", &value)?;
         }
 
-        if let Some(value) = read_env("QUOTEY_LOGGING_LEVEL") {
+        let log_level = read_env("QUOTEY_LOGGING_LEVEL").or_else(|| read_env("QUOTEY_LOG_LEVEL"));
+        if let Some(value) = log_level {
             self.logging.level = value;
         }
-        if let Some(value) = read_env("QUOTEY_LOGGING_FORMAT") {
+        let log_format =
+            read_env("QUOTEY_LOGGING_FORMAT").or_else(|| read_env("QUOTEY_LOG_FORMAT"));
+        if let Some(value) = log_format {
             self.logging.format = value.parse()?;
         }
 
@@ -599,6 +602,26 @@ bot_token = "${TEST_SLACK_BOT_TOKEN}"
 
         env::remove_var("TEST_SLACK_APP_TOKEN");
         env::remove_var("TEST_SLACK_BOT_TOKEN");
+    }
+
+    #[test]
+    fn logging_env_aliases_are_supported() {
+        let _guard = env_lock().lock().expect("env lock");
+
+        env::set_var("QUOTEY_SLACK_APP_TOKEN", "xapp-test");
+        env::set_var("QUOTEY_SLACK_BOT_TOKEN", "xoxb-test");
+        env::set_var("QUOTEY_LOG_LEVEL", "warn");
+        env::set_var("QUOTEY_LOG_FORMAT", "pretty");
+
+        let config = AppConfig::load(LoadOptions::default()).expect("config should load");
+
+        assert_eq!(config.logging.level, "warn");
+        assert!(matches!(config.logging.format, LogFormat::Pretty));
+
+        env::remove_var("QUOTEY_SLACK_APP_TOKEN");
+        env::remove_var("QUOTEY_SLACK_BOT_TOKEN");
+        env::remove_var("QUOTEY_LOG_LEVEL");
+        env::remove_var("QUOTEY_LOG_FORMAT");
     }
 
     #[test]
