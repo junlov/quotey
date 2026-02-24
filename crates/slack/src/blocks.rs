@@ -173,21 +173,69 @@ impl ContextBuilder {
 }
 
 pub fn quote_status_message(quote_id: &str, status: &str) -> MessageTemplate {
+    let status_tokens = status.to_ascii_lowercase();
+    let (status_icon, status_style, status_hint) = if status_tokens.contains("error")
+        || status_tokens.contains("failed")
+        || status_tokens.contains("rejected")
+        || status_tokens.contains("denied")
+    {
+        (
+            "🚨",
+            "requires your attention",
+            "Capture the details from this snapshot, then review the specific action path (approve/reject/discuss) before reattempting.",
+        )
+    } else if status_tokens.contains("approved")
+        || status_tokens.contains("complete")
+        || status_tokens.contains("finalized")
+        || status_tokens.contains("sent")
+    {
+        (
+            "✅",
+            "ready",
+            "Use `/quote send` or `/quote clone` from this thread context once stakeholders confirm.",
+        )
+    } else if status_tokens.contains("waiting")
+        || status_tokens.contains("pending")
+        || status_tokens.contains("requested")
+        || status_tokens.contains("processing")
+    {
+        (
+            "🕒",
+            "in progress",
+            "The workflow is moving through the next deterministic state. Refresh this card to see the latest state.",
+        )
+    } else {
+        (
+            "📄",
+            "active",
+            "You can still query the full thread history with `/quote status` if you'd like a replay trace.",
+        )
+    };
+
     MessageBuilder::new(format!("Quote {quote_id} status: {status}"))
         .section("quote.status.header.v1", |section| {
-            section.mrkdwn(format!("*Quote:* `{quote_id}`"));
+            section
+                .mrkdwn(format!("{status_icon} *Quote snapshot:* `{quote_id}` · {status_style}"));
         })
         .section("quote.status.state.v1", |section| {
-            section.plain(format!("Current status: {status}"));
+            section.mrkdwn(format!(
+                "*Current status:* {status}\n\
+*Decision mode:* {status_style}\n\
+*Next step:* {status_hint}"
+            ));
+        })
+        .context("quote.status.context.v1", |context| {
+            context.plain("Need guidance? run `/quote help` in this thread.");
+            context.plain("All quote state transitions are deterministic and auditable.");
         })
         .actions("quote.status.actions.v1", |actions| {
             actions
                 .button(
-                    ButtonElement::new("quote.refresh.v1", "Refresh")
+                    ButtonElement::new("quote.refresh.v1", "Refresh status")
                         .style(ButtonStyle::Primary)
                         .value(quote_id),
                 )
-                .button(ButtonElement::new("quote.help.v1", "Help").value("help"));
+                .button(ButtonElement::new("quote.help.v1", "Command help").value("help"));
         })
         .build()
 }
@@ -573,22 +621,209 @@ pub fn policy_approval_packet_message(packet: &PolicyApprovalPacketView) -> Mess
 }
 
 pub fn error_message(summary: &str, correlation_id: &str) -> MessageTemplate {
-    MessageBuilder::new(summary.to_owned())
+    let builder = MessageBuilder::new(summary.to_owned())
         .section("quote.error.summary.v1", |section| {
             section.mrkdwn(format!(":warning: {summary}"));
         })
+        .section("quote.error.recovery.v1", |section| {
+            section.mrkdwn(
+                "*Fast recovery*\n\
+1. Re-run the same action with explicit args (for example `/quote status Q-2026-0001`).\n\
+2. If this was in a thread, use explicit slash commands in that thread.\n\
+3. If you want the full command index, tap **Show supported commands**."
+            );
+        })
         .context("quote.error.context.v1", |context| {
             context.plain(format!("Correlation ID: {correlation_id}"));
+            context.plain(
+                "If this issue repeats, share this correlation ID with support and include the exact `/quote` command text.",
+            );
+        });
+
+    builder
+        .actions("quote.error.actions.v1", |actions| {
+            actions.button(
+                ButtonElement::new("quote.help.v1", "Show supported commands")
+                    .style(ButtonStyle::Primary)
+                    .value("help"),
+            );
+        })
+        .build()
+}
+
+pub fn preview_mode_message(
+    operation: &str,
+    quote_id: Option<&str>,
+    detail: &str,
+    request_id: &str,
+) -> MessageTemplate {
+    let quote_label = quote_id.unwrap_or("this request");
+    MessageBuilder::new(format!("Preview mode active: {operation}"))
+        .section("quote.preview.header.v1", |section| {
+            section.mrkdwn(
+                ":warning: *Preview mode active* — deterministic UI intent is captured, but no live quote state changes are persisted yet.",
+            );
+        })
+        .section("quote.preview.detail.v1", |section| {
+            section.mrkdwn(format!(
+                "*Operation:* `{operation}`\n*Target:* `{quote_label}`\n*Interpretation:* {detail}"
+            ));
+        })
+        .section("quote.preview.enablement.v1", |section| {
+            section.mrkdwn(
+                "When Slack socket transport and runtime services are connected, this same action will execute deterministically with audit logs and policy routing."
+            );
+        })
+        .context("quote.preview.context.v1", |context| {
+            context.plain(format!("Request ID: {request_id}"));
+            context.plain("Tip: run `/quote help` for deterministic command examples.");
+        })
+        .actions("quote.preview.actions.v1", |actions| {
+            actions.button(
+                ButtonElement::new("quote.help.v1", "Open command guide")
+                    .style(ButtonStyle::Primary)
+                    .value("help"),
+            );
+        })
+        .build()
+}
+
+pub fn command_shortcut_message(command: &str, use_case: &str, example: &str) -> MessageTemplate {
+    MessageBuilder::new(format!("Recommended next step: Run command: {command}"))
+        .section("quote.command_shortcut.header.v1", |section| {
+            section.mrkdwn(format!(
+                "🎯 *Recommended next step:* {use_case}\n\
+`{command}`"
+            ));
+        })
+        .section("quote.command_shortcut.example.v1", |section| {
+            section.mrkdwn(format!("Recommended form:\n`{example}`"));
+        })
+        .context("quote.command_shortcut.context.v1", |context| {
+            context.plain("For best results, use explicit `/quote` commands in the thread.");
+        })
+        .actions("quote.command_shortcut.actions.v1", |actions| {
+            actions.button(
+                ButtonElement::new("quote.help.v1", "Open command guide")
+                    .style(ButtonStyle::Primary)
+                    .value("help"),
+            );
         })
         .build()
 }
 
 pub fn help_message() -> MessageTemplate {
-    MessageBuilder::new("Quote command help")
-        .section("quote.help.summary.v1", |section| {
+    MessageBuilder::new("Quotey command guide")
+        .section("quote.help.hero.v1", |section| {
             section.mrkdwn(
-                "*Available commands*\n• `/quote new`\n• `/quote status <quote_id>`\n• `/quote list`\n• `/quote help`",
+                ":sparkles: *Quotey Quote Command Center*\nFast, deterministic, and fully auditable quote operations from Slack.",
             );
+        })
+        .section("quote.help.quickstart.v1", |section| {
+            section.mrkdwn(
+                "*Recommended start (in-thread or slash)*\n\
+1. `/quote new for <customer>` → initialize a quote thread.\n\
+2. `/quote status <quote_id>` → inspect state, checkpoints, and constraints.\n\
+3. `/quote audit <quote_id>` → review pricing rationale and policy posture.\n\
+4. `/quote send <quote_id>` → execute approval + delivery orchestration."
+            );
+        })
+        .section("quote.help.command-reference.v1", |section| {
+            section.mrkdwn(
+                "*Core command matrix*\n\
+• `/quote help` · open this command card\n\
+• `/quote list [mine|open|all]` · locate candidate quotes\n\
+• `/quote new [for <customer>]` · create a new quote draft\n\
+• `/quote edit <quote_id> ...` · mutate quote configuration intent\n\
+• `/quote add-line <quote_id> <sku>:<delta>` · apply deterministic line adjustments\n\
+• `/quote discount <quote_id> ...` → request discount exceptions with reasoning\n\
+• `/quote clone <quote_id>` · duplicate a quote version\n\
+• `/quote simulate <quote_id> ...` → run controlled what-if scenarios"
+            );
+        })
+        .actions("quote.help.quickstart-actions.v1", |actions| {
+            actions
+                .button(
+                    ButtonElement::new("quote.help.command.new.v1", "Start new quote")
+                        .style(ButtonStyle::Primary)
+                        .value("new"),
+                )
+                .button(
+                    ButtonElement::new("quote.help.command.status.v1", "Check status")
+                        .value("status"),
+                )
+                .button(
+                    ButtonElement::new("quote.help.command.list.v1", "List quotes")
+                        .value("list"),
+                )
+                .button(
+                    ButtonElement::new("quote.help.command.audit.v1", "Audit quote")
+                        .value("audit"),
+                )
+                .button(
+                    ButtonElement::new("quote.help.command.simulate.v1", "Run simulation")
+                        .value("simulate"),
+                );
+        })
+        .actions("quote.help.quick-actions.v2", |actions| {
+            actions
+                .button(
+                    ButtonElement::new("quote.help.command.discount.v1", "Request discount")
+                        .style(ButtonStyle::Danger)
+                        .value("discount"),
+                )
+                .button(
+                    ButtonElement::new("quote.help.command.send.v1", "Send quote")
+                        .style(ButtonStyle::Primary)
+                        .value("send"),
+                )
+                .button(
+                    ButtonElement::new("quote.help.command.clone.v1", "Clone draft")
+                        .value("clone"),
+                )
+                .button(
+                    ButtonElement::new("quote.help.command.edit.v1", "Edit quote")
+                        .value("edit"),
+                )
+                .button(
+                    ButtonElement::new("quote.help.command.add-line.v1", "Add/remove line")
+                        .value("add-line"),
+                );
+        })
+        .section("quote.help.thread-intelligence.v1", |section| {
+            section.mrkdwn(
+                "*Thread mode (natural language)*\n\
+Use these in active quote threads for fast intent capture:\n\
+• \"check status for Q-2026-0001\"\n\
+• \"simulate addon:+1 for Q-2026-0001\"\n• \"I need a new quote for Acme\""
+            );
+        })
+        .section("quote.help.interaction-hints.v1", |section| {
+            section.mrkdwn(
+                "*Interaction tips for deterministic accuracy*\n\
+• Use explicit quote IDs: `Q-YYYY-NNNN`\n\
+• Use command args for numeric controls: `discount=12.5`, `margin=40`\n\
+• Keep line deltas strict: `addon:+1`, `support:-2`\n\
+• Emoji approvals in thread: `👍`/`💬` approve or discuss, `👎` reject."
+            );
+        })
+        .section("quote.help.reliability.v1", |section| {
+            section.mrkdwn(
+                "*Reliability guarantees*\n\
+• Deterministic state transitions per quote.\n\
+• Replayable audit trail for every action.\n\
+• Thread-specific context (`quote_id` + `request_id`) is included in operational messages."
+            );
+        })
+        .section("quote.help.experiment-tips.v1", |section| {
+            section.mrkdwn(
+                "*Troubleshooting shortcut*\n\
+If behavior seems ambiguous, switch to explicit command mode and rerun:\n\
+`/quote status <quote_id>` or `/quote help`."
+            );
+        })
+        .context("quote.help.context.v1", |context| {
+            context.plain("Tip: explicit inputs dramatically reduce parsing variance for first-pass command quality.");
         })
         .build()
 }
@@ -969,9 +1204,9 @@ fn sanitize_simulation_slug(value: &str) -> String {
 mod tests {
     use super::{
         approval_request_message, error_message, execution_task_progress_message,
-        policy_approval_packet_action_value, policy_approval_packet_message, quote_status_message,
-        simulation_comparison_message, simulation_promotion_action_value, Block, ButtonStyle,
-        DealDnaCard, DealDnaSimilarDeal, ExecutionTaskStatus, MessageBuilder,
+        policy_approval_packet_action_value, policy_approval_packet_message, preview_mode_message,
+        quote_status_message, simulation_comparison_message, simulation_promotion_action_value,
+        Block, ButtonStyle, DealDnaCard, DealDnaSimilarDeal, ExecutionTaskStatus, MessageBuilder,
         PolicyApprovalDecisionKind, PolicyApprovalPacketView, SimulationComparisonView,
         SimulationVariantView, TextObject,
     };
@@ -1027,11 +1262,13 @@ mod tests {
     #[test]
     fn error_template_contains_correlation_id() {
         let message = error_message("Cannot process request", "req-123");
-        let elements = if let Block::Context { elements, .. } = &message.blocks[1] {
-            Some(elements)
-        } else {
-            None
-        };
+        let elements = message.blocks.iter().find_map(|block| {
+            if let Block::Context { elements, .. } = block {
+                Some(elements)
+            } else {
+                None
+            }
+        });
         assert!(elements.is_some(), "expected context block");
         let elements = elements.expect("context block asserted above");
         assert!(matches!(
@@ -1041,19 +1278,45 @@ mod tests {
     }
 
     #[test]
+    fn preview_mode_message_flags_execution_is_not_live() {
+        let message = preview_mode_message(
+            "/quote status",
+            Some("Q-2026-5555"),
+            "status lookup request captured",
+            "req-preview-1",
+        );
+
+        assert!(message.fallback_text.contains("Preview mode active"));
+        assert!(message.blocks.iter().any(|block| matches!(
+            block,
+            Block::Section { block_id, .. } if block_id == "quote.preview.header.v1"
+        )));
+        assert!(message.blocks.iter().any(|block| matches!(
+            block,
+            Block::Context { block_id, .. } if block_id == "quote.preview.context.v1"
+        )));
+    }
+
+    #[test]
     fn quote_status_template_includes_refresh_action() {
         let message = quote_status_message("Q-2026-0042", "draft");
-        let elements = if let Block::Actions { elements, .. } = &message.blocks[2] {
-            Some(elements)
-        } else {
-            None
-        };
+        let elements = message.blocks.iter().find_map(|block| {
+            if let Block::Actions { elements, .. } = block {
+                Some(elements)
+            } else {
+                None
+            }
+        });
         assert!(elements.is_some(), "expected actions block");
         let elements = elements.expect("actions block asserted above");
 
         assert!(matches!(
             elements.first(),
             Some(element) if element.action_id == "quote.refresh.v1"
+        ));
+        assert!(matches!(
+            elements.first(),
+            Some(element) if matches!(element.text, TextObject::Plain { ref text } if text == "Refresh status")
         ));
     }
 

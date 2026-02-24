@@ -6,8 +6,9 @@ use thiserror::Error;
 use crate::{
     blocks::MessageTemplate,
     commands::{
-        normalize_quote_command, CommandParseError, CommandRouteError, CommandRouter,
-        NoopQuoteCommandService, QuoteCommandService, SlashCommandPayload,
+        action_quote_id, infer_thread_quote_command, normalize_quote_command, CommandParseError,
+        CommandRouteError, CommandRouter, NoopQuoteCommandService, QuoteCommandService,
+        SlashCommandPayload,
     },
 };
 
@@ -22,6 +23,7 @@ pub enum SlackEvent {
     SlashCommand(SlashCommandPayload),
     ThreadMessage(ThreadMessageEvent),
     ReactionAdded(ReactionAddedEvent),
+    BlockAction(BlockActionEvent),
     Unsupported { event_type: String },
 }
 
@@ -31,6 +33,7 @@ impl SlackEvent {
             Self::SlashCommand(_) => SlackEventType::SlashCommand,
             Self::ThreadMessage(_) => SlackEventType::ThreadMessage,
             Self::ReactionAdded(_) => SlackEventType::ReactionAdded,
+            Self::BlockAction(_) => SlackEventType::BlockAction,
             Self::Unsupported { .. } => SlackEventType::Unsupported,
         }
     }
@@ -41,6 +44,7 @@ pub enum SlackEventType {
     SlashCommand,
     ThreadMessage,
     ReactionAdded,
+    BlockAction,
     Unsupported,
 }
 
@@ -61,6 +65,18 @@ pub struct ReactionAddedEvent {
     pub reaction: String,
     pub quote_id: Option<String>,
     pub approval_type: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct BlockActionEvent {
+    pub channel_id: String,
+    pub message_ts: String,
+    pub thread_ts: Option<String>,
+    pub user_id: String,
+    pub action_id: String,
+    pub value: Option<String>,
+    pub quote_id: Option<String>,
+    pub request_id: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -146,8 +162,9 @@ impl EventDispatcher {
 pub fn default_dispatcher() -> EventDispatcher {
     let mut dispatcher = EventDispatcher::new();
     dispatcher.register(SlashCommandHandler::new(NoopQuoteCommandService));
-    dispatcher.register(ThreadMessageHandler::new(NoopThreadMessageService));
+    dispatcher.register(ThreadMessageHandler::new(NoopThreadMessageService::new()));
     dispatcher.register(ReactionAddedHandler::new(NoopReactionApprovalService));
+    dispatcher.register(BlockActionHandler::new(NoopBlockActionService));
     dispatcher
 }
 
@@ -194,7 +211,7 @@ pub trait ThreadMessageService: Send + Sync {
         &self,
         event: &ThreadMessageEvent,
         ctx: &EventContext,
-    ) -> Result<MessageTemplate, EventHandlerError>;
+    ) -> Result<Option<MessageTemplate>, EventHandlerError>;
 }
 
 pub struct ThreadMessageHandler<S> {
@@ -229,12 +246,28 @@ where
         };
 
         let message = self.service.handle_thread_message(event, ctx).await?;
-        Ok(HandlerResult::Responded(message))
+        Ok(match message {
+            Some(message) => HandlerResult::Responded(message),
+            None => HandlerResult::Processed,
+        })
     }
 }
 
-#[derive(Default)]
-pub struct NoopThreadMessageService;
+pub struct NoopThreadMessageService {
+    router: CommandRouter<NoopQuoteCommandService>,
+}
+
+impl NoopThreadMessageService {
+    pub fn new() -> Self {
+        Self { router: CommandRouter::new(NoopQuoteCommandService) }
+    }
+}
+
+impl Default for NoopThreadMessageService {
+    fn default() -> Self {
+        Self::new()
+    }
+}
 
 #[async_trait]
 impl ThreadMessageService for NoopThreadMessageService {
@@ -242,21 +275,148 @@ impl ThreadMessageService for NoopThreadMessageService {
         &self,
         event: &ThreadMessageEvent,
         _ctx: &EventContext,
-    ) -> Result<MessageTemplate, EventHandlerError> {
-        Ok(crate::blocks::quote_status_message(
-            "thread",
-            &format!("received from {}: {}", event.user_id, event.text),
-        ))
+    ) -> Result<Option<MessageTemplate>, EventHandlerError> {
+        let Some(text) = infer_thread_quote_command(&event.text) else {
+            return Ok(None);
+        };
+        let payload = SlashCommandPayload {
+            command: "/quote".to_owned(),
+            text,
+            channel_id: event.channel_id.clone(),
+            user_id: event.user_id.clone(),
+            trigger_ts: event.thread_ts.clone(),
+            request_id: format!("thread-{}", event.thread_ts),
+        };
+
+        let normalized = normalize_quote_command(payload)?;
+        self.router.route(normalized).map(Some).map_err(EventHandlerError::from)
+    }
+}
+
+#[async_trait]
+pub trait BlockActionService: Send + Sync {
+    async fn handle_block_action(
+        &self,
+        event: &BlockActionEvent,
+        ctx: &EventContext,
+    ) -> Result<Option<MessageTemplate>, EventHandlerError>;
+}
+
+pub struct BlockActionHandler<S> {
+    service: S,
+}
+
+impl<S> BlockActionHandler<S>
+where
+    S: BlockActionService,
+{
+    pub fn new(service: S) -> Self {
+        Self { service }
+    }
+}
+
+#[async_trait]
+impl<S> EventHandler for BlockActionHandler<S>
+where
+    S: BlockActionService + 'static,
+{
+    fn event_type(&self) -> SlackEventType {
+        SlackEventType::BlockAction
+    }
+
+    async fn handle(
+        &self,
+        envelope: &SlackEnvelope,
+        ctx: &EventContext,
+    ) -> Result<HandlerResult, EventHandlerError> {
+        let SlackEvent::BlockAction(event) = &envelope.event else {
+            return Ok(HandlerResult::Ignored);
+        };
+
+        let message = self.service.handle_block_action(event, ctx).await?;
+        Ok(match message {
+            Some(message) => HandlerResult::Responded(message),
+            None => HandlerResult::Processed,
+        })
+    }
+}
+
+pub struct NoopBlockActionService;
+
+#[async_trait]
+impl BlockActionService for NoopBlockActionService {
+    async fn handle_block_action(
+        &self,
+        event: &BlockActionEvent,
+        ctx: &EventContext,
+    ) -> Result<Option<MessageTemplate>, EventHandlerError> {
+        let request_id = event.request_id.as_deref().unwrap_or(&ctx.correlation_id);
+        if event.action_id == "quote.help.v1" {
+            return Ok(Some(crate::blocks::help_message()));
+        }
+        if let Some(message) = crate::commands::help_command_shortcut_message(
+            &event.action_id,
+            event.quote_id.as_deref(),
+        ) {
+            return Ok(Some(message));
+        }
+
+        let mut inferred_quote_id = event.quote_id.clone();
+        if inferred_quote_id.is_none() {
+            let from_value = action_quote_id(event.value.as_deref(), None);
+            if from_value != "unknown" {
+                inferred_quote_id = Some(from_value);
+            }
+        }
+        if let Some(message) = crate::commands::help_command_shortcut_message(
+            &event.action_id,
+            inferred_quote_id.as_deref(),
+        ) {
+            return Ok(Some(message));
+        }
+
+        let quote_id = inferred_quote_id.as_deref();
+        let detail = match &event.value {
+            Some(value) => {
+                format!("interactive action `{}` with payload `{value}`", event.action_id)
+            }
+            None => format!("interactive action `{}` with no payload", event.action_id),
+        };
+
+        Ok(Some(crate::blocks::preview_mode_message(
+            &format!("button:{action}", action = event.action_id),
+            quote_id,
+            &detail,
+            request_id,
+        )))
     }
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ReactionApprovalOutcome {
     pub quote_id: String,
+    pub action: ReactionApprovalAction,
     pub database_recorded: bool,
     pub state_transition_triggered: bool,
     pub confirmation_dm_sent: bool,
     pub undo_window_secs: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum ReactionApprovalAction {
+    Approve,
+    Reject,
+    Discuss,
+}
+
+impl ReactionApprovalAction {
+    pub fn label(&self) -> &'static str {
+        match self {
+            Self::Approve => "approve",
+            Self::Reject => "reject",
+            Self::Discuss => "discuss",
+        }
+    }
 }
 
 #[async_trait]
@@ -304,19 +464,50 @@ where
         }
 
         let outcome = self.service.process_reaction_approval(event, ctx).await?;
-        let summary = format!(
-            "emoji approval captured ({}) | db={} state_transition={} dm={} undo={}s",
-            event.reaction,
-            outcome.database_recorded,
-            outcome.state_transition_triggered,
-            outcome.confirmation_dm_sent,
-            outcome.undo_window_secs,
+        let summary = reaction_approval_summary(
+            &outcome,
+            &event.reaction,
+            &event.approval_type,
+            &event.reactor_user_id,
         );
 
         Ok(HandlerResult::Responded(crate::blocks::quote_status_message(
             &outcome.quote_id,
             &summary,
         )))
+    }
+}
+
+fn reaction_approval_summary(
+    outcome: &ReactionApprovalOutcome,
+    reaction: &str,
+    approval_type: &str,
+    reactor_user_id: &str,
+) -> String {
+    let actor = format!("<@{reactor_user_id}>");
+    let action = match outcome.action {
+        ReactionApprovalAction::Approve => "approved",
+        ReactionApprovalAction::Reject => "rejected",
+        ReactionApprovalAction::Discuss => "tagged for discussion",
+    };
+    let icon = match outcome.action {
+        ReactionApprovalAction::Approve => "✅",
+        ReactionApprovalAction::Reject => "🚫",
+        ReactionApprovalAction::Discuss => "💬",
+    };
+    let approval_scope =
+        if approval_type.trim().is_empty() { "general quote approval" } else { approval_type };
+
+    if outcome.undo_window_secs == 0 {
+        format!(
+            "{icon} {actor} captured `{reaction}` on `{}` for `{}`. Action has been {action}.",
+            outcome.quote_id, approval_scope
+        )
+    } else {
+        format!(
+            "{icon} {actor} captured `{reaction}` on `{}` for `{}` and marked as {action}. Undo window: {}s (remove reaction before it expires to revert this signal).",
+            outcome.quote_id, approval_scope, outcome.undo_window_secs
+        )
     }
 }
 
@@ -335,6 +526,9 @@ impl ReactionApprovalService for NoopReactionApprovalService {
         })?;
 
         Ok(ReactionApprovalOutcome {
+            action: reaction_approval_action(&event.reaction).ok_or_else(|| {
+                EventHandlerError::ReactionApproval("unsupported approval reaction".to_owned())
+            })?,
             quote_id,
             database_recorded: true,
             state_transition_triggered: true,
@@ -344,13 +538,19 @@ impl ReactionApprovalService for NoopReactionApprovalService {
     }
 }
 
-fn is_supported_approval_reaction(reaction: &str) -> bool {
+fn reaction_approval_action(reaction: &str) -> Option<ReactionApprovalAction> {
     let normalized = normalize_reaction_token(reaction);
+    match normalized.as_str() {
+        "✅" | "white_check_mark" | "check" => Some(ReactionApprovalAction::Approve),
+        "👍" | "thumbsup" | "+1" => Some(ReactionApprovalAction::Approve),
+        "👎" | "thumbsdown" | "-1" => Some(ReactionApprovalAction::Reject),
+        "💬" | "speech_balloon" | "🚀" | "rocket" => Some(ReactionApprovalAction::Discuss),
+        _ => None,
+    }
+}
 
-    matches!(
-        normalized.as_str(),
-        "👍" | "👎" | "💬" | "+1" | "-1" | "thumbsup" | "thumbsdown" | "speech_balloon"
-    )
+fn is_supported_approval_reaction(reaction: &str) -> bool {
+    reaction_approval_action(reaction).is_some()
 }
 
 fn normalize_reaction_token(reaction: &str) -> String {
@@ -360,8 +560,8 @@ fn normalize_reaction_token(reaction: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::{
-        default_dispatcher, EventContext, EventDispatcher, HandlerResult, ReactionAddedEvent,
-        SlackEnvelope, SlackEvent, ThreadMessageEvent,
+        default_dispatcher, BlockActionEvent, EventContext, EventDispatcher, HandlerResult,
+        ReactionAddedEvent, ReactionApprovalAction, SlackEnvelope, SlackEvent, ThreadMessageEvent,
     };
     use crate::commands::SlashCommandPayload;
 
@@ -409,7 +609,57 @@ mod tests {
     #[test]
     fn default_dispatcher_registers_handlers() {
         let dispatcher = default_dispatcher();
-        assert_eq!(dispatcher.handler_count(), 3);
+        assert_eq!(dispatcher.handler_count(), 4);
+    }
+
+    #[tokio::test]
+    async fn dispatcher_routes_block_actions() {
+        let dispatcher = default_dispatcher();
+        let envelope = SlackEnvelope {
+            envelope_id: "env-block-1".to_owned(),
+            event: SlackEvent::BlockAction(BlockActionEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000000.6000".to_owned(),
+                thread_ts: Some("1730000000.5000".to_owned()),
+                user_id: "U6".to_owned(),
+                action_id: "quote.refresh.v1".to_owned(),
+                value: None,
+                quote_id: Some("Q-2026-1009".to_owned()),
+                request_id: Some("req-block-1".to_owned()),
+            }),
+        };
+
+        let result =
+            dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
+
+        assert!(matches!(result, HandlerResult::Responded(_)));
+    }
+
+    #[tokio::test]
+    async fn dispatcher_routes_unknown_block_action_to_guidance_message() {
+        let dispatcher = default_dispatcher();
+        let envelope = SlackEnvelope {
+            envelope_id: "env-block-2".to_owned(),
+            event: SlackEvent::BlockAction(BlockActionEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000000.7000".to_owned(),
+                thread_ts: Some("1730000000.5000".to_owned()),
+                user_id: "U7".to_owned(),
+                action_id: "unknown.action".to_owned(),
+                value: None,
+                quote_id: Some("Q-2026-1010".to_owned()),
+                request_id: Some("req-block-2".to_owned()),
+            }),
+        };
+
+        let result = dispatcher.dispatch(&envelope, &EventContext::default()).await;
+        let message = result.expect("unknown action should resolve to a guidance card");
+        assert!(matches!(message, super::HandlerResult::Responded(_)));
+        let message = match message {
+            super::HandlerResult::Responded(message) => message,
+            _ => unreachable!(),
+        };
+        assert!(message.fallback_text.contains("Preview mode active"));
     }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
@@ -435,9 +685,28 @@ mod tests {
         assert!(matches!(result, HandlerResult::Responded(_)));
     }
 
+    #[tokio::test]
+    async fn dispatcher_silently_ignores_thread_noise_when_command_is_not_inferred() {
+        let dispatcher = default_dispatcher();
+        let envelope = SlackEnvelope {
+            envelope_id: "env-thread-noise-1".to_owned(),
+            event: SlackEvent::ThreadMessage(ThreadMessageEvent {
+                channel_id: "C1".to_owned(),
+                thread_ts: "1730000001.0000".to_owned(),
+                user_id: "U8".to_owned(),
+                text: "random thread banter".to_owned(),
+            }),
+        };
+
+        let result =
+            dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
+
+        assert_eq!(result, HandlerResult::Processed);
+    }
+
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[tokio::test]
-    async fn dispatcher_processes_but_does_not_respond_for_non_approval_emoji() {
+    async fn dispatcher_routes_rocket_alias_as_discussion_reaction() {
         let dispatcher = default_dispatcher();
         let envelope = SlackEnvelope {
             envelope_id: "env-4".to_owned(),
@@ -455,7 +724,7 @@ mod tests {
         let result =
             dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
 
-        assert_eq!(result, HandlerResult::Processed);
+        assert!(matches!(result, HandlerResult::Responded(_)));
     }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
@@ -484,5 +753,13 @@ mod tests {
     #[test]
     fn reaction_token_normalization_handles_spacing_and_colons() {
         assert_eq!(super::normalize_reaction_token(" :THUMBSDOWN: "), "thumbsdown");
+    }
+
+    #[test]
+    fn reaction_action_supports_checkmark_and_rocket_aliases() {
+        assert_eq!(super::reaction_approval_action("✅"), Some(ReactionApprovalAction::Approve));
+        assert_eq!(super::reaction_approval_action("🚀"), Some(ReactionApprovalAction::Discuss));
+        assert_eq!(super::reaction_approval_action("👍"), Some(ReactionApprovalAction::Approve));
+        assert_eq!(super::reaction_approval_action("👎"), Some(ReactionApprovalAction::Reject));
     }
 }
