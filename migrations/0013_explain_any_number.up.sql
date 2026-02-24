@@ -10,15 +10,14 @@ CREATE TABLE IF NOT EXISTS explanation_requests (
     actor_id TEXT NOT NULL,
     correlation_id TEXT NOT NULL,
     quote_version INTEGER NOT NULL,
-    pricing_snapshot_id TEXT,  -- References quote_pricing_snapshot
+    pricing_snapshot_id TEXT,  -- Deterministic snapshot reference identifier
     status TEXT NOT NULL CHECK (status IN ('pending', 'success', 'error', 'missing_evidence')),
     error_code TEXT,  -- NULL unless status = 'error'
     error_message TEXT,  -- NULL unless status = 'error'
     latency_ms INTEGER CHECK (latency_ms >= 0),
     created_at TEXT NOT NULL,
     completed_at TEXT,
-    FOREIGN KEY (quote_id) REFERENCES quote(id) ON DELETE CASCADE,
-    FOREIGN KEY (pricing_snapshot_id) REFERENCES quote_pricing_snapshot(id) ON DELETE SET NULL
+    FOREIGN KEY (quote_id) REFERENCES quote(id) ON DELETE CASCADE
 );
 
 CREATE INDEX IF NOT EXISTS idx_explanation_requests_quote
@@ -69,7 +68,7 @@ CREATE INDEX IF NOT EXISTS idx_explanation_audit_correlation
     ON explanation_audit(correlation_id);
 
 -- Explanation cache - pre-computed explanations for common patterns
-CREATE TABLE IF NOT EXISTS explanation_cache (
+CREATE TABLE IF NOT EXISTS explanation_response_cache (
     id TEXT PRIMARY KEY,
     cache_key TEXT NOT NULL UNIQUE,  -- Hash of quote_id + line_id + version + snapshot_id
     quote_id TEXT NOT NULL,
@@ -82,17 +81,16 @@ CREATE TABLE IF NOT EXISTS explanation_cache (
     last_hit_at TEXT,
     created_at TEXT NOT NULL,
     expires_at TEXT NOT NULL,
-    FOREIGN KEY (quote_id) REFERENCES quote(id) ON DELETE CASCADE,
-    FOREIGN KEY (pricing_snapshot_id) REFERENCES quote_pricing_snapshot(id) ON DELETE CASCADE
+    FOREIGN KEY (quote_id) REFERENCES quote(id) ON DELETE CASCADE
 );
 
-CREATE INDEX IF NOT EXISTS idx_explanation_cache_quote
-    ON explanation_cache(quote_id, line_id);
-CREATE INDEX IF NOT EXISTS idx_explanation_cache_expires
-    ON explanation_cache(expires_at);
+CREATE INDEX IF NOT EXISTS idx_explanation_response_cache_quote
+    ON explanation_response_cache(quote_id, line_id);
+CREATE INDEX IF NOT EXISTS idx_explanation_response_cache_expires
+    ON explanation_response_cache(expires_at);
 
 -- Materialized view for explanation statistics (updated via triggers)
-CREATE TABLE IF NOT EXISTS explanation_stats (
+CREATE TABLE IF NOT EXISTS explanation_request_stats (
     id INTEGER PRIMARY KEY CHECK (id = 1),  -- Singleton table
     total_requests INTEGER NOT NULL DEFAULT 0,
     success_count INTEGER NOT NULL DEFAULT 0,
@@ -100,21 +98,21 @@ CREATE TABLE IF NOT EXISTS explanation_stats (
     missing_evidence_count INTEGER NOT NULL DEFAULT 0,
     avg_latency_ms INTEGER,
     p95_latency_ms INTEGER,
-    last_updated_at TEXT NOT NULL DEFAULT (datetime('now'))
+    last_updated_at TEXT NOT NULL DEFAULT (strftime('%Y-%m-%dT%H:%M:%fZ', 'now'))
 );
 
-INSERT OR IGNORE INTO explanation_stats (id, total_requests) VALUES (1, 0);
+INSERT OR IGNORE INTO explanation_request_stats (id, total_requests) VALUES (1, 0);
 
 -- Trigger to update stats on new explanation request
 CREATE TRIGGER IF NOT EXISTS explanation_request_stats_insert
 AFTER INSERT ON explanation_requests
 BEGIN
-    UPDATE explanation_stats SET
+    UPDATE explanation_request_stats SET
         total_requests = total_requests + 1,
         success_count = CASE WHEN NEW.status = 'success' THEN success_count + 1 ELSE success_count END,
         error_count = CASE WHEN NEW.status = 'error' THEN error_count + 1 ELSE error_count END,
         missing_evidence_count = CASE WHEN NEW.status = 'missing_evidence' THEN missing_evidence_count + 1 ELSE missing_evidence_count END,
-        last_updated_at = datetime('now')
+        last_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE id = 1;
 END;
 
@@ -123,7 +121,7 @@ CREATE TRIGGER IF NOT EXISTS explanation_request_stats_update
 AFTER UPDATE OF status ON explanation_requests
 WHEN OLD.status != NEW.status
 BEGIN
-    UPDATE explanation_stats SET
+    UPDATE explanation_request_stats SET
         success_count = CASE 
             WHEN NEW.status = 'success' AND OLD.status != 'success' THEN success_count + 1
             WHEN OLD.status = 'success' AND NEW.status != 'success' THEN success_count - 1
@@ -139,6 +137,6 @@ BEGIN
             WHEN OLD.status = 'missing_evidence' AND NEW.status != 'missing_evidence' THEN missing_evidence_count - 1
             ELSE missing_evidence_count 
         END,
-        last_updated_at = datetime('now')
+        last_updated_at = strftime('%Y-%m-%dT%H:%M:%fZ', 'now')
     WHERE id = 1;
 END;

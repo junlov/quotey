@@ -11,6 +11,7 @@ pub mod dna;
 pub mod domain;
 pub mod errors;
 pub mod execution_engine;
+pub mod explanation;
 pub mod flows;
 pub mod ghost;
 pub mod ledger;
@@ -47,6 +48,12 @@ pub use execution_engine::{
 pub use ghost::{
     GhostQuote, GhostQuoteGenerator, InMemoryCustomerHistoryProvider, InMemoryGhostQuoteStore,
     Signal, SignalDetector, SignalDetectorConfig,
+};
+pub use domain::explanation::*;
+pub use explanation::{
+    AppliedRule, CalculationStep, ExplanationEngine, ExplanationError, InMemoryPolicyProvider,
+    InMemoryPricingProvider, PolicyEvaluation, PolicyEvaluationProvider, PolicyViolation,
+    PricingLineSnapshot, PricingSnapshot, PricingSnapshotProvider,
 };
 pub use ledger::{LedgerAction, LedgerEntry, LedgerService, VerificationResult};
 pub use policy::{ExplanationGenerator, ExplanationTemplate, GeneratedExplanation};

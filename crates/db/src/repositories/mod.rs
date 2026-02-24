@@ -12,6 +12,7 @@ use quotey_core::domain::quote::{Quote, QuoteId};
 pub mod approval;
 pub mod customer;
 pub mod execution_queue;
+pub mod explanation;
 pub mod memory;
 pub mod product;
 pub mod quote;
@@ -19,6 +20,7 @@ pub mod quote;
 pub use approval::SqlApprovalRepository;
 pub use customer::SqlCustomerRepository;
 pub use execution_queue::SqlExecutionQueueRepository;
+pub use explanation::{ExplanationRepository, SqlExplanationRepository};
 pub use memory::{
     InMemoryApprovalRepository, InMemoryExecutionQueueRepository, InMemoryIdempotencyRepository,
     InMemoryProductRepository, InMemoryQuoteRepository,
