@@ -9,6 +9,7 @@ use std::collections::HashMap;
 
 use crate::domain::explanation::*;
 use crate::domain::quote::{QuoteId, QuoteLineId};
+use async_trait::async_trait;
 
 /// Error types for explanation operations
 #[derive(Clone, Debug, PartialEq)]
@@ -47,8 +48,9 @@ impl std::fmt::Display for ExplanationError {
 }
 
 /// Trait for pricing snapshot repository (abstract for testability)
+#[async_trait]
 pub trait PricingSnapshotProvider: Send + Sync {
-    fn get_snapshot(
+    async fn get_snapshot(
         &self,
         quote_id: &QuoteId,
         version: i32,
@@ -56,8 +58,9 @@ pub trait PricingSnapshotProvider: Send + Sync {
 }
 
 /// Trait for policy evaluation repository
+#[async_trait]
 pub trait PolicyEvaluationProvider: Send + Sync {
-    fn get_evaluation(
+    async fn get_evaluation(
         &self,
         quote_id: &QuoteId,
         version: i32,
@@ -158,13 +161,13 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
     }
 
     /// Explain the total amount for a quote
-    pub fn explain_total(
+    pub async fn explain_total(
         &self,
         quote_id: &QuoteId,
         version: i32,
     ) -> Result<ExplanationResponse, ExplanationError> {
-        let pricing = self.pricing_provider.get_snapshot(quote_id, version)?;
-        let policy = self.policy_provider.get_evaluation(quote_id, version)?;
+        let pricing = self.pricing_provider.get_snapshot(quote_id, version).await?;
+        let policy = self.policy_provider.get_evaluation(quote_id, version).await?;
 
         let arithmetic_chain = self.build_total_arithmetic_chain(&pricing);
         let policy_evidence = self.build_policy_evidence(&policy);
@@ -185,14 +188,14 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
     }
 
     /// Explain a specific line item
-    pub fn explain_line(
+    pub async fn explain_line(
         &self,
         quote_id: &QuoteId,
         line_id: &QuoteLineId,
         version: i32,
     ) -> Result<ExplanationResponse, ExplanationError> {
-        let pricing = self.pricing_provider.get_snapshot(quote_id, version)?;
-        let policy = self.policy_provider.get_evaluation(quote_id, version)?;
+        let pricing = self.pricing_provider.get_snapshot(quote_id, version).await?;
+        let policy = self.policy_provider.get_evaluation(quote_id, version).await?;
 
         let line = pricing.line_items.iter().find(|l| l.line_id == line_id.0).ok_or_else(|| {
             ExplanationError::InvalidLineId { quote_id: quote_id.clone(), line_id: line_id.clone() }
@@ -217,13 +220,13 @@ impl<P: PricingSnapshotProvider, O: PolicyEvaluationProvider> ExplanationEngine<
     }
 
     /// Explain policy decisions for a quote
-    pub fn explain_policy(
+    pub async fn explain_policy(
         &self,
         quote_id: &QuoteId,
         version: i32,
     ) -> Result<ExplanationResponse, ExplanationError> {
-        let pricing = self.pricing_provider.get_snapshot(quote_id, version)?;
-        let policy = self.policy_provider.get_evaluation(quote_id, version)?;
+        let pricing = self.pricing_provider.get_snapshot(quote_id, version).await?;
+        let policy = self.policy_provider.get_evaluation(quote_id, version).await?;
 
         let arithmetic_chain = vec![]; // Policy explanations don't have arithmetic
         let policy_evidence = self.build_policy_evidence(&policy);
@@ -540,8 +543,9 @@ impl InMemoryPricingProvider {
     }
 }
 
+#[async_trait]
 impl PricingSnapshotProvider for InMemoryPricingProvider {
-    fn get_snapshot(
+    async fn get_snapshot(
         &self,
         quote_id: &QuoteId,
         version: i32,
@@ -579,8 +583,9 @@ impl InMemoryPolicyProvider {
     }
 }
 
+#[async_trait]
 impl PolicyEvaluationProvider for InMemoryPolicyProvider {
-    fn get_evaluation(
+    async fn get_evaluation(
         &self,
         quote_id: &QuoteId,
         version: i32,
@@ -656,8 +661,8 @@ mod tests {
         }
     }
 
-    #[test]
-    fn explain_total_returns_complete_explanation() {
+    #[tokio::test]
+    async fn explain_total_returns_complete_explanation() {
         let quote_id = create_test_quote_id("Q-2026-001");
         let pricing = create_test_pricing_snapshot(&quote_id);
         let policy = create_test_policy_evaluation(&quote_id);
@@ -669,7 +674,7 @@ mod tests {
         policy_provider.add_evaluation(&quote_id, 1, policy);
 
         let engine = ExplanationEngine::new(pricing_provider, policy_provider);
-        let explanation = engine.explain_total(&quote_id, 1).expect("should succeed");
+        let explanation = engine.explain_total(&quote_id, 1).await.expect("should succeed");
 
         assert_eq!(explanation.quote_id.0, "Q-2026-001");
         assert_eq!(explanation.amount, Decimal::new(18000, 2));
@@ -678,8 +683,8 @@ mod tests {
         assert!(explanation.user_summary.contains("$180.00"));
     }
 
-    #[test]
-    fn explain_line_returns_line_specific_explanation() {
+    #[tokio::test]
+    async fn explain_line_returns_line_specific_explanation() {
         let quote_id = create_test_quote_id("Q-2026-002");
         let pricing = create_test_pricing_snapshot(&quote_id);
         let policy = create_test_policy_evaluation(&quote_id);
@@ -692,14 +697,15 @@ mod tests {
 
         let engine = ExplanationEngine::new(pricing_provider, policy_provider);
         let line_id = create_test_line_id("line-1");
-        let explanation = engine.explain_line(&quote_id, &line_id, 1).expect("should succeed");
+        let explanation =
+            engine.explain_line(&quote_id, &line_id, 1).await.expect("should succeed");
 
         assert!(explanation.amount_description.contains("Enterprise Plan"));
         assert!(!explanation.arithmetic_chain.is_empty());
     }
 
-    #[test]
-    fn explain_line_fails_for_invalid_line_id() {
+    #[tokio::test]
+    async fn explain_line_fails_for_invalid_line_id() {
         let quote_id = create_test_quote_id("Q-2026-003");
         let pricing = create_test_pricing_snapshot(&quote_id);
         let policy = create_test_policy_evaluation(&quote_id);
@@ -713,13 +719,13 @@ mod tests {
         let engine = ExplanationEngine::new(pricing_provider, policy_provider);
         let invalid_line_id = create_test_line_id("nonexistent");
 
-        let result = engine.explain_line(&quote_id, &invalid_line_id, 1);
+        let result = engine.explain_line(&quote_id, &invalid_line_id, 1).await;
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ExplanationError::InvalidLineId { .. }));
     }
 
-    #[test]
-    fn explain_policy_returns_policy_focused_explanation() {
+    #[tokio::test]
+    async fn explain_policy_returns_policy_focused_explanation() {
         let quote_id = create_test_quote_id("Q-2026-004");
         let pricing = create_test_pricing_snapshot(&quote_id);
         let policy = create_test_policy_evaluation(&quote_id);
@@ -731,14 +737,14 @@ mod tests {
         policy_provider.add_evaluation(&quote_id, 1, policy);
 
         let engine = ExplanationEngine::new(pricing_provider, policy_provider);
-        let explanation = engine.explain_policy(&quote_id, 1).expect("should succeed");
+        let explanation = engine.explain_policy(&quote_id, 1).await.expect("should succeed");
 
         assert!(explanation.user_summary.contains("APPROVED"));
         assert!(explanation.arithmetic_chain.is_empty()); // Policy explanations don't have arithmetic
     }
 
-    #[test]
-    fn missing_pricing_snapshot_returns_error() {
+    #[tokio::test]
+    async fn missing_pricing_snapshot_returns_error() {
         let quote_id = create_test_quote_id("Q-2026-005");
         let policy = create_test_policy_evaluation(&quote_id);
 
@@ -747,14 +753,14 @@ mod tests {
         policy_provider.add_evaluation(&quote_id, 1, policy);
 
         let engine = ExplanationEngine::new(pricing_provider, policy_provider);
-        let result = engine.explain_total(&quote_id, 1);
+        let result = engine.explain_total(&quote_id, 1).await;
 
         assert!(result.is_err());
         assert!(matches!(result.unwrap_err(), ExplanationError::MissingPricingSnapshot { .. }));
     }
 
-    #[test]
-    fn arithmetic_chain_contains_all_steps() {
+    #[tokio::test]
+    async fn arithmetic_chain_contains_all_steps() {
         let quote_id = create_test_quote_id("Q-2026-006");
         let pricing = create_test_pricing_snapshot(&quote_id);
         let policy = create_test_policy_evaluation(&quote_id);
@@ -766,7 +772,7 @@ mod tests {
         policy_provider.add_evaluation(&quote_id, 1, policy);
 
         let engine = ExplanationEngine::new(pricing_provider, policy_provider);
-        let explanation = engine.explain_total(&quote_id, 1).expect("should succeed");
+        let explanation = engine.explain_total(&quote_id, 1).await.expect("should succeed");
 
         // Should have: sum lines, apply discount, final total
         assert!(explanation.arithmetic_chain.len() >= 2);
@@ -779,8 +785,8 @@ mod tests {
         assert_eq!(last.operation, "total");
     }
 
-    #[test]
-    fn policy_violations_are_included_in_evidence() {
+    #[tokio::test]
+    async fn policy_violations_are_included_in_evidence() {
         let quote_id = create_test_quote_id("Q-2026-007");
         let pricing = create_test_pricing_snapshot(&quote_id);
 
@@ -802,14 +808,14 @@ mod tests {
         policy_provider.add_evaluation(&quote_id, 1, policy);
 
         let engine = ExplanationEngine::new(pricing_provider, policy_provider);
-        let explanation = engine.explain_total(&quote_id, 1).expect("should succeed");
+        let explanation = engine.explain_total(&quote_id, 1).await.expect("should succeed");
 
         assert!(!explanation.policy_evidence.is_empty());
         assert!(explanation.user_summary.contains("⚡")); // Warning indicator
     }
 
-    #[test]
-    fn source_references_include_pricing_and_policy() {
+    #[tokio::test]
+    async fn source_references_include_pricing_and_policy() {
         let quote_id = create_test_quote_id("Q-2026-008");
         let pricing = create_test_pricing_snapshot(&quote_id);
         let policy = create_test_policy_evaluation(&quote_id);
@@ -821,7 +827,7 @@ mod tests {
         policy_provider.add_evaluation(&quote_id, 1, policy);
 
         let engine = ExplanationEngine::new(pricing_provider, policy_provider);
-        let explanation = engine.explain_total(&quote_id, 1).expect("should succeed");
+        let explanation = engine.explain_total(&quote_id, 1).await.expect("should succeed");
 
         let has_pricing_ref =
             explanation.source_references.iter().any(|r| r.source_type == "pricing_snapshot");

@@ -16,6 +16,7 @@ pub mod explanation;
 pub mod memory;
 pub mod optimizer;
 pub mod precedent;
+pub mod pricing_snapshot;
 pub mod product;
 pub mod quote;
 pub mod simulation;
@@ -30,6 +31,7 @@ pub use memory::{
 };
 pub use optimizer::{PolicyOptimizerRepository, SqlPolicyOptimizerRepository};
 pub use precedent::{PrecedentRepository, SqlPrecedentRepository};
+pub use pricing_snapshot::SqlPricingSnapshotRepository;
 pub use product::SqlProductRepository;
 pub use quote::SqlQuoteRepository;
 pub use simulation::{

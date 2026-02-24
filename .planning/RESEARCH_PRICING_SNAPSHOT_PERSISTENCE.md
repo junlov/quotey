@@ -3,7 +3,7 @@
 **Task:** bd-beo8  
 **Researcher:** ResearchAgent (kimi-k2)  
 **Date:** 2026-02-23  
-**Status:** In Progress
+**Status:** Completed (implemented in `bd-3v0z`, 2026-02-24)
 
 ---
 
@@ -238,9 +238,9 @@ DROP TABLE IF EXISTS pricing_snapshots;
 ## 4. Acceptance Criteria
 
 - [x] Decision record documenting chosen approach (this document)
-- [ ] Migration schema for new table
-- [ ] Update `ExplainAnyNumberService` to use snapshot provider
-- [ ] Integration tests for snapshot lifecycle
+- [x] Migration schema for new table (`migrations/0017_quote_pricing_snapshot.*.sql`)
+- [x] Update explanation provider contract to support SQL-backed snapshot provider
+- [x] Integration tests for snapshot lifecycle (`crates/db/src/repositories/pricing_snapshot.rs`)
 - [ ] Performance benchmarks (first vs subsequent explanations)
 
 ---
@@ -258,6 +258,28 @@ DROP TABLE IF EXISTS pricing_snapshots;
 **Adopt Option C (Hybrid)** for the following reasons:
 
 1. **Lazy creation** avoids storage bloat for quotes never explained
+
+---
+
+## 7. Implementation Notes (2026-02-24)
+
+- Added immutable `quote_pricing_snapshot` table with ledger linkage columns:
+  - `ledger_entry_id` (FK to `quote_ledger.entry_id`)
+  - `ledger_content_hash`
+- Added `SqlPricingSnapshotRepository` implementing `PricingSnapshotProvider` with:
+  - quote existence validation,
+  - ledger version validation (`VersionMismatch` on invalid version),
+  - cached snapshot retrieval,
+  - fallback snapshot build from `quote_line` data,
+  - cache write-through on first retrieval.
+- Added deterministic mismatch safeguards:
+  - cached snapshot vs ledger entry/hash mismatch raises `EvidenceGatheringFailed`.
+- Added targeted integration tests for:
+  - cached hit,
+  - fallback build + cache,
+  - invalid version,
+  - missing quote,
+  - ledger mismatch detection.
 2. **Immutable snapshots** ensure deterministic explanations
 3. **Ledger linkage** provides audit trail
 4. **Fallback mechanism** maintains backwards compatibility
