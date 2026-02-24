@@ -51,7 +51,19 @@ pub fn run() -> CommandResult {
             .map_err(|error| ("seed_verification", error.to_string(), 6u8))?;
 
         if !verification.all_present {
-            return Err(("seed_verification", "Some seed data failed to load".to_string(), 6u8));
+            let failed_checks = verification
+                .checks
+                .iter()
+                .filter_map(|(check, passed)| (!passed).then_some(*check))
+                .collect::<Vec<_>>();
+            let message = if failed_checks.is_empty() {
+                "Some seed data failed to load".to_string()
+            } else {
+                format!("Seed verification failed for checks: {}", failed_checks.join(", "))
+            };
+
+            pool.close().await;
+            return Err(("seed_verification", message, 6u8));
         }
 
         pool.close().await;
