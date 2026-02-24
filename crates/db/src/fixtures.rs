@@ -474,10 +474,50 @@ mod tests {
     use crate::{connect_with_settings, migrations};
     use serde_json::Value;
     type SeedTestResult = Result<(), String>;
+    type SeedArrayResult<'a> = Result<&'a [Value], String>;
+
+    macro_rules! require {
+        ($cond:expr) => {
+            if !$cond {
+                return Err(format!("assertion failed: `{}`", stringify!($cond)));
+            }
+        };
+        ($cond:expr, $($arg:tt)*) => {
+            if !$cond {
+                return Err(format!($($arg)*));
+            }
+        };
+    }
+
+    macro_rules! require_eq {
+        ($left:expr, $right:expr) => {
+            if $left != $right {
+                return Err(format!(
+                    "assertion failed: `left == right` (`{:?}` != `{:?}`)",
+                    $left,
+                    $right
+                ));
+            }
+        };
+        ($left:expr, $right:expr, $($arg:tt)*) => {
+            if $left != $right {
+                return Err(format!($($arg)*));
+            }
+        };
+    }
+
+    fn require_array<'a>(value: &'a Value, field: &'static str) -> SeedArrayResult<'a> {
+        value
+            .get(field)
+            .and_then(Value::as_array)
+            .map(|values| values.as_slice())
+            .ok_or_else(|| format!("{field} should be an array"))
+    }
 
     #[test]
-    fn sql_fixture_is_valid() {
-        assert!(!E2ESeedDataset::SQL.is_empty());
+    fn sql_fixture_is_valid() -> SeedTestResult {
+        require!(!E2ESeedDataset::SQL.is_empty());
+        Ok(())
     }
 
     #[tokio::test]
@@ -491,16 +531,16 @@ mod tests {
         let first = E2ESeedDataset::load(&pool).await.map_err(|err| err.to_string())?;
         let first_verification =
             E2ESeedDataset::verify(&pool).await.map_err(|err| err.to_string())?;
-        assert!(first_verification.all_present);
-        assert_eq!(first.flows_seeded.len(), 3);
+        require!(first_verification.all_present);
+        require_eq!(first.flows_seeded.len(), 3);
 
         let second = E2ESeedDataset::load(&pool).await.map_err(|err| err.to_string())?;
         let second_verification =
             E2ESeedDataset::verify(&pool).await.map_err(|err| err.to_string())?;
-        assert!(second_verification.all_present);
-        assert_eq!(second.flows_seeded.len(), 3);
-        assert_eq!(first_verification.checks, second_verification.checks);
-        assert_eq!(first.flows_seeded.len(), second.flows_seeded.len());
+        require!(second_verification.all_present);
+        require_eq!(second.flows_seeded.len(), 3);
+        require_eq!(first_verification.checks, second_verification.checks);
+        require_eq!(first.flows_seeded.len(), second.flows_seeded.len());
         Ok(())
     }
 
@@ -519,7 +559,7 @@ mod tests {
             .fetch_one(&pool)
             .await
             .map_err(|err| err.to_string())?;
-        assert_eq!(net_new_status, "draft");
+        require_eq!(net_new_status, "draft");
 
         let net_new_prior: Option<String> =
             sqlx::query_scalar("SELECT json_extract(metadata_json, '$.prior_quote_id') FROM flow_state WHERE quote_id = ?1")
@@ -527,7 +567,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .map_err(|err| err.to_string())?;
-        assert!(net_new_prior.is_none());
+        require!(net_new_prior.is_none());
 
         let renewal_prior: String =
             sqlx::query_scalar("SELECT json_extract(metadata_json, '$.prior_quote_id') FROM flow_state WHERE quote_id = ?1")
@@ -535,7 +575,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .map_err(|err| err.to_string())?;
-        assert_eq!(renewal_prior, "quote-renewal-prior-001");
+        require_eq!(renewal_prior, "quote-renewal-prior-001");
 
         let discount_pct: i64 =
             sqlx::query_scalar("SELECT CAST(json_extract(metadata_json, '$.requested_discount_pct') AS INTEGER) FROM flow_state WHERE quote_id = ?1")
@@ -543,7 +583,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .map_err(|err| err.to_string())?;
-        assert_eq!(discount_pct, 25);
+        require_eq!(discount_pct, 25);
 
         let threshold_pct: i64 =
             sqlx::query_scalar("SELECT CAST(json_extract(metadata_json, '$.threshold_pct') AS INTEGER) FROM flow_state WHERE quote_id = ?1")
@@ -551,7 +591,7 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .map_err(|err| err.to_string())?;
-        assert_eq!(threshold_pct, 20);
+        require_eq!(threshold_pct, 20);
 
         let approval_request_events: i64 =
             sqlx::query_scalar("SELECT COUNT(1) FROM audit_event WHERE quote_id = ?1 AND event_type = 'approval.requested'")
@@ -559,76 +599,70 @@ mod tests {
                 .fetch_one(&pool)
                 .await
                 .map_err(|err| err.to_string())?;
-        assert_eq!(approval_request_events, 1);
+        require_eq!(approval_request_events, 1);
         Ok(())
     }
 
     #[test]
-    fn seed_contract_json_matches_rust_seed_constants() {
+    fn seed_contract_json_matches_rust_seed_constants() -> SeedTestResult {
         let contract: serde_json::Value =
             serde_json::from_str(include_str!("../../../config/fixtures/e2e_seed_contract.json"))
-                .expect("e2e seed contract JSON must parse");
+                .map_err(|error| format!("e2e seed contract JSON must parse: {error}"))?;
 
-        assert_eq!(contract["dataset_version"].as_str(), Some("bd-3vp2.7.2"));
-        assert_eq!(contract["seed_dataset"].as_str(), Some("deterministic_e2e_core_flows"));
+        require_eq!(contract["dataset_version"].as_str(), Some("bd-3vp2.7.2"));
+        require_eq!(contract["seed_dataset"].as_str(), Some("deterministic_e2e_core_flows"));
 
-        let contract_flows = contract["flows"].as_array().expect("flows should be an array");
-        assert_eq!(contract_flows.len(), SEED_FLOWS.len());
+        let contract_flows = require_array(&contract, "flows")?;
+        require_eq!(contract_flows.len(), SEED_FLOWS.len());
 
         for flow in SEED_FLOWS {
             let contract_flow = contract_flows
                 .iter()
                 .find(|candidate| candidate["flow_type"].as_str() == Some(flow.flow_type))
-                .expect("contract should include all canonical flow types");
+                .ok_or_else(|| {
+                    format!("contract should include canonical flow type: {}", flow.flow_type)
+                })?;
 
-            assert_eq!(contract_flow["flow_type"].as_str(), Some(flow.flow_type));
-            assert_eq!(contract_flow["quote_id"].as_str(), Some(flow.quote_id));
-            assert_eq!(contract_flow["status"].as_str(), Some(flow.status));
-            assert_eq!(contract_flow["current_step"].as_str(), Some(flow.current_step));
-            assert_eq!(
+            require_eq!(contract_flow["flow_type"].as_str(), Some(flow.flow_type));
+            require_eq!(contract_flow["quote_id"].as_str(), Some(flow.quote_id));
+            require_eq!(contract_flow["status"].as_str(), Some(flow.status));
+            require_eq!(contract_flow["current_step"].as_str(), Some(flow.current_step));
+            require_eq!(
                 contract_flow["step_number"].as_u64().unwrap_or_default(),
                 flow.step_number as u64
             );
-            assert_eq!(
+            require_eq!(
                 contract_flow["expected_line_count"].as_u64().unwrap_or_default(),
                 flow.expected_line_count as u64
             );
-            assert_eq!(
-                contract_flow["required_fields"]
-                    .as_array()
-                    .expect("required_fields should be an array")
+            require_eq!(
+                require_array(contract_flow, "required_fields")?
                     .iter()
                     .map(|value| value.as_str().unwrap_or_default())
                     .collect::<Vec<_>>(),
                 flow.required_fields
             );
-            assert_eq!(
-                contract_flow["missing_fields"]
-                    .as_array()
-                    .expect("missing_fields should be an array")
+            require_eq!(
+                require_array(contract_flow, "missing_fields")?
                     .iter()
                     .map(|value| value.as_str().unwrap_or_default())
                     .collect::<Vec<_>>(),
                 flow.missing_fields
             );
-            assert_eq!(contract_flow["account_id"].as_str(), Some(flow.account_id));
-            assert_eq!(contract_flow["account_name"].as_str(), Some(flow.account_name));
-            assert_eq!(contract_flow["deal_id"].as_str(), Some(flow.deal_id));
-            assert_eq!(contract_flow["deal_name"].as_str(), Some(flow.deal_name));
-            assert_eq!(contract_flow["policy_profile"].as_str(), Some(flow.policy_profile));
-            assert_eq!(
-                contract_flow["product_ids"]
-                    .as_array()
-                    .expect("product_ids should be an array")
+            require_eq!(contract_flow["account_id"].as_str(), Some(flow.account_id));
+            require_eq!(contract_flow["account_name"].as_str(), Some(flow.account_name));
+            require_eq!(contract_flow["deal_id"].as_str(), Some(flow.deal_id));
+            require_eq!(contract_flow["deal_name"].as_str(), Some(flow.deal_name));
+            require_eq!(contract_flow["policy_profile"].as_str(), Some(flow.policy_profile));
+            require_eq!(
+                require_array(contract_flow, "product_ids")?
                     .iter()
                     .map(|value| value.as_str().unwrap_or_default())
                     .collect::<Vec<_>>(),
                 flow.product_ids
             );
-            assert_eq!(
-                contract_flow["product_names"]
-                    .as_array()
-                    .expect("product_names should be an array")
+            require_eq!(
+                require_array(contract_flow, "product_names")?
                     .iter()
                     .map(|value| value.as_str().unwrap_or_default())
                     .collect::<Vec<_>>(),
@@ -636,24 +670,25 @@ mod tests {
             );
 
             if let Some(requested) = flow.requested_discount_pct {
-                assert_eq!(
+                require_eq!(
                     contract_flow["requested_discount_pct"].as_u64(),
                     Some(u64::from(requested))
                 );
             } else {
-                assert!(contract_flow.get("requested_discount_pct").is_none());
+                require!(contract_flow.get("requested_discount_pct").is_none());
             }
             if let Some(threshold) = flow.threshold_pct {
-                assert_eq!(contract_flow["threshold_pct"].as_u64(), Some(u64::from(threshold)));
+                require_eq!(contract_flow["threshold_pct"].as_u64(), Some(u64::from(threshold)));
             } else {
-                assert!(contract_flow.get("threshold_pct").is_none());
+                require!(contract_flow.get("threshold_pct").is_none());
             }
 
             if let Some(prior_quote_id) = flow.prior_quote_id {
-                assert_eq!(contract_flow["prior_quote_id"].as_str(), Some(prior_quote_id));
+                require_eq!(contract_flow["prior_quote_id"].as_str(), Some(prior_quote_id));
             } else {
-                assert!(contract_flow.get("prior_quote_id").is_none_or(Value::is_null));
+                require!(contract_flow.get("prior_quote_id").is_none_or(Value::is_null));
             }
         }
+        Ok(())
     }
 }

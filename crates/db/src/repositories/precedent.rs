@@ -461,11 +461,13 @@ mod tests {
     use super::{PrecedentRepository, SqlPrecedentRepository};
     use crate::{connect_with_settings, migrations, DbPool};
 
+    type TestResult<T> = Result<T, String>;
+
     #[tokio::test]
-    async fn sql_precedent_repo_round_trip_for_fingerprints_and_outcomes() {
-        let pool = setup_pool().await;
+    async fn sql_precedent_repo_round_trip_for_fingerprints_and_outcomes() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-PRE-100".to_string());
-        insert_quote(&pool, &quote_id).await;
+        insert_quote(&pool, &quote_id).await?;
 
         let repo = SqlPrecedentRepository::new(pool.clone());
 
@@ -477,7 +479,7 @@ mod tests {
             outcome_status: PrecedentOutcomeStatus::Pending,
             final_price: 42_000.0,
             close_date: None,
-            created_at: parse_ts("2026-02-24T01:00:00Z"),
+            created_at: parse_ts("2026-02-24T01:00:00Z")?,
         };
         let second = PrecedentFingerprint {
             id: "fp-pre-100-b".to_string(),
@@ -487,19 +489,33 @@ mod tests {
             outcome_status: PrecedentOutcomeStatus::Won,
             final_price: 47_500.0,
             close_date: Some("2026-02-24".to_string()),
-            created_at: parse_ts("2026-02-24T01:01:00Z"),
+            created_at: parse_ts("2026-02-24T01:01:00Z")?,
         };
 
-        repo.save_fingerprint(first).await.expect("save first fingerprint");
-        repo.save_fingerprint(second.clone()).await.expect("save second fingerprint");
+        repo.save_fingerprint(first)
+            .await
+            .map_err(|error| format!("save first fingerprint: {error}"))?;
+        repo.save_fingerprint(second.clone())
+            .await
+            .map_err(|error| format!("save second fingerprint: {error}"))?;
 
         let latest = repo
             .get_latest_fingerprint_for_quote(&quote_id)
             .await
-            .expect("load latest fingerprint")
-            .expect("fingerprint exists");
-        assert_eq!(latest.id, second.id);
-        assert_eq!(latest.fingerprint_hash, "hash-b");
+            .map_err(|error| format!("load latest fingerprint: {error}"))?;
+        let latest = latest.ok_or_else(|| "fingerprint exists".to_string())?;
+        if latest.id != second.id {
+            return Err(format!(
+                "latest fingerprint id mismatch: {:?} != {:?}",
+                latest.id, second.id
+            ));
+        }
+        if latest.fingerprint_hash != "hash-b" {
+            return Err(format!(
+                "latest fingerprint hash mismatch: {:?} != hash-b",
+                latest.fingerprint_hash
+            ));
+        }
 
         let outcome = PrecedentDealOutcome {
             id: "deal-pre-100".to_string(),
@@ -510,34 +526,54 @@ mod tests {
             customer_segment: Some("enterprise".to_string()),
             product_mix_json: "[\"plan-pro\",\"support-premium\"]".to_string(),
             sales_cycle_days: Some(33),
-            created_at: parse_ts("2026-02-25T10:00:00Z"),
+            created_at: parse_ts("2026-02-25T10:00:00Z")?,
         };
 
-        repo.save_deal_outcome(outcome.clone()).await.expect("save outcome");
+        repo.save_deal_outcome(outcome.clone())
+            .await
+            .map_err(|error| format!("save outcome: {error}"))?;
 
         let fetched_outcome = repo
             .get_latest_deal_outcome_for_quote(&quote_id)
             .await
-            .expect("load outcome")
-            .expect("outcome exists");
-
-        assert_eq!(fetched_outcome.id, outcome.id);
-        assert_eq!(fetched_outcome.outcome_status, PrecedentOutcomeStatus::Won);
-        assert_eq!(fetched_outcome.sales_cycle_days, Some(33));
+            .map_err(|error| format!("load outcome: {error}"))?;
+        let fetched_outcome = fetched_outcome.ok_or_else(|| "outcome exists".to_string())?;
+        if fetched_outcome.id != outcome.id {
+            return Err(format!(
+                "outcome id mismatch: {:?} != {:?}",
+                fetched_outcome.id, outcome.id
+            ));
+        }
+        if fetched_outcome.outcome_status != PrecedentOutcomeStatus::Won {
+            return Err(format!(
+                "outcome status mismatch: {:?} != {:?}",
+                fetched_outcome.outcome_status,
+                PrecedentOutcomeStatus::Won
+            ));
+        }
+        if fetched_outcome.sales_cycle_days != Some(33) {
+            return Err(format!(
+                "outcome sales_cycle_days mismatch: {:?} != {:?}",
+                fetched_outcome.sales_cycle_days,
+                Some(33)
+            ));
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn sql_precedent_repo_round_trip_for_approval_and_similarity_evidence() {
-        let pool = setup_pool().await;
+    async fn sql_precedent_repo_round_trip_for_approval_and_similarity_evidence() -> TestResult<()>
+    {
+        let pool = setup_pool().await?;
         let source_quote = QuoteId("Q-PRE-SRC".to_string());
         let candidate_a = QuoteId("Q-PRE-A".to_string());
         let candidate_b = QuoteId("Q-PRE-B".to_string());
 
-        insert_quote(&pool, &source_quote).await;
-        insert_quote(&pool, &candidate_a).await;
-        insert_quote(&pool, &candidate_b).await;
+        insert_quote(&pool, &source_quote).await?;
+        insert_quote(&pool, &candidate_a).await?;
+        insert_quote(&pool, &candidate_b).await?;
 
         let repo = SqlPrecedentRepository::new(pool.clone());
 
@@ -549,7 +585,7 @@ mod tests {
             outcome_status: PrecedentOutcomeStatus::Pending,
             final_price: 39_000.0,
             close_date: None,
-            created_at: parse_ts("2026-02-24T02:00:00Z"),
+            created_at: parse_ts("2026-02-24T02:00:00Z")?,
         };
         let candidate_a_fp = PrecedentFingerprint {
             id: "fp-pre-a".to_string(),
@@ -559,7 +595,7 @@ mod tests {
             outcome_status: PrecedentOutcomeStatus::Won,
             final_price: 41_000.0,
             close_date: Some("2026-02-20".to_string()),
-            created_at: parse_ts("2026-02-24T02:01:00Z"),
+            created_at: parse_ts("2026-02-24T02:01:00Z")?,
         };
         let candidate_b_fp = PrecedentFingerprint {
             id: "fp-pre-b".to_string(),
@@ -569,12 +605,18 @@ mod tests {
             outcome_status: PrecedentOutcomeStatus::Lost,
             final_price: 21_000.0,
             close_date: Some("2026-02-18".to_string()),
-            created_at: parse_ts("2026-02-24T02:02:00Z"),
+            created_at: parse_ts("2026-02-24T02:02:00Z")?,
         };
 
-        repo.save_fingerprint(source_fp).await.expect("save source fingerprint");
-        repo.save_fingerprint(candidate_a_fp).await.expect("save candidate a fingerprint");
-        repo.save_fingerprint(candidate_b_fp).await.expect("save candidate b fingerprint");
+        repo.save_fingerprint(source_fp)
+            .await
+            .map_err(|error| format!("save source fingerprint: {error}"))?;
+        repo.save_fingerprint(candidate_a_fp)
+            .await
+            .map_err(|error| format!("save candidate a fingerprint: {error}"))?;
+        repo.save_fingerprint(candidate_b_fp)
+            .await
+            .map_err(|error| format!("save candidate b fingerprint: {error}"))?;
 
         let approval_v1 = PrecedentApprovalPathEvidence {
             id: PrecedentApprovalPathId("pre-appr-1".to_string()),
@@ -587,10 +629,10 @@ mod tests {
             routed_by_actor_id: "U-SYSTEM".to_string(),
             idempotency_key: "idem-pre-appr-1".to_string(),
             correlation_id: "corr-pre-1".to_string(),
-            routed_at: parse_ts("2026-02-24T02:10:00Z"),
+            routed_at: parse_ts("2026-02-24T02:10:00Z")?,
             decided_at: None,
-            created_at: parse_ts("2026-02-24T02:10:00Z"),
-            updated_at: parse_ts("2026-02-24T02:10:00Z"),
+            created_at: parse_ts("2026-02-24T02:10:00Z")?,
+            updated_at: parse_ts("2026-02-24T02:10:00Z")?,
         };
         let approval_v2 = PrecedentApprovalPathEvidence {
             id: PrecedentApprovalPathId("pre-appr-2".to_string()),
@@ -603,14 +645,18 @@ mod tests {
             routed_by_actor_id: "U-SYSTEM".to_string(),
             idempotency_key: "idem-pre-appr-2".to_string(),
             correlation_id: "corr-pre-2".to_string(),
-            routed_at: parse_ts("2026-02-24T02:20:00Z"),
-            decided_at: Some(parse_ts("2026-02-24T02:21:00Z")),
-            created_at: parse_ts("2026-02-24T02:20:00Z"),
-            updated_at: parse_ts("2026-02-24T02:21:00Z"),
+            routed_at: parse_ts("2026-02-24T02:20:00Z")?,
+            decided_at: Some(parse_ts("2026-02-24T02:21:00Z")?),
+            created_at: parse_ts("2026-02-24T02:20:00Z")?,
+            updated_at: parse_ts("2026-02-24T02:21:00Z")?,
         };
 
-        repo.save_approval_path_evidence(approval_v1).await.expect("save approval v1");
-        repo.save_approval_path_evidence(approval_v2.clone()).await.expect("save approval v2");
+        repo.save_approval_path_evidence(approval_v1)
+            .await
+            .map_err(|error| format!("save approval v1: {error}"))?;
+        repo.save_approval_path_evidence(approval_v2.clone())
+            .await
+            .map_err(|error| format!("save approval v2: {error}"))?;
         repo.save_approval_path_evidence(PrecedentApprovalPathEvidence {
             id: PrecedentApprovalPathId("pre-appr-2-rewrite".to_string()),
             quote_id: source_quote.clone(),
@@ -622,26 +668,38 @@ mod tests {
             routed_by_actor_id: "U-SYSTEM".to_string(),
             idempotency_key: "idem-pre-appr-2-rewrite".to_string(),
             correlation_id: "corr-pre-2-rewrite".to_string(),
-            routed_at: parse_ts("2026-02-24T02:22:00Z"),
-            decided_at: Some(parse_ts("2026-02-24T02:23:00Z")),
-            created_at: parse_ts("2026-02-24T02:22:00Z"),
-            updated_at: parse_ts("2026-02-24T02:23:00Z"),
+            routed_at: parse_ts("2026-02-24T02:22:00Z")?,
+            decided_at: Some(parse_ts("2026-02-24T02:23:00Z")?),
+            created_at: parse_ts("2026-02-24T02:22:00Z")?,
+            updated_at: parse_ts("2026-02-24T02:23:00Z")?,
         })
         .await
-        .expect("rewrite approval route version");
+        .map_err(|error| format!("rewrite approval route version: {error}"))?;
 
         let latest_approval = repo
             .get_latest_approval_path_for_quote(&source_quote)
             .await
-            .expect("load latest approval")
-            .expect("approval exists");
-        assert_eq!(latest_approval.route_version, 2);
-        assert_eq!(latest_approval.decision_status, PrecedentDecisionStatus::Escalated);
-        assert_eq!(latest_approval.decision_actor_id.as_deref(), Some("U-MGR-1"));
-        assert_eq!(
-            latest_approval.decision_reason.as_deref(),
-            Some("requires finance confirmation")
-        );
+            .map_err(|error| format!("load latest approval: {error}"))?;
+        let latest_approval = latest_approval.ok_or_else(|| "approval exists".to_string())?;
+        if latest_approval.route_version != 2 {
+            return Err(format!(
+                "latest approval route_version mismatch: {:?} != 2",
+                latest_approval.route_version
+            ));
+        }
+        if latest_approval.decision_status != PrecedentDecisionStatus::Escalated {
+            return Err(format!(
+                "latest approval decision_status mismatch: {:?} != {:?}",
+                latest_approval.decision_status,
+                PrecedentDecisionStatus::Escalated
+            ));
+        }
+        if latest_approval.decision_actor_id.as_deref() != Some("U-MGR-1") {
+            return Err("latest approval actor id mismatch".to_string());
+        }
+        if latest_approval.decision_reason.as_deref() != Some("requires finance confirmation") {
+            return Err("latest approval reason mismatch".to_string());
+        }
 
         let similarity_a = PrecedentSimilarityEvidence {
             id: PrecedentSimilarityEvidenceId("pre-sim-a".to_string()),
@@ -655,8 +713,8 @@ mod tests {
             evidence_payload_json: "{\"normalization\":\"v1\"}".to_string(),
             idempotency_key: "idem-pre-sim-a".to_string(),
             correlation_id: "corr-pre-sim-1".to_string(),
-            computed_at: parse_ts("2026-02-24T02:30:00Z"),
-            created_at: parse_ts("2026-02-24T02:30:00Z"),
+            computed_at: parse_ts("2026-02-24T02:30:00Z")?,
+            created_at: parse_ts("2026-02-24T02:30:00Z")?,
         };
         let similarity_b = PrecedentSimilarityEvidence {
             id: PrecedentSimilarityEvidenceId("pre-sim-b".to_string()),
@@ -670,12 +728,16 @@ mod tests {
             evidence_payload_json: "{\"normalization\":\"v1\"}".to_string(),
             idempotency_key: "idem-pre-sim-b".to_string(),
             correlation_id: "corr-pre-sim-2".to_string(),
-            computed_at: parse_ts("2026-02-24T02:31:00Z"),
-            created_at: parse_ts("2026-02-24T02:31:00Z"),
+            computed_at: parse_ts("2026-02-24T02:31:00Z")?,
+            created_at: parse_ts("2026-02-24T02:31:00Z")?,
         };
 
-        repo.save_similarity_evidence(similarity_a.clone()).await.expect("save similarity a");
-        repo.save_similarity_evidence(similarity_b).await.expect("save similarity b");
+        repo.save_similarity_evidence(similarity_a.clone())
+            .await
+            .map_err(|error| format!("save similarity a: {error}"))?;
+        repo.save_similarity_evidence(similarity_b)
+            .await
+            .map_err(|error| format!("save similarity b: {error}"))?;
         repo.save_similarity_evidence(PrecedentSimilarityEvidence {
             id: PrecedentSimilarityEvidenceId("pre-sim-a-rewrite".to_string()),
             source_quote_id: source_quote.clone(),
@@ -689,46 +751,73 @@ mod tests {
                 .to_string(),
             idempotency_key: "idem-pre-sim-a-rewrite".to_string(),
             correlation_id: "corr-pre-sim-1-rewrite".to_string(),
-            computed_at: parse_ts("2026-02-24T02:32:00Z"),
-            created_at: parse_ts("2026-02-24T02:32:00Z"),
+            computed_at: parse_ts("2026-02-24T02:32:00Z")?,
+            created_at: parse_ts("2026-02-24T02:32:00Z")?,
         })
         .await
-        .expect("rewrite similarity evidence");
+        .map_err(|error| format!("rewrite similarity evidence: {error}"))?;
 
         let filtered = repo
             .list_similarity_evidence_for_quote(&source_quote, 0.8, 10)
             .await
-            .expect("list filtered similarities");
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].id, similarity_a.id);
-        assert!((filtered[0].similarity_score - 0.95).abs() < f64::EPSILON);
-        assert_eq!(filtered[0].candidate_quote_id, candidate_a);
+            .map_err(|error| format!("list filtered similarities: {error}"))?;
+        if filtered.len() != 1 {
+            return Err(format!("expected 1 filtered row, got {}", filtered.len()));
+        }
+        if filtered[0].id != similarity_a.id {
+            return Err(format!(
+                "filtered similarity id mismatch: {:?} != {:?}",
+                filtered[0].id, similarity_a.id
+            ));
+        }
+        if (filtered[0].similarity_score - 0.95).abs() >= f64::EPSILON {
+            return Err("filtered similarity score mismatch".to_string());
+        }
+        if filtered[0].candidate_quote_id != candidate_a {
+            return Err(format!(
+                "filtered similarity candidate mismatch: {:?} != {:?}",
+                filtered[0].candidate_quote_id, candidate_a
+            ));
+        }
 
         let top_one = repo
             .list_similarity_evidence_for_quote(&source_quote, 0.0, 1)
             .await
-            .expect("list top similarity");
-        assert_eq!(top_one.len(), 1);
-        assert_eq!(top_one[0].similarity_score, 0.95);
+            .map_err(|error| format!("list top similarity: {error}"))?;
+        if top_one.len() != 1 {
+            return Err(format!("expected 1 top row, got {}", top_one.len()));
+        }
+        if top_one[0].similarity_score != 0.95 {
+            return Err(format!(
+                "top similarity score mismatch: {:?} != {:?}",
+                top_one[0].similarity_score, 0.95
+            ));
+        }
 
         let with_nan_threshold = repo
             .list_similarity_evidence_for_quote(&source_quote, f64::NAN, 10)
             .await
-            .expect("nan threshold should degrade to deterministic floor");
-        assert_eq!(with_nan_threshold.len(), 2);
+            .map_err(|error| format!("list nan threshold similarities: {error}"))?;
+        if with_nan_threshold.len() != 2 {
+            return Err(format!(
+                "expected 2 rows for nan threshold, got {}",
+                with_nan_threshold.len()
+            ));
+        }
 
         pool.close().await;
+        Ok(())
     }
 
-    async fn setup_pool() -> DbPool {
+    async fn setup_pool() -> TestResult<DbPool> {
         let pool = connect_with_settings("sqlite::memory:?cache=shared", 1, 30)
             .await
-            .expect("connect test pool");
-        migrations::run_pending(&pool).await.expect("run migrations");
-        pool
+            .map_err(|error| format!("connect test pool: {error}"))?;
+        migrations::run_pending(&pool).await.map_err(|error| format!("run migrations: {error}"))?;
+        Ok(pool)
     }
 
-    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId) {
+    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId) -> TestResult<()> {
         let now = Utc::now().to_rfc3339();
 
         sqlx::query(
@@ -740,10 +829,13 @@ mod tests {
         .bind(&now)
         .execute(pool)
         .await
-        .expect("insert quote fixture");
+        .map_err(|error| format!("insert quote fixture: {error}"))?;
+        Ok(())
     }
 
-    fn parse_ts(value: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(value).expect("valid rfc3339").with_timezone(&Utc)
+    fn parse_ts(value: &str) -> TestResult<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(value)
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+            .map_err(|error| format!("parse rfc3339 timestamp `{value}`: {error}"))
     }
 }

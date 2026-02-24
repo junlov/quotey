@@ -462,11 +462,13 @@ mod tests {
     use super::{ExplanationRepository, SqlExplanationRepository};
     use crate::{connect_with_settings, migrations, DbPool};
 
+    type TestResult<T> = Result<T, String>;
+
     #[tokio::test]
-    async fn sql_explanation_repo_round_trip_for_request_lifecycle() {
-        let pool = setup_pool().await;
+    async fn sql_explanation_repo_round_trip_for_request_lifecycle() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-EXP-REQ-001".to_string());
-        insert_quote(&pool, &quote_id).await;
+        insert_quote(&pool, &quote_id).await?;
         let repo = SqlExplanationRepository::new(pool.clone());
 
         let created = repo
@@ -480,36 +482,53 @@ mod tests {
                 quote_version: 2,
             })
             .await
-            .expect("create request");
+            .map_err(|error| format!("create request: {error}"))?;
 
-        let fetched = repo.get_request(&created.id).await.expect("get request");
-        assert_eq!(fetched, Some(created.clone()));
+        let fetched =
+            repo.get_request(&created.id).await.map_err(|error| format!("get request: {error}"))?;
+        if fetched != Some(created.clone()) {
+            return Err("request lifecycle: fetched request mismatch".to_string());
+        }
 
-        let listed = repo.list_requests_for_quote(&quote_id, 10).await.expect("list requests");
-        assert_eq!(listed.len(), 1);
-        assert_eq!(listed[0].id, created.id);
+        let listed = repo
+            .list_requests_for_quote(&quote_id, 10)
+            .await
+            .map_err(|error| format!("list requests: {error}"))?;
+        if listed.len() != 1 {
+            return Err("request lifecycle: list requests length mismatch".to_string());
+        }
+        if listed[0].id != created.id {
+            return Err("request lifecycle: listed request id mismatch".to_string());
+        }
 
         repo.update_request_status(&created.id, ExplanationStatus::Success, None, None, Some(120))
             .await
-            .expect("update status");
+            .map_err(|error| format!("update status: {error}"))?;
 
         let updated = repo
             .get_request(&created.id)
             .await
-            .expect("get updated request")
-            .expect("request exists");
-        assert_eq!(updated.status, ExplanationStatus::Success);
-        assert_eq!(updated.latency_ms, Some(120));
-        assert!(updated.completed_at.is_some());
+            .map_err(|error| format!("get updated request: {error}"))?
+            .ok_or_else(|| "updated request is missing".to_string())?;
+        if updated.status != ExplanationStatus::Success {
+            return Err("request lifecycle: updated status mismatch".to_string());
+        }
+        if updated.latency_ms != Some(120) {
+            return Err("request lifecycle: updated latency mismatch".to_string());
+        }
+        if updated.completed_at.is_none() {
+            return Err("request lifecycle: completed_at should be set".to_string());
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn sql_explanation_repo_round_trip_for_evidence_and_audit() {
-        let pool = setup_pool().await;
+    async fn sql_explanation_repo_round_trip_for_evidence_and_audit() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-EXP-REQ-002".to_string());
-        insert_quote(&pool, &quote_id).await;
+        insert_quote(&pool, &quote_id).await?;
         let repo = SqlExplanationRepository::new(pool.clone());
 
         let request = repo
@@ -523,7 +542,7 @@ mod tests {
                 quote_version: 1,
             })
             .await
-            .expect("create request");
+            .map_err(|error| format!("create request: {error}"))?;
 
         repo.add_evidence(
             &request.id,
@@ -534,7 +553,7 @@ mod tests {
             0,
         )
         .await
-        .expect("add evidence");
+        .map_err(|error| format!("add pricing evidence: {error}"))?;
 
         repo.add_evidence(
             &request.id,
@@ -545,12 +564,21 @@ mod tests {
             1,
         )
         .await
-        .expect("add evidence");
+        .map_err(|error| format!("add policy evidence: {error}"))?;
 
-        let evidence = repo.get_evidence_for_request(&request.id).await.expect("get evidence");
-        assert_eq!(evidence.len(), 2);
-        assert_eq!(evidence[0].display_order, 0);
-        assert_eq!(evidence[1].display_order, 1);
+        let evidence = repo
+            .get_evidence_for_request(&request.id)
+            .await
+            .map_err(|error| format!("get evidence: {error}"))?;
+        if evidence.len() != 2 {
+            return Err("evidence test: evidence count mismatch".to_string());
+        }
+        if evidence[0].display_order != 0 {
+            return Err("evidence test: first evidence order mismatch".to_string());
+        }
+        if evidence[1].display_order != 1 {
+            return Err("evidence test: second evidence order mismatch".to_string());
+        }
 
         repo.append_audit_event(
             &request.id,
@@ -561,7 +589,7 @@ mod tests {
             "corr-exp-req-2".to_string(),
         )
         .await
-        .expect("append audit received");
+        .map_err(|error| format!("append request-received audit: {error}"))?;
 
         repo.append_audit_event(
             &request.id,
@@ -572,21 +600,31 @@ mod tests {
             "corr-exp-req-2".to_string(),
         )
         .await
-        .expect("append audit delivered");
+        .map_err(|error| format!("append explanation-delivered audit: {error}"))?;
 
-        let audit = repo.get_audit_trail(&request.id).await.expect("get audit");
-        assert_eq!(audit.len(), 2);
-        assert_eq!(audit[0].event_type, ExplanationEventType::RequestReceived);
-        assert_eq!(audit[1].event_type, ExplanationEventType::ExplanationDelivered);
+        let audit = repo
+            .get_audit_trail(&request.id)
+            .await
+            .map_err(|error| format!("get audit: {error}"))?;
+        if audit.len() != 2 {
+            return Err("evidence test: audit count mismatch".to_string());
+        }
+        if audit[0].event_type != ExplanationEventType::RequestReceived {
+            return Err("evidence test: first audit event mismatch".to_string());
+        }
+        if audit[1].event_type != ExplanationEventType::ExplanationDelivered {
+            return Err("evidence test: second audit event mismatch".to_string());
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn sql_explanation_repo_stats_track_status_transitions() {
-        let pool = setup_pool().await;
+    async fn sql_explanation_repo_stats_track_status_transitions() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-EXP-REQ-003".to_string());
-        insert_quote(&pool, &quote_id).await;
+        insert_quote(&pool, &quote_id).await?;
         let repo = SqlExplanationRepository::new(pool.clone());
 
         let request = repo
@@ -600,13 +638,22 @@ mod tests {
                 quote_version: 1,
             })
             .await
-            .expect("create request");
+            .map_err(|error| format!("create request: {error}"))?;
 
-        let stats_after_create = repo.get_stats().await.expect("stats after create");
-        assert_eq!(stats_after_create.total_requests, 1);
-        assert_eq!(stats_after_create.success_count, 0);
-        assert_eq!(stats_after_create.error_count, 0);
-        assert_eq!(stats_after_create.missing_evidence_count, 0);
+        let stats_after_create =
+            repo.get_stats().await.map_err(|error| format!("stats after create: {error}"))?;
+        if stats_after_create.total_requests != 1 {
+            return Err("stats test: total_requests after create mismatch".to_string());
+        }
+        if stats_after_create.success_count != 0 {
+            return Err("stats test: success_count after create mismatch".to_string());
+        }
+        if stats_after_create.error_count != 0 {
+            return Err("stats test: error_count after create mismatch".to_string());
+        }
+        if stats_after_create.missing_evidence_count != 0 {
+            return Err("stats test: missing_evidence_count after create mismatch".to_string());
+        }
 
         repo.update_request_status(
             &request.id,
@@ -616,26 +663,36 @@ mod tests {
             Some(42),
         )
         .await
-        .expect("update to missing evidence");
+        .map_err(|error| format!("update status to missing evidence: {error}"))?;
 
-        let stats_after_update = repo.get_stats().await.expect("stats after update");
-        assert_eq!(stats_after_update.total_requests, 1);
-        assert_eq!(stats_after_update.success_count, 0);
-        assert_eq!(stats_after_update.error_count, 0);
-        assert_eq!(stats_after_update.missing_evidence_count, 1);
+        let stats_after_update =
+            repo.get_stats().await.map_err(|error| format!("stats after update: {error}"))?;
+        if stats_after_update.total_requests != 1 {
+            return Err("stats test: total_requests after update mismatch".to_string());
+        }
+        if stats_after_update.success_count != 0 {
+            return Err("stats test: success_count after update mismatch".to_string());
+        }
+        if stats_after_update.error_count != 0 {
+            return Err("stats test: error_count after update mismatch".to_string());
+        }
+        if stats_after_update.missing_evidence_count != 1 {
+            return Err("stats test: missing_evidence_count after update mismatch".to_string());
+        }
 
         pool.close().await;
+        Ok(())
     }
 
-    async fn setup_pool() -> DbPool {
+    async fn setup_pool() -> TestResult<DbPool> {
         let pool = connect_with_settings("sqlite::memory:?cache=shared", 1, 30)
             .await
-            .expect("connect test pool");
-        migrations::run_pending(&pool).await.expect("run migrations");
-        pool
+            .map_err(|error| format!("connect test pool: {error}"))?;
+        migrations::run_pending(&pool).await.map_err(|error| format!("run migrations: {error}"))?;
+        Ok(pool)
     }
 
-    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId) {
+    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId) -> TestResult<()> {
         let timestamp = "2026-02-24T00:00:00Z";
         sqlx::query(
             "INSERT INTO quote (id, status, currency, created_by, created_at, updated_at)
@@ -646,6 +703,7 @@ mod tests {
         .bind(timestamp)
         .execute(pool)
         .await
-        .expect("insert quote");
+        .map_err(|error| format!("insert quote fixture {}: {error}", quote_id.0))?;
+        Ok(())
     }
 }

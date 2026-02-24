@@ -452,25 +452,32 @@ mod tests {
     use crate::repositories::{ExecutionQueueRepository, IdempotencyRepository};
     use crate::{connect_with_settings, DbPool};
 
+    type TestResult<T> = Result<T, String>;
+
     #[tokio::test]
-    async fn sql_execution_queue_repo_round_trip_for_task_and_transition() {
-        let pool = setup_pool().await;
+    async fn sql_execution_queue_repo_round_trip_for_task_and_transition() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-REL-001".to_string());
-        insert_quote(&pool, &quote_id).await;
+        insert_quote(&pool, &quote_id).await?;
 
         let repo = SqlExecutionQueueRepository::new(pool.clone());
-        let task = sample_task(&quote_id);
+        let task = sample_task(&quote_id)?;
 
-        repo.save_task(task.clone()).await.expect("save task");
+        repo.save_task(task.clone()).await.map_err(|error| format!("save task: {error}"))?;
 
-        let found = repo.find_task_by_id(&task.id).await.expect("find task");
-        assert_eq!(found, Some(task.clone()));
+        let found =
+            repo.find_task_by_id(&task.id).await.map_err(|error| format!("find task: {error}"))?;
+        if found != Some(task.clone()) {
+            return Err("find task returned unexpected value".to_string());
+        }
 
         let queued_tasks = repo
             .list_tasks_for_quote(&quote_id, Some(ExecutionTaskState::Queued))
             .await
-            .expect("list queued tasks");
-        assert_eq!(queued_tasks, vec![task.clone()]);
+            .map_err(|error| format!("list queued tasks: {error}"))?;
+        if queued_tasks != vec![task.clone()] {
+            return Err("list queued tasks returned unexpected values".to_string());
+        }
 
         let transition = ExecutionTransitionEvent {
             id: ExecutionTransitionId("trans-1".to_string()),
@@ -486,22 +493,30 @@ mod tests {
             idempotency_key: Some(task.idempotency_key.clone()),
             correlation_id: "corr-rel-001".to_string(),
             state_version: 2,
-            occurred_at: parse_ts("2026-02-23T12:01:00Z"),
+            occurred_at: parse_ts("2026-02-23T12:01:00Z")?,
         };
 
-        repo.append_transition(transition.clone()).await.expect("append transition");
+        repo.append_transition(transition.clone())
+            .await
+            .map_err(|error| format!("append transition: {error}"))?;
 
-        let transitions = repo.list_transitions_for_task(&task.id).await.expect("list transitions");
-        assert_eq!(transitions, vec![transition]);
+        let transitions = repo
+            .list_transitions_for_task(&task.id)
+            .await
+            .map_err(|error| format!("list transitions: {error}"))?;
+        if transitions != vec![transition] {
+            return Err("list transitions returned unexpected values".to_string());
+        }
 
         pool.close().await;
+        Ok(())
     }
 
     #[tokio::test]
-    async fn sql_execution_queue_repo_round_trip_for_idempotency_record() {
-        let pool = setup_pool().await;
+    async fn sql_execution_queue_repo_round_trip_for_idempotency_record() -> TestResult<()> {
+        let pool = setup_pool().await?;
         let quote_id = QuoteId("Q-REL-002".to_string());
-        insert_quote(&pool, &quote_id).await;
+        insert_quote(&pool, &quote_id).await?;
 
         let repo = SqlExecutionQueueRepository::new(pool.clone());
         let operation = IdempotencyRecord {
@@ -511,49 +526,61 @@ mod tests {
             payload_hash: "sha256:abcd".to_string(),
             state: IdempotencyRecordState::Reserved,
             attempt_count: 1,
-            first_seen_at: parse_ts("2026-02-23T12:00:00Z"),
-            last_seen_at: parse_ts("2026-02-23T12:00:00Z"),
+            first_seen_at: parse_ts("2026-02-23T12:00:00Z")?,
+            last_seen_at: parse_ts("2026-02-23T12:00:00Z")?,
             result_snapshot_json: None,
             error_snapshot_json: None,
-            expires_at: Some(parse_ts("2026-03-01T12:00:00Z")),
+            expires_at: Some(parse_ts("2026-03-01T12:00:00Z")?),
             correlation_id: "corr-rel-002".to_string(),
             created_by_component: "slack-ingress".to_string(),
             updated_by_component: "slack-ingress".to_string(),
         };
 
-        repo.save_operation(operation.clone()).await.expect("save operation");
+        repo.save_operation(operation.clone())
+            .await
+            .map_err(|error| format!("save operation: {error}"))?;
 
-        let found = repo.find_operation(&operation.operation_key).await.expect("find operation");
-        assert_eq!(found, Some(operation.clone()));
+        let found = repo
+            .find_operation(&operation.operation_key)
+            .await
+            .map_err(|error| format!("find operation: {error}"))?;
+        if found != Some(operation.clone()) {
+            return Err("find operation returned unexpected value".to_string());
+        }
 
         let mut updated_operation = operation.clone();
         updated_operation.state = IdempotencyRecordState::Completed;
         updated_operation.attempt_count = 2;
-        updated_operation.last_seen_at = parse_ts("2026-02-23T12:05:00Z");
+        updated_operation.last_seen_at = parse_ts("2026-02-23T12:05:00Z")?;
         updated_operation.result_snapshot_json =
             Some("{\"result\":\"already-delivered\"}".to_string());
         updated_operation.updated_by_component = "queue-worker".to_string();
 
-        repo.save_operation(updated_operation.clone()).await.expect("update operation");
+        repo.save_operation(updated_operation.clone())
+            .await
+            .map_err(|error| format!("update operation: {error}"))?;
 
         let found_updated = repo
             .find_operation(&updated_operation.operation_key)
             .await
-            .expect("find updated operation");
-        assert_eq!(found_updated, Some(updated_operation));
+            .map_err(|error| format!("find updated operation: {error}"))?;
+        if found_updated != Some(updated_operation) {
+            return Err("find updated operation returned unexpected value".to_string());
+        }
 
         pool.close().await;
+        Ok(())
     }
 
-    async fn setup_pool() -> DbPool {
+    async fn setup_pool() -> TestResult<DbPool> {
         let pool = connect_with_settings("sqlite::memory:?cache=shared", 1, 30)
             .await
-            .expect("connect test pool");
-        migrations::run_pending(&pool).await.expect("run migrations");
-        pool
+            .map_err(|error| format!("connect test pool: {error}"))?;
+        migrations::run_pending(&pool).await.map_err(|error| format!("run migrations: {error}"))?;
+        Ok(pool)
     }
 
-    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId) {
+    async fn insert_quote(pool: &DbPool, quote_id: &QuoteId) -> TestResult<()> {
         let timestamp = "2026-02-23T12:00:00Z";
 
         sqlx::query(
@@ -565,11 +592,12 @@ mod tests {
         .bind(timestamp)
         .execute(pool)
         .await
-        .expect("insert quote");
+        .map_err(|error| format!("insert quote fixture {}: {error}", quote_id.0))?;
+        Ok(())
     }
 
-    fn sample_task(quote_id: &QuoteId) -> ExecutionTask {
-        ExecutionTask {
+    fn sample_task(quote_id: &QuoteId) -> TestResult<ExecutionTask> {
+        Ok(ExecutionTask {
             id: ExecutionTaskId("task-rel-001".to_string()),
             quote_id: quote_id.clone(),
             operation_kind: "crm.write_quote".to_string(),
@@ -578,18 +606,20 @@ mod tests {
             state: ExecutionTaskState::Queued,
             retry_count: 0,
             max_retries: 5,
-            available_at: parse_ts("2026-02-23T12:00:00Z"),
+            available_at: parse_ts("2026-02-23T12:00:00Z")?,
             claimed_by: None,
             claimed_at: None,
             last_error: None,
             result_fingerprint: None,
             state_version: 1,
-            created_at: parse_ts("2026-02-23T12:00:00Z"),
-            updated_at: parse_ts("2026-02-23T12:00:00Z"),
-        }
+            created_at: parse_ts("2026-02-23T12:00:00Z")?,
+            updated_at: parse_ts("2026-02-23T12:00:00Z")?,
+        })
     }
 
-    fn parse_ts(value: &str) -> DateTime<Utc> {
-        DateTime::parse_from_rfc3339(value).expect("valid rfc3339").with_timezone(&Utc)
+    fn parse_ts(value: &str) -> TestResult<DateTime<Utc>> {
+        DateTime::parse_from_rfc3339(value)
+            .map(|timestamp| timestamp.with_timezone(&Utc))
+            .map_err(|error| format!("invalid timestamp `{value}`: {error}"))
     }
 }
