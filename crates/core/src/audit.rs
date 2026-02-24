@@ -98,13 +98,19 @@ pub struct InMemoryAuditSink {
 
 impl InMemoryAuditSink {
     pub fn events(&self) -> Vec<AuditEvent> {
-        self.events.lock().expect("audit sink lock").clone()
+        match self.events.lock() {
+            Ok(events) => events.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 }
 
 impl AuditSink for InMemoryAuditSink {
     fn emit(&self, event: AuditEvent) {
-        self.events.lock().expect("audit sink lock").push(event);
+        match self.events.lock() {
+            Ok(mut events) => events.push(event),
+            Err(poisoned) => poisoned.into_inner().push(event),
+        }
     }
 }
 

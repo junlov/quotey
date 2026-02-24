@@ -87,7 +87,10 @@ impl AgentRuntime {
     }
 
     pub fn audit_events(&self) -> Vec<RuntimeAuditEvent> {
-        self.audit_events.lock().expect("audit event lock should not be poisoned").clone()
+        match self.audit_events.lock() {
+            Ok(events) => events.clone(),
+            Err(poisoned) => poisoned.into_inner().clone(),
+        }
     }
 
     pub async fn handle_thread_message(&self, text: &str) -> Result<String> {
@@ -97,7 +100,10 @@ impl AgentRuntime {
     }
 
     fn record_audit_event(&self, event: RuntimeAuditEvent) {
-        self.audit_events.lock().expect("audit event lock should not be poisoned").push(event);
+        match self.audit_events.lock() {
+            Ok(mut events) => events.push(event),
+            Err(poisoned) => poisoned.into_inner().push(event),
+        }
     }
 }
 
