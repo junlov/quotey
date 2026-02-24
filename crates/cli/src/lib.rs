@@ -21,9 +21,7 @@ enum Command {
     Start,
     #[command(about = "Apply pending database migrations and return structured status output")]
     Migrate,
-    #[command(
-        about = "Load deterministic demo fixtures (currently a deterministic no-op scaffold)"
-    )]
+    #[command(about = "Load deterministic E2E seed data and verify core quote flows")]
     Seed,
     #[command(about = "Run end-to-end readiness checks with per-check timing details")]
     Smoke,
