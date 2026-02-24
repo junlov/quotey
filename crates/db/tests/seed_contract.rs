@@ -69,7 +69,7 @@ fn seed_contract_matches_e2e_seed_sql_fixture() {
         assert!(!flow.quote_id.is_empty());
         assert!(!flow.status.is_empty());
         assert!(!flow.current_step.is_empty());
-        assert_eq!(flow.expected_line_count > 0, true);
+        assert!(flow.expected_line_count > 0);
         assert!(flow.step_number >= 1);
         assert!(!flow.account_id.is_empty());
         assert!(!flow.deal_id.is_empty());
@@ -170,11 +170,11 @@ fn seed_contract_matches_e2e_seed_sql_fixture() {
                 "renewal prior quote should be seeded with sent status"
             );
             assert!(
-                fixture_sql.contains(&format!("'ql-renewal-prior-001-1'")),
+                fixture_sql.contains("'ql-renewal-prior-001-1'"),
                 "renewal prior quote should include deterministic line 1"
             );
             assert!(
-                fixture_sql.contains(&format!("'ql-renewal-prior-001-2'")),
+                fixture_sql.contains("'ql-renewal-prior-001-2'"),
                 "renewal prior quote should include deterministic line 2"
             );
         }
@@ -455,12 +455,7 @@ fn resilience_fault_contract_shape_is_deterministic() {
         .collect::<Vec<_>>();
     assert_eq!(
         phases,
-        vec![
-            "seed_load",
-            "policy_evaluation",
-            "pricing_evaluation",
-            "approval_routing"
-        ]
+        vec!["seed_load", "policy_evaluation", "pricing_evaluation", "approval_routing"]
     );
 
     for entry in phase_fault_matrix {
@@ -529,9 +524,8 @@ fn resilience_fault_contract_phase_rules_are_deterministic() {
 
     for entry in phase_fault_matrix {
         let phase = entry["phase"].as_str().expect("phase should be present");
-        let expected_outcome = entry["expected_outcome"]
-            .as_str()
-            .expect("expected_outcome should be present");
+        let expected_outcome =
+            entry["expected_outcome"].as_str().expect("expected_outcome should be present");
         let expected_retryable = entry["retryable"].as_bool().unwrap_or(false);
         let expected_retry_window = entry["expected_retry_window_sec"].as_array();
         let max_retries = entry["max_retries"].as_u64().unwrap_or(0);

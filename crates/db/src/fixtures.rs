@@ -140,7 +140,7 @@ impl E2ESeedDataset {
                     .bind(flow.quote_id)
                     .fetch_one(pool)
                     .await?;
-            checks.push((&flow.line_count_label(), line_count == flow.expected_line_count));
+            checks.push((flow.line_count_label(), line_count == flow.expected_line_count));
 
             let state_ok: i64 = sqlx::query_scalar(
                 "SELECT EXISTS(SELECT 1 FROM flow_state WHERE quote_id = ?1 AND flow_type = ?2 AND current_step = ?3 AND step_number = ?4)",
@@ -151,7 +151,7 @@ impl E2ESeedDataset {
             .bind(flow.step_number)
             .fetch_one(pool)
             .await?;
-            checks.push((&flow.state_label(), state_ok == 1));
+            checks.push((flow.state_label(), state_ok == 1));
 
             checks.push((flow.metadata_label(), Self::verify_flow_metadata(pool, flow).await?));
             checks
@@ -234,16 +234,13 @@ impl E2ESeedDataset {
         if metadata.get("policy_profile").and_then(Value::as_str) != Some(flow.policy_profile) {
             return Ok(false);
         }
-        let product_names = metadata
-            .get("product_names")
-            .and_then(Value::as_array)
-            .map(|values| {
+        let product_names =
+            metadata.get("product_names").and_then(Value::as_array).and_then(|values| {
                 values
                     .iter()
                     .map(|value| value.as_str().map(String::from))
                     .collect::<Option<Vec<_>>>()
-            })
-            .flatten();
+            });
         if let Some(product_names) = product_names {
             if !json_string_list_matches(&product_names, flow.product_names) {
                 return Ok(false);
@@ -562,25 +559,20 @@ mod tests {
 
     #[test]
     fn seed_contract_json_matches_rust_seed_constants() {
-        let contract: serde_json::Value = serde_json::from_str(include_str!(
-            "../../../config/fixtures/e2e_seed_contract.json"
-        ))
-        .expect("e2e seed contract JSON must parse");
+        let contract: serde_json::Value =
+            serde_json::from_str(include_str!("../../../config/fixtures/e2e_seed_contract.json"))
+                .expect("e2e seed contract JSON must parse");
 
         assert_eq!(contract["dataset_version"].as_str(), Some("bd-3vp2.7.2"));
         assert_eq!(contract["seed_dataset"].as_str(), Some("deterministic_e2e_core_flows"));
 
-        let contract_flows = contract["flows"]
-            .as_array()
-            .expect("flows should be an array");
+        let contract_flows = contract["flows"].as_array().expect("flows should be an array");
         assert_eq!(contract_flows.len(), SEED_FLOWS.len());
 
         for flow in SEED_FLOWS {
             let contract_flow = contract_flows
                 .iter()
-                .find(|candidate| {
-                    candidate["flow_type"].as_str() == Some(flow.flow_type)
-                })
+                .find(|candidate| candidate["flow_type"].as_str() == Some(flow.flow_type))
                 .expect("contract should include all canonical flow types");
 
             assert_eq!(contract_flow["flow_type"].as_str(), Some(flow.flow_type));
@@ -638,7 +630,10 @@ mod tests {
             );
 
             if let Some(requested) = flow.requested_discount_pct {
-                assert_eq!(contract_flow["requested_discount_pct"].as_u64(), Some(u64::from(requested)));
+                assert_eq!(
+                    contract_flow["requested_discount_pct"].as_u64(),
+                    Some(u64::from(requested))
+                );
             } else {
                 assert!(contract_flow.get("requested_discount_pct").is_none());
             }
@@ -651,7 +646,7 @@ mod tests {
             if let Some(prior_quote_id) = flow.prior_quote_id {
                 assert_eq!(contract_flow["prior_quote_id"].as_str(), Some(prior_quote_id));
             } else {
-                assert!(contract_flow.get("prior_quote_id").is_none());
+                assert!(contract_flow.get("prior_quote_id").is_none_or(Value::is_null));
             }
         }
     }
