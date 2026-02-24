@@ -1,10 +1,11 @@
 use std::{sync::Arc, time::Duration};
 
-use anyhow::Result;
+use anyhow::{anyhow, Result};
 use async_trait::async_trait;
 use thiserror::Error;
 use tracing::{debug, info, warn};
 
+use crate::commands::action_quote_id;
 use crate::events::{
     default_dispatcher, DispatchError, EventContext, EventDispatcher, SlackEnvelope, SlackEvent,
 };
@@ -57,6 +58,10 @@ pub trait SocketTransport: Send + Sync {
     async fn next_envelope(&self) -> Result<Option<SlackEnvelope>, TransportError>;
     async fn acknowledge(&self, envelope_id: &str) -> Result<(), TransportError>;
     async fn disconnect(&self) -> Result<(), TransportError>;
+
+    fn is_noop(&self) -> bool {
+        false
+    }
 }
 
 #[derive(Default)]
@@ -79,12 +84,17 @@ impl SocketTransport for NoopSocketTransport {
     async fn disconnect(&self) -> Result<(), TransportError> {
         Ok(())
     }
+
+    fn is_noop(&self) -> bool {
+        true
+    }
 }
 
 pub struct SocketModeRunner {
     transport: Arc<dyn SocketTransport>,
     dispatcher: EventDispatcher,
     reconnect_policy: ReconnectPolicy,
+    is_noop_transport: bool,
 }
 
 impl Default for SocketModeRunner {
@@ -93,6 +103,7 @@ impl Default for SocketModeRunner {
             transport: Arc::new(NoopSocketTransport),
             dispatcher: default_dispatcher(),
             reconnect_policy: ReconnectPolicy::default(),
+            is_noop_transport: true,
         }
     }
 }
@@ -103,10 +114,28 @@ impl SocketModeRunner {
         dispatcher: EventDispatcher,
         reconnect_policy: ReconnectPolicy,
     ) -> Self {
-        Self { transport, dispatcher, reconnect_policy }
+        Self { is_noop_transport: transport.is_noop(), transport, dispatcher, reconnect_policy }
+    }
+
+    pub fn is_noop_transport(&self) -> bool {
+        self.is_noop_transport
     }
 
     pub async fn start(&self) -> Result<()> {
+        if self.is_noop_transport {
+            info!(
+                event_name = "system.slack.transport_mode",
+                transport = "noop",
+                "slack transport is running in no-op mode"
+            );
+        } else {
+            info!(
+                event_name = "system.slack.transport_mode",
+                transport = "socket",
+                "slack transport is running in socket mode"
+            );
+        }
+
         for attempt in 0..=self.reconnect_policy.max_retries {
             match self.connect_and_pump(attempt).await {
                 Ok(()) => return Ok(()),
@@ -121,9 +150,14 @@ impl SocketModeRunner {
                     if attempt >= self.reconnect_policy.max_retries {
                         warn!(
                             max_retries = self.reconnect_policy.max_retries,
-                            "socket mode retries exhausted; continuing process without crash"
+                            "socket mode retries exhausted after {} attempts; returning startup error",
+                            attempt + 1
                         );
-                        return Ok(());
+                        return Err(anyhow!(
+                            "socket mode retries exhausted after {} attempts: {}",
+                            attempt + 1,
+                            transport_error
+                        ));
                     }
 
                     let delay = self.reconnect_policy.backoff(attempt);
@@ -199,30 +233,37 @@ impl SocketModeRunner {
 fn correlation_fields(envelope: &SlackEnvelope) -> (Option<String>, Option<String>) {
     match &envelope.event {
         SlackEvent::ThreadMessage(event) => {
-            (quote_id_from_text(&event.text).map(str::to_owned), Some(event.thread_ts.clone()))
+            (quote_id_from_text(&event.text), Some(event.thread_ts.clone()))
         }
         SlackEvent::ReactionAdded(event) => (
             event.quote_id.clone(),
             event.thread_ts.clone().or_else(|| Some(event.message_ts.clone())),
         ),
-        SlackEvent::SlashCommand(payload) => {
-            (quote_id_from_text(&payload.text).map(str::to_owned), None)
-        }
+        SlackEvent::SlashCommand(payload) => (quote_id_from_text(&payload.text), None),
+        SlackEvent::BlockAction(event) => (
+            event.quote_id.clone().or_else(|| {
+                let quote_id = action_quote_id(event.value.as_deref(), None);
+                (quote_id != "unknown").then_some(quote_id)
+            }),
+            event.thread_ts.clone().or_else(|| Some(event.message_ts.clone())),
+        ),
         SlackEvent::Unsupported { .. } => (None, None),
     }
 }
 
-fn quote_id_from_text(text: &str) -> Option<&str> {
+fn quote_id_from_text(text: &str) -> Option<String> {
     text.split_whitespace().find_map(|token| {
         let candidate = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-');
+        let normalized = candidate.to_ascii_uppercase();
         let bytes = candidate.as_bytes();
+        let normalized_bytes = normalized.as_bytes();
         if bytes.len() == 11
-            && candidate.starts_with("Q-")
-            && bytes[2..6].iter().all(u8::is_ascii_digit)
-            && bytes[6] == b'-'
-            && bytes[7..11].iter().all(u8::is_ascii_digit)
+            && normalized.starts_with("Q-")
+            && normalized_bytes[2..6].iter().all(u8::is_ascii_digit)
+            && normalized_bytes[6] == b'-'
+            && normalized_bytes[7..11].iter().all(u8::is_ascii_digit)
         {
-            Some(candidate)
+            Some(normalized)
         } else {
             None
         }
@@ -234,7 +275,9 @@ mod tests {
     use std::collections::VecDeque;
     use std::sync::Arc;
 
-    use super::{ReconnectPolicy, SocketModeRunner, SocketTransport, TransportError};
+    use super::{
+        NoopSocketTransport, ReconnectPolicy, SocketModeRunner, SocketTransport, TransportError,
+    };
     use crate::events::{EventDispatcher, SlackEnvelope, SlackEvent};
     use async_trait::async_trait;
     use tokio::sync::Mutex;
@@ -353,8 +396,39 @@ mod tests {
             ReconnectPolicy { max_retries: 2, base_delay_ms: 0, max_delay_ms: 0 },
         );
 
-        runner.start().await.expect("runner should degrade gracefully");
+        assert!(runner.start().await.is_err());
         assert_eq!(transport.connect_attempts().await, 3);
+    }
+
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
+    #[test]
+    fn default_transport_mode_is_noop() {
+        let runner = SocketModeRunner::default();
+        assert!(runner.is_noop_transport());
+    }
+
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
+    #[test]
+    fn new_runner_transport_mode_is_configured() {
+        let runner = SocketModeRunner::new(
+            Arc::new(NoopSocketTransport),
+            EventDispatcher::default(),
+            ReconnectPolicy::default(),
+        );
+        assert!(runner.is_noop_transport());
+    }
+
+    #[test]
+    fn new_runner_transport_mode_reflects_non_noop_transport() {
+        let transport =
+            Arc::new(ScriptedTransport::with_script(vec![Ok(())], vec![Ok(None)], vec![Ok(())]));
+        let runner = SocketModeRunner::new(
+            transport,
+            EventDispatcher::default(),
+            ReconnectPolicy::default(),
+        );
+
+        assert!(!runner.is_noop_transport());
     }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
@@ -415,5 +489,45 @@ mod tests {
         let (quote_id, thread_id) = super::correlation_fields(&envelope);
         assert_eq!(quote_id.as_deref(), Some("Q-2026-0043"));
         assert_eq!(thread_id.as_deref(), Some("1730000000.2500"));
+    }
+
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
+    #[test]
+    fn extracts_quote_and_thread_correlation_fields_from_block_actions() {
+        let envelope = SlackEnvelope {
+            envelope_id: "env-5".to_owned(),
+            event: SlackEvent::BlockAction(crate::events::BlockActionEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000000.3000".to_owned(),
+                thread_ts: Some("1730000000.1000".to_owned()),
+                user_id: "U10".to_owned(),
+                action_id: "quote.refresh.v1".to_owned(),
+                value: Some("quote=Q-2026-0050".to_owned()),
+                quote_id: None,
+                request_id: Some("req-block".to_owned()),
+            }),
+        };
+
+        let (quote_id, thread_id) = super::correlation_fields(&envelope);
+        assert_eq!(quote_id.as_deref(), Some("Q-2026-0050"));
+        assert_eq!(thread_id.as_deref(), Some("1730000000.1000"));
+    }
+
+    #[test]
+    fn extracts_lowercase_quote_id_from_slash_command_text() {
+        let envelope = SlackEnvelope {
+            envelope_id: "env-6".to_owned(),
+            event: SlackEvent::SlashCommand(crate::commands::SlashCommandPayload {
+                command: "/quote".to_owned(),
+                text: "status q-2026-0042".to_owned(),
+                channel_id: "C1".to_owned(),
+                user_id: "U10".to_owned(),
+                trigger_ts: "1730000000.3000".to_owned(),
+                request_id: "req-6".to_owned(),
+            }),
+        };
+
+        let (quote_id, _) = super::correlation_fields(&envelope);
+        assert_eq!(quote_id.as_deref(), Some("Q-2026-0042"));
     }
 }
