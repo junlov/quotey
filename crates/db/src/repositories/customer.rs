@@ -1,5 +1,6 @@
 use quotey_core::domain::customer::{Customer, CustomerId};
 
+use super::RepositoryError;
 use crate::DbPool;
 
 pub struct SqlCustomerRepository {
@@ -11,9 +12,12 @@ impl SqlCustomerRepository {
         Self { _pool: pool }
     }
 
-    pub async fn find_by_id(&self, _id: &CustomerId) -> Result<Option<Customer>, sqlx::Error> {
-        let _ = &_id;
+    pub async fn find_by_id(&self, _id: &CustomerId) -> Result<Option<Customer>, RepositoryError> {
+        let _ = _id;
         let _ = &self._pool;
-        Err(sqlx::Error::RowNotFound)
+        Err(RepositoryError::Decode(
+            "SqlCustomerRepository is unavailable: customer tables are not present in current schema"
+                .to_string(),
+        ))
     }
 }
