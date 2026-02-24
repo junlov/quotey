@@ -225,9 +225,7 @@ impl MappedLine {
 
     fn as_quote_line(&self) -> QuoteLine {
         let unit_price =
-            cents_to_decimal_string(self.catalog_item.unit_price_cents).parse().unwrap_or_else(
-                |_| "0.00".parse().expect("decimal parser must support literal fallback"),
-            );
+            cents_to_decimal_string(self.catalog_item.unit_price_cents).parse().unwrap_or_default();
 
         QuoteLine {
             product_id: self.catalog_item.product_id.clone(),
@@ -301,7 +299,7 @@ fn total_cents(mapped_lines: &[MappedLine]) -> i64 {
 
 fn cents_to_decimal_string(cents: i64) -> String {
     let sign = if cents < 0 { "-" } else { "" };
-    let absolute = cents.abs();
+    let absolute = cents.unsigned_abs();
     format!("{sign}{}.{:02}", absolute / 100, absolute % 100)
 }
 
