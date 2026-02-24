@@ -2,7 +2,7 @@
 
 **Maintainer:** ResearchAgent (kimi-k2)  
 **Last Updated:** 2026-02-24  
-**Total Documents:** 29
+**Total Documents:** 30
 
 ---
 
@@ -41,6 +41,7 @@
 | Document | Feature | Description | Size |
 |----------|---------|-------------|------|
 | `W2_CLO_CLOSED_LOOP_POLICY_OPTIMIZER_SPEC.md` | CLO | Closed-loop, replay-gated, human-approved policy optimization | 10KB |
+| `W2_NXT_DETERMINISTIC_NEGOTIATION_AUTOPILOT_SPEC.md` | NXT | Deterministic negotiation autopilot with bounded counteroffers and replayable guardrails | 15KB |
 
 ### AI-Native CPQ Feature Research (FEAT-XX)
 
@@ -172,9 +173,9 @@
 
 | Metric | Value |
 |--------|-------|
-| Total Documents | 29 |
+| Total Documents | 30 |
 | Research Documents | 7 |
-| Spec Documents | 11 |
+| Spec Documents | 12 |
 | Foundation Docs | 8 |
 | Total Lines | ~15,000+ |
 | Total Size | ~500KB+ |

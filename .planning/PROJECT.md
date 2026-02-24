@@ -59,6 +59,7 @@ proving exactly how every number was calculated.
 - [ ] CLI tools for admin, catalog management, and debugging
 - [ ] Configuration rules and pricing policies stored in SQLite, manageable via CLI without recompilation
 - [ ] Closed-loop policy optimizer that proposes rule improvements from outcomes, gates changes with deterministic replay, requires human approval, and supports signed rollback
+- [ ] Deterministic negotiation autopilot that proposes bounded counteroffers in Slack, enforces concession guardrails, escalates out-of-policy offers, and preserves replayable audit evidence
 
 ### Out of Scope
 
@@ -160,6 +161,11 @@ its pricing and policy layer by proposing candidate rule updates from historical
 then validating those candidates through deterministic replay and blast-radius scoring before
 any human approval. This allows accretive policy evolution without allowing non-deterministic
 or unaudited mutation of production rules.
+
+**Deterministic negotiation autopilot with bounded counteroffers.** Quotey can propose next-best
+offers during live negotiation by combining deterministic concession envelopes, hard floor/ceiling
+guardrails, and approval escalation hooks. This accelerates deal cycles while ensuring every
+suggestion is reproducible, policy-safe, and audit-replayable.
 
 ### The Safety Principle
 

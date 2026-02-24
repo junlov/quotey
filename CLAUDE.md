@@ -44,6 +44,11 @@ If instructions conflict, resolve in this order:
 - `workflow.plan_check: true`: validate planned edits against `.planning/PROJECT.md` scope and decisions.
 - `workflow.verifier: true`: run appropriate verification after edits (tests, lint, targeted checks).
 
+## Current Wave 2 Planning Tracks
+
+- `W2_CLO_CLOSED_LOOP_POLICY_OPTIMIZER_SPEC.md` (CLO): deterministic replay-gated, human-approved policy optimization.
+- `W2_NXT_DETERMINISTIC_NEGOTIATION_AUTOPILOT_SPEC.md` (NXT): deterministic negotiation autopilot with bounded counteroffers and approval escalation hooks.
+
 ## Project Guardrails From `.planning/PROJECT.md`
 
 - Build a Rust, local-first CPQ agent for Slack (Socket Mode primary, CLI secondary).
