@@ -4,6 +4,7 @@ pub use chrono;
 pub mod approvals;
 pub mod archaeology;
 pub mod audit;
+pub mod autopsy;
 pub mod collab;
 pub mod config;
 pub mod cpq;
@@ -25,6 +26,13 @@ pub use archaeology::{
     CatalogConstraint, ConstraintEdgeType, DependencyEdge, DependencyGraph, DependencyGraphEngine,
     DependencyNode, GraphAnalysis, GraphBlockage, ResolutionPath,
 };
+pub use autopsy::{
+    AlternativeDecision, AttributionGraphBuilder, AttributionGraphSnapshot, AuditTrailEntry,
+    AutopsyError, AutopsyInput, AutopsyReport, CounterfactualEngine, CounterfactualError,
+    CounterfactualRequest, CounterfactualResponse, DealAutopsyEngine, ForkComparison,
+    GenomeFinding, GenomeQueryError, GenomeQueryRequest, GenomeQueryResponse,
+    RevenueGenomeQueryEngine,
+};
 pub use collab::{
     OperationAuthority, OperationHistoryEntry, OperationStatus, OperationType,
     OperationalTransform, QuoteOperation, TransformResult,
@@ -35,6 +43,7 @@ pub use dna::{
     FingerprintSnapshot, SimilarDeal, SimilarityCandidate, SimilarityEngine,
 };
 pub use domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
+pub use domain::autopsy::*;
 pub use domain::execution::{
     ExecutionTask, ExecutionTaskId, ExecutionTaskState, ExecutionTransitionEvent,
     ExecutionTransitionId, IdempotencyRecord, IdempotencyRecordState, OperationKey,

@@ -41,6 +41,13 @@ enum Command {
         #[command(subcommand)]
         command: PolicyPacketCommand,
     },
+    #[command(
+        about = "Revenue Genome: deal autopsy, attribution graph, and counterfactual simulation"
+    )]
+    Genome {
+        #[command(subcommand)]
+        command: GenomeCommand,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -70,6 +77,36 @@ enum PolicyPacketCommand {
         decision: String,
         #[arg(long, help = "Reason text (required for reject/request_changes)")]
         reason: Option<String>,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+enum GenomeCommand {
+    #[command(about = "Perform a deal autopsy on a terminal quote")]
+    Autopsy {
+        #[arg(long, help = "Autopsy input JSON payload (AutopsyInput)")]
+        input_json: String,
+    },
+    #[command(about = "Query the Revenue Genome for strategy insights")]
+    Query {
+        #[arg(long, help = "Genome query JSON payload (GenomeQueryRequest)")]
+        query_json: String,
+        #[arg(long, help = "Attribution graph JSON (AttributionGraphSnapshot)")]
+        graph_json: String,
+    },
+    #[command(about = "Run a counterfactual simulation")]
+    Counterfactual {
+        #[arg(long, help = "Counterfactual request JSON (CounterfactualRequest)")]
+        request_json: String,
+        #[arg(long, help = "Original autopsy report JSON (AutopsyReport)")]
+        original_report_json: String,
+        #[arg(long, help = "Attribution graph JSON (AttributionGraphSnapshot)")]
+        graph_json: String,
+    },
+    #[command(about = "Build an attribution graph from autopsy inputs")]
+    BuildGraph {
+        #[arg(long, help = "JSON array of AutopsyInput payloads")]
+        reports_json: String,
     },
 }
 
@@ -105,6 +142,18 @@ pub fn run() -> ExitCode {
             ),
             PolicyPacketCommand::Action { packet_json, decision, reason } => {
                 commands::policy_packet::run_action(packet_json, decision, reason)
+            }
+        },
+        Command::Genome { command } => match command {
+            GenomeCommand::Autopsy { input_json } => commands::genome::run_autopsy(input_json),
+            GenomeCommand::Query { query_json, graph_json } => {
+                commands::genome::run_query(query_json, graph_json)
+            }
+            GenomeCommand::Counterfactual { request_json, original_report_json, graph_json } => {
+                commands::genome::run_counterfactual(request_json, original_report_json, graph_json)
+            }
+            GenomeCommand::BuildGraph { reports_json } => {
+                commands::genome::run_build_graph(reports_json)
             }
         },
     };
