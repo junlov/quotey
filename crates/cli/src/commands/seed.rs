@@ -1,6 +1,6 @@
 use crate::commands::CommandResult;
 use quotey_core::config::{AppConfig, LoadOptions};
-use quotey_db::connect_with_settings;
+use quotey_db::{connect_with_settings, migrations, E2ESeedDataset};
 
 pub fn run() -> CommandResult {
     let config = match AppConfig::load(LoadOptions::default()) {
@@ -36,17 +36,47 @@ pub fn run() -> CommandResult {
         .await
         .map_err(|error| ("db_connectivity", error.to_string(), 4u8))?;
 
+        migrations::run_pending(&pool)
+            .await
+            .map_err(|error| ("migration", error.to_string(), 5u8))?;
+
+        // Load E2E seed dataset for 3 core quote flows
+        let seed_result = E2ESeedDataset::load(&pool)
+            .await
+            .map_err(|error| ("seed_execution", error.to_string(), 5u8))?;
+
+        // Verify the seed data was loaded
+        let verification = E2ESeedDataset::verify(&pool)
+            .await
+            .map_err(|error| ("seed_verification", error.to_string(), 6u8))?;
+
+        if !verification.all_present {
+            return Err(("seed_verification", "Some seed data failed to load".to_string(), 6u8));
+        }
+
         pool.close().await;
-        Ok::<(), (&'static str, String, u8)>(())
+        Ok::<SeedOutput, (&'static str, String, u8)>(SeedOutput { flows: seed_result.flows_seeded })
     });
 
     match result {
-        Ok(()) => CommandResult::success(
-            "seed",
-            "seed fixtures are not configured yet; command completed as deterministic no-op",
-        ),
+        Ok(output) => {
+            let flow_descriptions: Vec<String> = output
+                .flows
+                .iter()
+                .map(|f| format!("  - {}: {} ({})", f.flow_type, f.quote_id, f.description))
+                .collect();
+            let message = format!(
+                "E2E seed dataset loaded successfully for 3 core quote flows:\n{}",
+                flow_descriptions.join("\n")
+            );
+            CommandResult::success("seed", message)
+        }
         Err((error_class, message, exit_code)) => {
             CommandResult::failure("seed", error_class, message, exit_code)
         }
     }
+}
+
+struct SeedOutput {
+    flows: Vec<quotey_db::FlowSeedInfo>,
 }

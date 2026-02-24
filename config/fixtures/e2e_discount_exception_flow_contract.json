@@ -1,0 +1,44 @@
+{
+  "dataset_version": "bd-3vp2.7.2",
+    "child_bead": "bd-3vp2.8.3.1",
+    "flow_type": "discount_exception",
+    "seed_quote_id": "quote-discount-001",
+    "seed_contract": {
+      "quote_id": "quote-discount-001",
+      "account_id": "acct-discount-001",
+    "account_name": "Initech LLC",
+    "deal_id": "deal-discount-001",
+    "deal_name": "Initech - Expansion Deal",
+    "policy_profile": "discount_exception",
+    "status": "approval",
+    "current_step": "awaiting_approval",
+    "step_number": 4,
+    "required_fields": [
+      "approval_decision"
+    ],
+    "missing_fields": [
+      "approval_decision"
+    ],
+    "product_ids": [
+      "prod-plan-pro",
+      "prod-sso"
+    ],
+    "product_names": [
+      "Pro Plan",
+      "SSO Add-on"
+    ],
+    "expected_line_count": 2,
+    "requested_discount_pct": 25,
+    "threshold_pct": 20,
+    "expected_transition_checkpoints": [
+      "quote_created",
+      "discount_request_captured",
+      "approval_requested",
+      "approval_pending"
+    ],
+    "expected_audit_events": [
+      "quote.created",
+      "approval.requested"
+    ]
+  }
+}

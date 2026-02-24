@@ -75,6 +75,62 @@ fn seed_returns_noop_success_with_valid_env() {
 }
 
 #[test]
+fn seed_returns_deterministic_flow_summary() {
+    with_env(
+        &[
+            ("QUOTEY_SLACK_APP_TOKEN", "xapp-test"),
+            ("QUOTEY_SLACK_BOT_TOKEN", "xoxb-test"),
+            ("QUOTEY_DATABASE_URL", "sqlite::memory:"),
+        ],
+        || {
+            let result = seed::run();
+            assert_eq!(result.exit_code, 0, "expected deterministic seed success");
+
+            let payload = parse_payload(&result.output);
+            assert_eq!(payload["command"], "seed");
+            assert_eq!(payload["status"], "ok");
+
+            let message = payload["message"].as_str().unwrap_or("");
+            let net_new_line =
+                "  - net_new: quote-netnew-001 (Enterprise new license - draft state)";
+            let renewal_line =
+                "  - renewal: quote-renewal-001 (Annual renewal with expansion - priced state)";
+            let discount_line =
+                "  - discount_exception: quote-discount-001 (25% discount requiring approval - approval state)";
+            assert!(message.contains(net_new_line));
+            assert!(message.contains(renewal_line));
+            assert!(message.contains(discount_line));
+        },
+    );
+}
+
+#[test]
+fn seed_is_idempotent_across_runs() {
+    with_env(
+        &[
+            ("QUOTEY_SLACK_APP_TOKEN", "xapp-test"),
+            ("QUOTEY_SLACK_BOT_TOKEN", "xoxb-test"),
+            ("QUOTEY_DATABASE_URL", "sqlite::memory:"),
+        ],
+        || {
+            let first = seed::run();
+            assert_eq!(first.exit_code, 0, "expected first seed invocation success");
+            let first_payload = parse_payload(&first.output);
+            assert_eq!(first_payload["command"], "seed");
+            assert_eq!(first_payload["status"], "ok");
+
+            let second = seed::run();
+            assert_eq!(second.exit_code, 0, "expected second seed invocation success");
+            let second_payload = parse_payload(&second.output);
+            assert_eq!(second_payload["command"], "seed");
+            assert_eq!(second_payload["status"], "ok");
+
+            assert_eq!(first_payload["message"], second_payload["message"]);
+        },
+    );
+}
+
+#[test]
 fn smoke_returns_success_report_with_valid_env() {
     with_env(
         &[
