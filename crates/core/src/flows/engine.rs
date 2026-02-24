@@ -182,7 +182,7 @@ fn transition_net_new(
 ) -> Result<TransitionOutcome, FlowTransitionError> {
     use FlowAction::{
         EvaluatePolicy, EvaluatePricing, FinalizeQuote, GenerateConfigurationFingerprint,
-        GenerateDeliveryArtifacts, MarkQuoteSent, RouteApproval,
+        GenerateDeliveryArtifacts, MarkQuoteSent, PromptForMissingFields, RouteApproval,
     };
     use FlowEvent::{
         ApprovalDenied, ApprovalGranted, CancelRequested, PolicyClear, PolicyViolationDetected,
@@ -196,12 +196,10 @@ fn transition_net_new(
     let (to, actions) = match (current, event) {
         (Draft, RequiredFieldsCollected) | (Revised, RequiredFieldsCollected) => {
             if !context.missing_required_fields.is_empty() {
-                return Err(FlowTransitionError::MissingRequiredFields {
-                    state: current.clone(),
-                    missing_fields: context.missing_required_fields.clone(),
-                });
+                (current.clone(), vec![PromptForMissingFields])
+            } else {
+                (Validated, vec![EvaluatePricing])
             }
-            (Validated, vec![EvaluatePricing])
         }
         (Validated, PricingCalculated) => (Priced, vec![EvaluatePolicy]),
         (Priced, PolicyClear) => (
@@ -352,9 +350,9 @@ mod tests {
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
-    fn missing_required_fields_are_rejected() {
+    fn missing_required_fields_prompt_for_completion() {
         let engine = FlowEngine::default();
-        let error = engine
+        let outcome = engine
             .apply(
                 &FlowState::Draft,
                 &FlowEvent::RequiredFieldsCollected,
@@ -365,9 +363,10 @@ mod tests {
                     ],
                 },
             )
-            .expect_err("must reject missing fields");
+            .expect("must return a prompt outcome when required data is missing");
 
-        assert!(matches!(error, FlowTransitionError::MissingRequiredFields { .. }));
+        assert_eq!(outcome.to, FlowState::Draft);
+        assert_eq!(outcome.actions, vec![FlowAction::PromptForMissingFields]);
     }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
