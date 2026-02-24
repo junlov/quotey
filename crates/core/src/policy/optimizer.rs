@@ -1522,6 +1522,18 @@ pub enum PolicyLifecycleError {
     ActionCandidateMismatch,
     #[error("packet replay checksum evidence mismatch")]
     ReplayChecksumMismatch,
+    #[error("actor id is required")]
+    MissingActorId,
+    #[error("signature key id is required")]
+    MissingSignatureKeyId,
+    #[error("signing secret is required")]
+    MissingSigningSecret,
+    #[error("idempotency key is required")]
+    MissingIdempotencyKey,
+    #[error("apply idempotency conflict for key `{idempotency_key}`")]
+    ApplyIdempotencyConflict { idempotency_key: String },
+    #[error("rollback idempotency conflict for key `{idempotency_key}`")]
+    RollbackIdempotencyConflict { idempotency_key: String },
     #[error("current policy version {actual} does not match packet base version {expected}")]
     BaseVersionMismatch { expected: i32, actual: i32 },
     #[error("apply record not found: {apply_record_id}")]
@@ -1555,6 +1567,26 @@ impl PolicyLifecycleError {
             }
             Self::ReplayChecksumMismatch => {
                 "Apply is blocked: replay evidence checksum mismatch detected.".to_string()
+            }
+            Self::MissingActorId => {
+                "Operation blocked: actor identity is required.".to_string()
+            }
+            Self::MissingSignatureKeyId => {
+                "Operation blocked: signature key identity is required.".to_string()
+            }
+            Self::MissingSigningSecret => {
+                "Operation blocked: signing secret is required.".to_string()
+            }
+            Self::MissingIdempotencyKey => {
+                "Operation blocked: idempotency key is required.".to_string()
+            }
+            Self::ApplyIdempotencyConflict { .. } => {
+                "Apply blocked: idempotency key is already bound to a different apply payload."
+                    .to_string()
+            }
+            Self::RollbackIdempotencyConflict { .. } => {
+                "Rollback blocked: idempotency key is already bound to a different rollback payload."
+                    .to_string()
             }
             Self::BaseVersionMismatch { expected, actual } => format!(
                 "Apply blocked: expected base policy version {expected}, but current version is {actual}."
@@ -1648,12 +1680,44 @@ impl InMemoryPolicyLifecycleEngine {
         {
             return Err(PolicyLifecycleError::ReplayChecksumMismatch);
         }
+        let actor_id = request.actor_id.trim().to_string();
+        if actor_id.is_empty() {
+            return Err(PolicyLifecycleError::MissingActorId);
+        }
+        let signature_key_id = request.signature_key_id.trim().to_string();
+        if signature_key_id.is_empty() {
+            return Err(PolicyLifecycleError::MissingSignatureKeyId);
+        }
+        let signing_secret = request.signing_secret.clone();
+        if signing_secret.trim().is_empty() {
+            return Err(PolicyLifecycleError::MissingSigningSecret);
+        }
+        let expected_approval_decision_id =
+            PolicyApprovalDecisionId(format!("decision:{}", request.action.idempotency_key));
 
         let idempotency_key = request
             .idempotency_key_override
             .clone()
-            .unwrap_or_else(|| request.action.idempotency_key.clone());
+            .unwrap_or_else(|| request.action.idempotency_key.clone())
+            .trim()
+            .to_string();
+        if idempotency_key.is_empty() {
+            return Err(PolicyLifecycleError::MissingIdempotencyKey);
+        }
         if let Some(existing) = self.apply_records_by_idempotency.get(&idempotency_key) {
+            if existing.candidate_id != request.packet.candidate_id
+                || existing.prior_policy_version != request.packet.base_policy_version
+                || existing.applied_policy_version != request.packet.proposed_policy_version
+                || existing.replay_checksum != request.packet.replay_report.input_checksum
+                || existing.approval_decision_id != expected_approval_decision_id
+                || existing.actor_id != actor_id
+                || existing.signature_key_id != signature_key_id
+            {
+                return Err(PolicyLifecycleError::ApplyIdempotencyConflict {
+                    idempotency_key: idempotency_key.clone(),
+                });
+            }
+
             let audit_event = self
                 .lifecycle_events
                 .iter()
@@ -1686,11 +1750,8 @@ impl InMemoryPolicyLifecycleEngine {
             request.packet.replay_report.input_checksum,
             idempotency_key
         );
-        let apply_signature = sign_lifecycle_payload(
-            &request.signature_key_id,
-            &request.signing_secret,
-            &apply_signature_payload,
-        );
+        let apply_signature =
+            sign_lifecycle_payload(&signature_key_id, &signing_secret, &apply_signature_payload);
         let candidate_diff_json =
             request.packet.candidate_diff.canonical_json().map_err(|error| {
                 PolicyLifecycleError::InvalidApprovalPacket(
@@ -1716,8 +1777,8 @@ impl InMemoryPolicyLifecycleEngine {
             applied_policy_version: request.packet.proposed_policy_version,
             replay_checksum: request.packet.replay_report.input_checksum.clone(),
             apply_signature,
-            signature_key_id: request.signature_key_id.clone(),
-            actor_id: request.actor_id.trim().to_string(),
+            signature_key_id,
+            actor_id,
             idempotency_key: idempotency_key.clone(),
             verification_checksum,
             apply_audit_json: request
@@ -1751,14 +1812,40 @@ impl InMemoryPolicyLifecycleEngine {
             return Err(PolicyLifecycleError::MissingRollbackReason);
         }
 
-        if let Some(existing) = self.rollback_records_by_idempotency.get(&request.idempotency_key) {
+        let idempotency_key = request.idempotency_key.trim().to_string();
+        if idempotency_key.is_empty() {
+            return Err(PolicyLifecycleError::MissingIdempotencyKey);
+        }
+        let actor_id = request.actor_id.trim().to_string();
+        if actor_id.is_empty() {
+            return Err(PolicyLifecycleError::MissingActorId);
+        }
+        let signature_key_id = request.signature_key_id.trim().to_string();
+        if signature_key_id.is_empty() {
+            return Err(PolicyLifecycleError::MissingSignatureKeyId);
+        }
+        let signing_secret = request.signing_secret.clone();
+        if signing_secret.trim().is_empty() {
+            return Err(PolicyLifecycleError::MissingSigningSecret);
+        }
+        if let Some(existing) = self.rollback_records_by_idempotency.get(&idempotency_key) {
+            if existing.apply_record_id != request.apply_record_id
+                || existing.candidate_id != request.candidate_id
+                || existing.rollback_reason != request.rollback_reason.trim()
+                || existing.actor_id != actor_id
+                || existing.signature_key_id != signature_key_id
+            {
+                return Err(PolicyLifecycleError::RollbackIdempotencyConflict {
+                    idempotency_key: idempotency_key.clone(),
+                });
+            }
+
             let audit_event = self
                 .lifecycle_events
                 .iter()
                 .find(|event| {
                     event.event_type == PolicyLifecycleAuditEventType::RolledBack
-                        && event.idempotency_key.as_deref()
-                            == Some(request.idempotency_key.as_str())
+                        && event.idempotency_key.as_deref() == Some(idempotency_key.as_str())
                 })
                 .cloned()
                 .unwrap_or_else(|| build_rollback_audit_event(existing, &request));
@@ -1799,31 +1886,28 @@ impl InMemoryPolicyLifecycleEngine {
             apply_record.applied_policy_version,
             apply_record.prior_policy_version,
             request.rollback_reason.trim(),
-            request.idempotency_key
+            idempotency_key
         );
-        let rollback_signature = sign_lifecycle_payload(
-            &request.signature_key_id,
-            &request.signing_secret,
-            &rollback_signature_payload,
-        );
+        let rollback_signature =
+            sign_lifecycle_payload(&signature_key_id, &signing_secret, &rollback_signature_payload);
         let verification_checksum = checksum_from_parts(&[
             apply_record.verification_checksum.as_str(),
             request.rollback_reason.trim(),
-            request.idempotency_key.as_str(),
+            idempotency_key.as_str(),
             &rollback_depth.to_string(),
         ]);
 
         let rollback_record = PolicyRollbackRecord {
-            id: PolicyRollbackRecordId(format!("rollback:{}", request.idempotency_key)),
+            id: PolicyRollbackRecordId(format!("rollback:{idempotency_key}")),
             candidate_id: request.candidate_id.clone(),
             apply_record_id: apply_record.id.clone(),
             rollback_target_version: apply_record.prior_policy_version,
             rollback_reason: request.rollback_reason.trim().to_string(),
             verification_checksum,
             rollback_signature,
-            signature_key_id: request.signature_key_id.clone(),
-            actor_id: request.actor_id.trim().to_string(),
-            idempotency_key: request.idempotency_key.clone(),
+            signature_key_id,
+            actor_id,
+            idempotency_key: idempotency_key.clone(),
             parent_rollback_id: parent.as_ref().map(|record| record.id.clone()),
             rollback_depth,
             rollback_metadata_json: format!(
@@ -1835,8 +1919,7 @@ impl InMemoryPolicyLifecycleEngine {
 
         self.current_policy_version = rollback_record.rollback_target_version;
         self.rollback_records_by_id.insert(rollback_record.id.0.clone(), rollback_record.clone());
-        self.rollback_records_by_idempotency
-            .insert(request.idempotency_key.clone(), rollback_record.clone());
+        self.rollback_records_by_idempotency.insert(idempotency_key, rollback_record.clone());
         self.rollback_record_ids_by_target_version
             .entry(rollback_record.rollback_target_version)
             .or_default()
@@ -1984,18 +2067,18 @@ fn checksum_from_parts(parts: &[&str]) -> String {
 }
 
 fn sign_lifecycle_payload(signature_key_id: &str, signing_secret: &str, payload: &str) -> String {
-    checksum_from_parts(&[signature_key_id.trim(), signing_secret.trim(), payload])
+    checksum_from_parts(&[signature_key_id, signing_secret, payload])
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        ApprovalPacket, ApprovalPacketActionError, ApprovalPacketActionPayload,
-        ApprovalPacketDecision, ApprovalPacketValidationError, CandidateCohortScope,
-        CandidateConfidenceBounds, CandidateDiffValidationError, CandidateGenerationError,
-        CandidateGenerationRequest, CandidateProvenance, CandidateRuleOperation,
-        CandidateRuleSignal, InMemoryPolicyLifecycleEngine, PolicyApplyRequest,
-        PolicyCandidateDiffV1, PolicyCandidateGenerator, PolicyCandidateStatus,
+        sign_lifecycle_payload, ApprovalPacket, ApprovalPacketActionError,
+        ApprovalPacketActionPayload, ApprovalPacketDecision, ApprovalPacketValidationError,
+        CandidateCohortScope, CandidateConfidenceBounds, CandidateDiffValidationError,
+        CandidateGenerationError, CandidateGenerationRequest, CandidateProvenance,
+        CandidateRuleOperation, CandidateRuleSignal, InMemoryPolicyLifecycleEngine,
+        PolicyApplyRequest, PolicyCandidateDiffV1, PolicyCandidateGenerator, PolicyCandidateStatus,
         PolicyLifecycleError, PolicyReplayEngine, PolicyRollbackRequest, ReplayGuardrailBlock,
         ReplayGuardrailCode, ReplayGuardrailEvaluation, ReplayGuardrailThresholds,
         ReplayImpactError, ReplayImpactReport, ReplayImpactRequest, ReplayQuoteSnapshot,
@@ -2534,6 +2617,362 @@ mod tests {
     }
 
     #[test]
+    fn lifecycle_apply_idempotency_conflict_is_blocked() {
+        let mut engine = InMemoryPolicyLifecycleEngine::new(41);
+        let packet = approval_packet_fixture();
+        let approve =
+            ApprovalPacketActionPayload::new(&packet, ApprovalPacketDecision::Approve, None)
+                .expect("approve action should build");
+
+        engine
+            .apply(PolicyApplyRequest {
+                packet: packet.clone(),
+                action: approve.clone(),
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key_override: Some("shared-idempotency".to_string()),
+            })
+            .expect("first apply should pass");
+
+        let replay_report = replay_report_fixture();
+        let next_packet = ApprovalPacket::build(
+            candidate_diff_with_replay_checksum(&replay_report.input_checksum),
+            replay_report,
+            42,
+            43,
+            1000,
+            "Fallback to policy version 42.",
+        )
+        .expect("next packet should build");
+        let next_approve =
+            ApprovalPacketActionPayload::new(&next_packet, ApprovalPacketDecision::Approve, None)
+                .expect("second approve action should build");
+
+        let error = engine
+            .apply(PolicyApplyRequest {
+                packet: next_packet,
+                action: next_approve,
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key_override: Some("shared-idempotency".to_string()),
+            })
+            .expect_err("idempotency conflict must fail");
+        assert_eq!(
+            error,
+            PolicyLifecycleError::ApplyIdempotencyConflict {
+                idempotency_key: "shared-idempotency".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn lifecycle_apply_idempotency_conflict_is_blocked_for_action_identity_change() {
+        let mut engine = InMemoryPolicyLifecycleEngine::new(41);
+        let packet = approval_packet_fixture();
+        let approve_without_reason =
+            ApprovalPacketActionPayload::new(&packet, ApprovalPacketDecision::Approve, None)
+                .expect("approve action should build");
+
+        engine
+            .apply(PolicyApplyRequest {
+                packet: packet.clone(),
+                action: approve_without_reason,
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key_override: Some("shared-idempotency".to_string()),
+            })
+            .expect("first apply should pass");
+
+        let approve_with_reason = ApprovalPacketActionPayload::new(
+            &packet,
+            ApprovalPacketDecision::Approve,
+            Some("human reviewer note".to_string()),
+        )
+        .expect("approve action with reason should build");
+        let error = engine
+            .apply(PolicyApplyRequest {
+                packet,
+                action: approve_with_reason,
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key_override: Some("shared-idempotency".to_string()),
+            })
+            .expect_err("idempotency conflict must fail");
+        assert_eq!(
+            error,
+            PolicyLifecycleError::ApplyIdempotencyConflict {
+                idempotency_key: "shared-idempotency".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn lifecycle_rollback_idempotency_conflict_is_blocked() {
+        let mut engine = InMemoryPolicyLifecycleEngine::new(41);
+        let packet = approval_packet_fixture();
+        let approve =
+            ApprovalPacketActionPayload::new(&packet, ApprovalPacketDecision::Approve, None)
+                .expect("approve action should build");
+        let first_apply = engine
+            .apply(PolicyApplyRequest {
+                packet: packet.clone(),
+                action: approve,
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key_override: None,
+            })
+            .expect("first apply should pass");
+
+        engine
+            .rollback(PolicyRollbackRequest {
+                apply_record_id: first_apply.apply_record.id.clone(),
+                candidate_id: packet.candidate_id.clone(),
+                rollback_reason: "first reason".to_string(),
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key: "shared-rollback".to_string(),
+            })
+            .expect("first rollback should pass");
+
+        let error = engine
+            .rollback(PolicyRollbackRequest {
+                apply_record_id: first_apply.apply_record.id,
+                candidate_id: packet.candidate_id,
+                rollback_reason: "different reason".to_string(),
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key: "shared-rollback".to_string(),
+            })
+            .expect_err("rollback idempotency conflict must fail");
+        assert_eq!(
+            error,
+            PolicyLifecycleError::RollbackIdempotencyConflict {
+                idempotency_key: "shared-rollback".to_string()
+            }
+        );
+    }
+
+    #[test]
+    fn lifecycle_rollback_uses_trimmed_idempotency_key_for_record_identity() {
+        let mut engine = InMemoryPolicyLifecycleEngine::new(41);
+        let packet = approval_packet_fixture();
+        let approve =
+            ApprovalPacketActionPayload::new(&packet, ApprovalPacketDecision::Approve, None)
+                .expect("approve action should build");
+        let first_apply = engine
+            .apply(PolicyApplyRequest {
+                packet: packet.clone(),
+                action: approve,
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key_override: None,
+            })
+            .expect("first apply should pass");
+
+        let first_rollback = engine
+            .rollback(PolicyRollbackRequest {
+                apply_record_id: first_apply.apply_record.id.clone(),
+                candidate_id: packet.candidate_id.clone(),
+                rollback_reason: "manual".to_string(),
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key: " rollback-key ".to_string(),
+            })
+            .expect("first rollback should pass");
+        assert_eq!(first_rollback.rollback_record.id.0, "rollback:rollback-key");
+        assert_eq!(first_rollback.rollback_record.idempotency_key, "rollback-key");
+
+        let second_rollback = engine
+            .rollback(PolicyRollbackRequest {
+                apply_record_id: first_apply.apply_record.id,
+                candidate_id: packet.candidate_id,
+                rollback_reason: "manual".to_string(),
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key: "rollback-key".to_string(),
+            })
+            .expect("second rollback should be idempotent");
+        assert_eq!(second_rollback.rollback_record.id.0, "rollback:rollback-key");
+    }
+
+    #[test]
+    fn lifecycle_missing_idempotency_key_is_rejected() {
+        let mut engine = InMemoryPolicyLifecycleEngine::new(41);
+        let packet = approval_packet_fixture();
+        let approve =
+            ApprovalPacketActionPayload::new(&packet, ApprovalPacketDecision::Approve, None)
+                .expect("approve action should build");
+
+        let apply_error = engine
+            .apply(PolicyApplyRequest {
+                packet: packet.clone(),
+                action: approve,
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key_override: Some("   ".to_string()),
+            })
+            .expect_err("blank apply idempotency key must fail");
+        assert_eq!(apply_error, PolicyLifecycleError::MissingIdempotencyKey);
+
+        let rollback_error = engine
+            .rollback(PolicyRollbackRequest {
+                apply_record_id: super::PolicyApplyRecordId("apply:any".to_string()),
+                candidate_id: packet.candidate_id,
+                rollback_reason: "manual".to_string(),
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key: "  ".to_string(),
+            })
+            .expect_err("blank rollback idempotency key must fail");
+        assert_eq!(rollback_error, PolicyLifecycleError::MissingIdempotencyKey);
+    }
+
+    #[test]
+    fn lifecycle_missing_signing_metadata_is_rejected() {
+        let mut engine = InMemoryPolicyLifecycleEngine::new(41);
+        let packet = approval_packet_fixture();
+        let approve =
+            ApprovalPacketActionPayload::new(&packet, ApprovalPacketDecision::Approve, None)
+                .expect("approve action should build");
+
+        let missing_actor_error = engine
+            .apply(PolicyApplyRequest {
+                packet: packet.clone(),
+                action: approve.clone(),
+                actor_id: "   ".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key_override: Some("apply-missing-actor".to_string()),
+            })
+            .expect_err("blank actor id must fail");
+        assert_eq!(missing_actor_error, PolicyLifecycleError::MissingActorId);
+
+        let missing_key_error = engine
+            .apply(PolicyApplyRequest {
+                packet: packet.clone(),
+                action: approve.clone(),
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "  ".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key_override: Some("apply-missing-key".to_string()),
+            })
+            .expect_err("blank signature key id must fail");
+        assert_eq!(missing_key_error, PolicyLifecycleError::MissingSignatureKeyId);
+
+        let missing_secret_error = engine
+            .apply(PolicyApplyRequest {
+                packet: packet.clone(),
+                action: approve.clone(),
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: " \n\t ".to_string(),
+                idempotency_key_override: Some("apply-missing-secret".to_string()),
+            })
+            .expect_err("blank signing secret must fail");
+        assert_eq!(missing_secret_error, PolicyLifecycleError::MissingSigningSecret);
+
+        let first_apply = engine
+            .apply(PolicyApplyRequest {
+                packet: packet.clone(),
+                action: approve,
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key_override: Some("apply-valid-for-rollback".to_string()),
+            })
+            .expect("valid apply should pass");
+
+        let rollback_missing_actor_error = engine
+            .rollback(PolicyRollbackRequest {
+                apply_record_id: first_apply.apply_record.id.clone(),
+                candidate_id: packet.candidate_id.clone(),
+                rollback_reason: "manual".to_string(),
+                actor_id: " ".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key: "rollback-missing-actor".to_string(),
+            })
+            .expect_err("blank rollback actor id must fail");
+        assert_eq!(rollback_missing_actor_error, PolicyLifecycleError::MissingActorId);
+
+        let rollback_missing_key_error = engine
+            .rollback(PolicyRollbackRequest {
+                apply_record_id: first_apply.apply_record.id.clone(),
+                candidate_id: packet.candidate_id.clone(),
+                rollback_reason: "manual".to_string(),
+                actor_id: "approver-1".to_string(),
+                signature_key_id: " ".to_string(),
+                signing_secret: "secret-1".to_string(),
+                idempotency_key: "rollback-missing-key".to_string(),
+            })
+            .expect_err("blank rollback signature key id must fail");
+        assert_eq!(rollback_missing_key_error, PolicyLifecycleError::MissingSignatureKeyId);
+
+        let rollback_missing_secret_error = engine
+            .rollback(PolicyRollbackRequest {
+                apply_record_id: first_apply.apply_record.id,
+                candidate_id: packet.candidate_id,
+                rollback_reason: "manual".to_string(),
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: "\t ".to_string(),
+                idempotency_key: "rollback-missing-secret".to_string(),
+            })
+            .expect_err("blank rollback signing secret must fail");
+        assert_eq!(rollback_missing_secret_error, PolicyLifecycleError::MissingSigningSecret);
+    }
+
+    #[test]
+    fn lifecycle_apply_signature_preserves_signing_secret_bytes() {
+        let mut engine = InMemoryPolicyLifecycleEngine::new(41);
+        let packet = approval_packet_fixture();
+        let approve =
+            ApprovalPacketActionPayload::new(&packet, ApprovalPacketDecision::Approve, None)
+                .expect("approve action should build");
+        let signing_secret = " secret-with-boundary-space ".to_string();
+        let idempotency_key = "signature-secret-idempotency".to_string();
+
+        let apply_outcome = engine
+            .apply(PolicyApplyRequest {
+                packet: packet.clone(),
+                action: approve,
+                actor_id: "approver-1".to_string(),
+                signature_key_id: "key-1".to_string(),
+                signing_secret: signing_secret.clone(),
+                idempotency_key_override: Some(idempotency_key.clone()),
+            })
+            .expect("apply should pass");
+
+        let signature_payload = format!(
+            "{}|{}|{}|{}|{}",
+            packet.packet_id,
+            packet.base_policy_version,
+            packet.proposed_policy_version,
+            packet.replay_report.input_checksum,
+            idempotency_key
+        );
+        let exact_secret_signature =
+            sign_lifecycle_payload("key-1", &signing_secret, &signature_payload);
+        let trimmed_secret_signature =
+            sign_lifecycle_payload("key-1", signing_secret.trim(), &signature_payload);
+
+        assert_eq!(apply_outcome.apply_record.apply_signature, exact_secret_signature);
+        assert_ne!(apply_outcome.apply_record.apply_signature, trimmed_secret_signature);
+    }
+
+    #[test]
     fn lifecycle_failure_paths_return_user_safe_remediation_messages() {
         let mut engine = InMemoryPolicyLifecycleEngine::new(40);
         let packet = approval_packet_fixture();
@@ -2575,6 +3014,14 @@ mod tests {
         assert_eq!(
             rollback_error.user_safe_message(),
             "Rollback blocked: provide a rollback reason for audit."
+        );
+
+        let key_error = PolicyLifecycleError::ApplyIdempotencyConflict {
+            idempotency_key: "shared-idempotency".to_string(),
+        };
+        assert_eq!(
+            key_error.user_safe_message(),
+            "Apply blocked: idempotency key is already bound to a different apply payload."
         );
     }
 
