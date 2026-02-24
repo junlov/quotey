@@ -218,7 +218,8 @@ pub fn normalize_variations(
 
         let mut grouped: BTreeMap<String, (i64, Option<Decimal>)> = BTreeMap::new();
         for line in variation.line_variations {
-            if line.product_id.0.trim().is_empty() {
+            let product_id = line.product_id.0.trim().to_string();
+            if product_id.is_empty() {
                 return Err(SimulatorGuardrailError::EmptyProductId);
             }
 
@@ -228,13 +229,12 @@ pub fn normalize_variations(
                 });
             }
 
-            let entry = grouped
-                .entry(line.product_id.0.clone())
-                .or_insert((0_i64, line.unit_price_override));
+            let entry =
+                grouped.entry(product_id.clone()).or_insert((0_i64, line.unit_price_override));
             let updated_delta =
                 entry.0.checked_add(i64::from(line.quantity_delta)).ok_or_else(|| {
                     SimulatorGuardrailError::AggregatedQuantityDeltaOutOfBounds {
-                        product_id: line.product_id.0.clone(),
+                        product_id: product_id.clone(),
                         quantity_delta: if line.quantity_delta.is_negative() {
                             i64::MIN
                         } else {
@@ -246,7 +246,7 @@ pub fn normalize_variations(
                 || updated_delta > i64::from(MAX_QUANTITY_DELTA)
             {
                 return Err(SimulatorGuardrailError::AggregatedQuantityDeltaOutOfBounds {
-                    product_id: line.product_id.0.clone(),
+                    product_id: product_id.clone(),
                     quantity_delta: updated_delta,
                 });
             }
@@ -255,7 +255,7 @@ pub fn normalize_variations(
             match (entry.1, line.unit_price_override) {
                 (Some(existing), Some(candidate)) if existing != candidate => {
                     return Err(SimulatorGuardrailError::ConflictingUnitPriceOverride {
-                        product_id: line.product_id.0,
+                        product_id,
                     });
                 }
                 (None, Some(candidate)) => {
@@ -309,8 +309,16 @@ pub fn fork_quote_with_variation(
     baseline_quote: &Quote,
     variation: &NormalizedScenarioVariation,
 ) -> Result<Quote, SimulatorGuardrailError> {
-    let mut lines: BTreeMap<String, QuoteLine> =
-        baseline_quote.lines.iter().map(|line| (line.product_id.0.clone(), line.clone())).collect();
+    let mut lines: BTreeMap<String, QuoteLine> = BTreeMap::new();
+    for line in &baseline_quote.lines {
+        let product_id = line.product_id.0.trim().to_string();
+        if product_id.is_empty() {
+            return Err(SimulatorGuardrailError::EmptyProductId);
+        }
+        let mut canonical_line = line.clone();
+        canonical_line.product_id = ProductId(product_id.clone());
+        lines.insert(product_id, canonical_line);
+    }
 
     for change in &variation.line_variations {
         if let Some(existing) = lines.get_mut(&change.product_id.0) {
@@ -402,10 +410,16 @@ pub fn compute_delta(
         changed: baseline_eval.policy.approval_status != variant_eval.policy.approval_status,
     };
 
-    let baseline_lines: BTreeMap<String, &QuoteLine> =
-        baseline_quote.lines.iter().map(|line| (line.product_id.0.clone(), line)).collect();
-    let variant_lines: BTreeMap<String, &QuoteLine> =
-        variant_quote.lines.iter().map(|line| (line.product_id.0.clone(), line)).collect();
+    let baseline_lines: BTreeMap<String, &QuoteLine> = baseline_quote
+        .lines
+        .iter()
+        .map(|line| (line.product_id.0.trim().to_string(), line))
+        .collect();
+    let variant_lines: BTreeMap<String, &QuoteLine> = variant_quote
+        .lines
+        .iter()
+        .map(|line| (line.product_id.0.trim().to_string(), line))
+        .collect();
 
     let added_product_ids = variant_lines
         .keys()
@@ -705,6 +719,34 @@ mod tests {
     }
 
     #[test]
+    fn normalizer_trims_product_id_whitespace_before_grouping() {
+        let variations = vec![ScenarioVariation {
+            variant_key: "trim-test".to_string(),
+            line_variations: vec![
+                LineVariation {
+                    product_id: ProductId(" plan-pro ".to_string()),
+                    quantity_delta: 2,
+                    unit_price_override: None,
+                },
+                LineVariation {
+                    product_id: ProductId("plan-pro".to_string()),
+                    quantity_delta: 3,
+                    unit_price_override: None,
+                },
+            ],
+            requested_discount_pct_override: None,
+            minimum_margin_pct_override: None,
+            deal_value_override: None,
+        }];
+
+        let normalized = normalize_variations(variations, 3).expect("normalize");
+        assert_eq!(normalized.len(), 1);
+        assert_eq!(normalized[0].line_variations.len(), 1);
+        assert_eq!(normalized[0].line_variations[0].product_id.0, "plan-pro");
+        assert_eq!(normalized[0].line_variations[0].quantity_delta, 5);
+    }
+
+    #[test]
     fn normalizer_rejects_duplicate_variant_keys() {
         let variations = vec![
             ScenarioVariation {
@@ -873,6 +915,57 @@ mod tests {
             result.expect_err("must guard"),
             SimulatorGuardrailError::MissingUnitPriceForNewLine { .. }
         ));
+    }
+
+    #[test]
+    fn simulator_normalizes_whitespace_product_id_for_existing_baseline_line() {
+        let runtime = DeterministicCpqRuntime::default();
+        let simulator = DealFlightSimulator::new(runtime);
+        let quote = Quote {
+            id: QuoteId("Q-SIM-WHITESPACE-1".to_string()),
+            status: QuoteStatus::Draft,
+            lines: vec![QuoteLine {
+                product_id: ProductId(" plan-pro ".to_string()),
+                quantity: 10,
+                unit_price: Decimal::new(9999, 2),
+            }],
+            created_at: Utc::now(),
+        };
+        let policy_input = PolicyInput {
+            requested_discount_pct: Decimal::ZERO,
+            deal_value: Decimal::new(100_000, 2),
+            minimum_margin_pct: Decimal::new(4000, 2),
+        };
+
+        let comparison = simulator
+            .simulate(
+                &quote,
+                "USD",
+                policy_input,
+                vec![ScenarioVariation {
+                    variant_key: "trimmed-update".to_string(),
+                    line_variations: vec![LineVariation {
+                        product_id: ProductId("plan-pro".to_string()),
+                        quantity_delta: 2,
+                        unit_price_override: None,
+                    }],
+                    requested_discount_pct_override: None,
+                    minimum_margin_pct_override: None,
+                    deal_value_override: None,
+                }],
+            )
+            .expect("simulate variation against whitespace baseline product id");
+
+        let variant = &comparison.variants[0];
+        assert_eq!(variant.forked_quote.lines.len(), 1);
+        assert_eq!(variant.forked_quote.lines[0].product_id.0, "plan-pro");
+        assert_eq!(variant.forked_quote.lines[0].quantity, 12);
+        assert!(variant.delta.configuration.added_product_ids.is_empty());
+        assert!(variant.delta.configuration.removed_product_ids.is_empty());
+        assert_eq!(variant.delta.configuration.changed_lines.len(), 1);
+        assert_eq!(variant.delta.configuration.changed_lines[0].product_id.0, "plan-pro");
+        assert_eq!(variant.delta.configuration.changed_lines[0].quantity_before, 10);
+        assert_eq!(variant.delta.configuration.changed_lines[0].quantity_after, 12);
     }
 
     #[test]
