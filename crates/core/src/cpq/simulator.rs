@@ -684,6 +684,7 @@ mod tests {
         SimulationTelemetryContext, SimulationTelemetrySink, SimulatorGuardrailError,
     };
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn normalizer_merges_and_orders_line_variations() {
         let variations = vec![ScenarioVariation {
@@ -718,6 +719,7 @@ mod tests {
         assert_eq!(normalized[0].line_variations[1].quantity_delta, 5);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn normalizer_trims_product_id_whitespace_before_grouping() {
         let variations = vec![ScenarioVariation {
@@ -746,6 +748,7 @@ mod tests {
         assert_eq!(normalized[0].line_variations[0].quantity_delta, 5);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn normalizer_rejects_duplicate_variant_keys() {
         let variations = vec![
@@ -777,6 +780,7 @@ mod tests {
         assert!(matches!(error, SimulatorGuardrailError::DuplicateVariantKey { .. }));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn normalizer_rejects_aggregated_quantity_delta_above_guardrail() {
         let variations = vec![ScenarioVariation {
@@ -805,6 +809,7 @@ mod tests {
         ));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn normalizer_rejects_extreme_negative_delta_without_panicking() {
         let variations = vec![ScenarioVariation {
@@ -823,6 +828,7 @@ mod tests {
         assert!(matches!(error, SimulatorGuardrailError::QuantityDeltaOutOfBounds { .. }));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn simulator_replay_and_parity_are_deterministic() {
         let runtime = DeterministicCpqRuntime::default();
@@ -883,6 +889,7 @@ mod tests {
         assert_eq!(run_a.variants[1].rank_order, 1);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn simulator_guards_new_line_without_price_override() {
         let runtime = DeterministicCpqRuntime::default();
@@ -917,6 +924,7 @@ mod tests {
         ));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn simulator_normalizes_whitespace_product_id_for_existing_baseline_line() {
         let runtime = DeterministicCpqRuntime::default();
@@ -968,11 +976,13 @@ mod tests {
         assert_eq!(variant.delta.configuration.changed_lines[0].quantity_after, 12);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn delta_type_enum_has_expected_storage_value() {
         assert_eq!(ScenarioDeltaType::Price.as_str(), "price");
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn simulate_with_telemetry_emits_usage_latency_and_outcome_events() {
         #[derive(Default)]
@@ -1033,6 +1043,7 @@ mod tests {
         assert!(events[1].latency_ms >= 0);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn simulate_with_telemetry_emits_failure_event_for_guardrail_rejection() {
         #[derive(Default)]

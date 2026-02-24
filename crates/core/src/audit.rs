@@ -121,6 +121,7 @@ mod tests {
         domain::quote::QuoteId,
     };
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[test]
     fn in_memory_sink_records_events_with_correlation_fields() {
         let sink = InMemoryAuditSink::default();

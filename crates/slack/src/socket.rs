@@ -307,6 +307,7 @@ mod tests {
         }
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[tokio::test]
     async fn reconnects_after_initial_connect_failure() {
         let transport = Arc::new(ScriptedTransport::with_script(
@@ -333,6 +334,7 @@ mod tests {
         assert_eq!(transport.acknowledgements().await, vec!["env-1"]);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[tokio::test]
     async fn exhausts_retries_without_crashing() {
         let transport = Arc::new(ScriptedTransport::with_script(
@@ -355,6 +357,7 @@ mod tests {
         assert_eq!(transport.connect_attempts().await, 3);
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn extracts_quote_and_thread_correlation_fields() {
         let envelope = SlackEnvelope {
@@ -372,6 +375,7 @@ mod tests {
         assert_eq!(thread_id.as_deref(), Some("1730000000.1000"));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn extracts_quote_and_thread_correlation_fields_from_reactions() {
         let envelope = SlackEnvelope {
@@ -392,6 +396,7 @@ mod tests {
         assert_eq!(thread_id.as_deref(), Some("1730000000.1000"));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn reaction_correlation_falls_back_to_message_ts_when_thread_ts_missing() {
         let envelope = SlackEnvelope {

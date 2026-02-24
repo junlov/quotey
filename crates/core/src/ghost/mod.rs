@@ -474,6 +474,7 @@ mod tests {
         assert!(signal.departments.contains(&"engineering".to_string()));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[test]
     fn ghost_quote_generator_creates_discounted_draft_and_persists_it() {
         let detector = SignalDetector::default();
@@ -507,6 +508,7 @@ mod tests {
         );
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[test]
     fn ghost_quote_generator_returns_none_for_low_confidence_signal() {
         let signal = SignalDetector::default().analyze("General sync later today.");

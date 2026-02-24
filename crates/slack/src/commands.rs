@@ -1,4 +1,3 @@
-use async_trait::async_trait;
 use rust_decimal::Decimal;
 use std::str::FromStr;
 use thiserror::Error;
@@ -127,21 +126,16 @@ where
         Self { service }
     }
 
-    pub async fn route(
-        &self,
-        envelope: CommandEnvelope,
-    ) -> Result<MessageTemplate, CommandRouteError> {
+    pub fn route(&self, envelope: CommandEnvelope) -> Result<MessageTemplate, CommandRouteError> {
         match classify_quote_command(&envelope.verb, envelope.freeform_args.clone()) {
             QuoteCommand::New { customer_hint, freeform_args } => {
-                self.service.new_quote(customer_hint, freeform_args, &envelope).await
+                self.service.new_quote(customer_hint, freeform_args, &envelope)
             }
             QuoteCommand::Status { quote_id, freeform_args } => {
-                self.service.status_quote(quote_id, freeform_args, &envelope).await
+                self.service.status_quote(quote_id, freeform_args, &envelope)
             }
-            QuoteCommand::List { filter } => self.service.list_quotes(filter, &envelope).await,
-            QuoteCommand::Simulate { request } => {
-                self.service.simulate_quote(request, &envelope).await
-            }
+            QuoteCommand::List { filter } => self.service.list_quotes(filter, &envelope),
+            QuoteCommand::Simulate { request } => self.service.simulate_quote(request, &envelope),
             QuoteCommand::Help => Ok(blocks::help_message()),
             QuoteCommand::Unknown { verb, .. } => Ok(blocks::error_message(
                 &format!("Unsupported command `/quote {verb}`. Try `/quote help`."),
@@ -151,29 +145,28 @@ where
     }
 }
 
-#[async_trait]
 pub trait QuoteCommandService: Send + Sync {
-    async fn new_quote(
+    fn new_quote(
         &self,
         customer_hint: Option<String>,
         freeform_args: String,
         envelope: &CommandEnvelope,
     ) -> Result<MessageTemplate, CommandRouteError>;
 
-    async fn status_quote(
+    fn status_quote(
         &self,
         quote_id: Option<String>,
         freeform_args: String,
         envelope: &CommandEnvelope,
     ) -> Result<MessageTemplate, CommandRouteError>;
 
-    async fn list_quotes(
+    fn list_quotes(
         &self,
         filter: Option<String>,
         envelope: &CommandEnvelope,
     ) -> Result<MessageTemplate, CommandRouteError>;
 
-    async fn simulate_quote(
+    fn simulate_quote(
         &self,
         request: SimulationRequest,
         envelope: &CommandEnvelope,
@@ -183,9 +176,8 @@ pub trait QuoteCommandService: Send + Sync {
 #[derive(Default)]
 pub struct NoopQuoteCommandService;
 
-#[async_trait]
 impl QuoteCommandService for NoopQuoteCommandService {
-    async fn new_quote(
+    fn new_quote(
         &self,
         customer_hint: Option<String>,
         freeform_args: String,
@@ -198,7 +190,7 @@ impl QuoteCommandService for NoopQuoteCommandService {
         ))
     }
 
-    async fn status_quote(
+    fn status_quote(
         &self,
         quote_id: Option<String>,
         _freeform_args: String,
@@ -208,7 +200,7 @@ impl QuoteCommandService for NoopQuoteCommandService {
         Ok(blocks::quote_status_message(&quote_id, "status requested"))
     }
 
-    async fn list_quotes(
+    fn list_quotes(
         &self,
         filter: Option<String>,
         _envelope: &CommandEnvelope,
@@ -217,7 +209,7 @@ impl QuoteCommandService for NoopQuoteCommandService {
         Ok(blocks::quote_status_message("list", &format!("filter={filter}")))
     }
 
-    async fn simulate_quote(
+    fn simulate_quote(
         &self,
         request: SimulationRequest,
         _envelope: &CommandEnvelope,
@@ -473,8 +465,9 @@ mod tests {
     };
     use crate::blocks::MessageTemplate;
 
-    #[tokio::test]
-    async fn routes_new_status_list_help_commands() {
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
+    #[test]
+    fn routes_new_status_list_help_commands() {
         let router = CommandRouter::new(NoopQuoteCommandService);
 
         let new_response = router
@@ -489,7 +482,6 @@ mod tests {
                 trigger_ts: "1".to_owned(),
                 request_id: "req-1".to_owned(),
             })
-            .await
             .expect("new route");
         assert!(!new_response.blocks.is_empty());
 
@@ -505,7 +497,6 @@ mod tests {
                 trigger_ts: "1".to_owned(),
                 request_id: "req-2".to_owned(),
             })
-            .await
             .expect("status route");
         assert!(!status_response.blocks.is_empty());
 
@@ -521,7 +512,6 @@ mod tests {
                 trigger_ts: "1".to_owned(),
                 request_id: "req-3".to_owned(),
             })
-            .await
             .expect("list route");
         assert!(!list_response.blocks.is_empty());
 
@@ -537,7 +527,6 @@ mod tests {
                 trigger_ts: "1".to_owned(),
                 request_id: "req-4".to_owned(),
             })
-            .await
             .expect("help route");
         assert!(!help_response.blocks.is_empty());
     }
@@ -640,16 +629,16 @@ mod tests {
         assert_eq!(envelope.quote_id, None);
     }
 
-    #[tokio::test]
-    async fn router_calls_service_entrypoints() {
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
+    #[test]
+    fn router_calls_service_entrypoints() {
         #[derive(Default)]
         struct RecordingService {
             calls: Mutex<Vec<&'static str>>,
         }
 
-        #[async_trait::async_trait]
         impl QuoteCommandService for RecordingService {
-            async fn new_quote(
+            fn new_quote(
                 &self,
                 _customer_hint: Option<String>,
                 _freeform_args: String,
@@ -659,7 +648,7 @@ mod tests {
                 Ok(crate::blocks::help_message())
             }
 
-            async fn status_quote(
+            fn status_quote(
                 &self,
                 _quote_id: Option<String>,
                 _freeform_args: String,
@@ -669,7 +658,7 @@ mod tests {
                 Ok(crate::blocks::help_message())
             }
 
-            async fn list_quotes(
+            fn list_quotes(
                 &self,
                 _filter: Option<String>,
                 _envelope: &CommandEnvelope,
@@ -678,7 +667,7 @@ mod tests {
                 Ok(crate::blocks::help_message())
             }
 
-            async fn simulate_quote(
+            fn simulate_quote(
                 &self,
                 _request: SimulationRequest,
                 _envelope: &CommandEnvelope,
@@ -707,7 +696,6 @@ mod tests {
                     trigger_ts: "1".to_owned(),
                     request_id: format!("req-{verb}"),
                 })
-                .await
                 .expect("route");
         }
 

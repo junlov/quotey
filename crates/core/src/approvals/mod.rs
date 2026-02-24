@@ -728,6 +728,7 @@ mod tests {
         }
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn routing_prefers_requester_manager_as_primary_when_available() {
         let engine = RoutingEngine::new(
@@ -743,6 +744,7 @@ mod tests {
         assert!(decision.escalation_reason.is_none());
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn routing_falls_back_to_same_rank_when_primary_is_unavailable() {
         let engine = RoutingEngine::new(
@@ -760,6 +762,7 @@ mod tests {
         );
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn routing_escalates_when_same_rank_approvers_are_unavailable() {
         let engine = RoutingEngine::new(
@@ -777,6 +780,7 @@ mod tests {
         assert_eq!(decision.escalation_reason.as_deref(), Some("primary_unavailable_escalated"));
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn routing_rejects_unknown_required_role() {
         let engine = RoutingEngine::new(
@@ -796,6 +800,7 @@ mod tests {
         );
     }
 
+    /// qa-tag: fake-in-memory-critical-path (bd-3vp2.3.1)
     #[test]
     fn routing_rejects_when_no_approver_meets_constraints() {
         let engine = RoutingEngine::new(
