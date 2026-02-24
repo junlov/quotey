@@ -114,29 +114,29 @@ The optimizer must be accretive (net positive impact), reversible, and human-gov
 These items are tracked as beads and are the authoritative implementation checklist.
 
 ### Epic
-- [ ] `bd-lmuc` W2 [CLO] Closed-Loop Policy Optimizer
+- [x] `bd-lmuc` W2 [CLO] Closed-Loop Policy Optimizer
 
 ### Primary Tasks
-- [ ] `bd-lmuc.1` Spec KPI Guardrails
-- [ ] `bd-lmuc.2` Data Model Persistence
-- [ ] `bd-lmuc.3` Deterministic Replay Impact Engine
-- [ ] `bd-lmuc.4` Candidate Generation + Explainability
-- [ ] `bd-lmuc.5` Approval Packet UX (Slack + CLI)
-- [ ] `bd-lmuc.6` Signed Apply + Rollback Pipeline
-- [ ] `bd-lmuc.7` Safety Evaluation + Red-Team Harness
-- [ ] `bd-lmuc.8` Telemetry + Outcome Measurement
-- [ ] `bd-lmuc.9` Operator Controls + Runbook
-- [ ] `bd-lmuc.10` End-to-End Demo + Rollout Gate
+- [x] `bd-lmuc.1` Spec KPI Guardrails
+- [x] `bd-lmuc.2` Data Model Persistence
+- [x] `bd-lmuc.3` Deterministic Replay Impact Engine
+- [x] `bd-lmuc.4` Candidate Generation + Explainability
+- [x] `bd-lmuc.5` Approval Packet UX (Slack + CLI)
+- [x] `bd-lmuc.6` Signed Apply + Rollback Pipeline
+- [x] `bd-lmuc.7` Safety Evaluation + Red-Team Harness
+- [x] `bd-lmuc.8` Telemetry + Outcome Measurement
+- [x] `bd-lmuc.9` Operator Controls + Runbook
+- [x] `bd-lmuc.10` End-to-End Demo + Rollout Gate
 
 ### Granular Subtasks
-- [ ] `bd-lmuc.2.1` Migration Fixtures
-- [ ] `bd-lmuc.3.1` Determinism Invariant Tests
-- [ ] `bd-lmuc.4.1` Candidate Diff Schema
-- [ ] `bd-lmuc.5.1` Approval Packet Contract
-- [ ] `bd-lmuc.6.1` Rollback Drill Automation
-- [ ] `bd-lmuc.7.1` Adversarial Scenario Corpus
-- [ ] `bd-lmuc.8.1` KPI Query Pack
-- [ ] `bd-lmuc.10.1` Demo Checklist Artifact
+- [x] `bd-lmuc.2.1` Migration Fixtures
+- [x] `bd-lmuc.3.1` Determinism Invariant Tests
+- [x] `bd-lmuc.4.1` Candidate Diff Schema
+- [x] `bd-lmuc.5.1` Approval Packet Contract
+- [x] `bd-lmuc.6.1` Rollback Drill Automation
+- [x] `bd-lmuc.7.1` Adversarial Scenario Corpus
+- [x] `bd-lmuc.8.1` KPI Query Pack
+- [x] `bd-lmuc.10.1` Demo Checklist Artifact
 
 ### Dependency Order (Execution Plan)
 1. `bd-lmuc.1`
@@ -368,10 +368,58 @@ These items are tracked as beads and are the authoritative implementation checkl
 - Query/dashboards alignment:
   - `PolicyLifecycleKpiSnapshot` provides direct, persisted-field-compatible values for
     projected-vs-realized comparison cards and operator alerting surfaces.
+  - canonical query pack artifact added:
+    - `.planning/W2_CLO_POLICY_OPTIMIZER_KPI_QUERY_PACK.sql` (`clo_kpi_summary_v1`, `clo_kpi_projected_vs_realized_detail_v1`)
+    - `.planning/W2_CLO_POLICY_OPTIMIZER_KPI_QUERY_PACK.md` (versioning, output schemas, alert bindings)
+  - alert rules bind directly to query output fields:
+    - rollback spike: `rollback_spike_alert`
+    - false-positive spike: `false_positive_alert`
+    - margin drift spike: `margin_gap_alert`
 - Task 8 tests validate:
   - deterministic KPI outputs under reordered event/report/outcome inputs,
   - correct formula outputs for throughput/adoption/rollback/latency/margin metrics,
   - alert behavior for rollback spikes, false-positive spikes, and projected-realized drift.
+
+## Task 9 Operator Controls + Runbook
+- Operator runbook artifact delivered:
+  - `.planning/W2_CLO_CLOSED_LOOP_POLICY_OPTIMIZER_RUNBOOK.md`
+- Control matrix is explicit and auditable:
+  - control IDs map each operation to interface, allowed roles, and required audit artifacts.
+  - current implemented surfaces are captured for packet build/action, signed apply/rollback engine paths, and rollback drills.
+- Safety pause/kill-switch behavior is documented with deterministic exit criteria:
+  - immediate apply freeze procedure,
+  - rollback and verification sequence,
+  - dual-owner release approval requirements.
+- Validation/test contract is documented with concrete commands:
+  - rollback drill determinism,
+  - policy-bypass red-team blocking,
+  - KPI alert determinism,
+  - reviewer reason guardrail on operator action path.
+- Known deferred items are listed with ownership:
+  - dedicated `policy-opt` CLI controls,
+  - rollback-trigger timestamp completeness for MTTR,
+  - centralized runtime role authorizer integration.
+
+## Task 10 End-to-End Demo + Rollout Gate
+- Demo checklist artifact delivered:
+  - `.planning/W2_CLO_CLOSED_LOOP_POLICY_OPTIMIZER_DEMO_CHECKLIST.md`
+- Demo script coverage includes full lifecycle path:
+  - candidate generation
+  - replay evidence + safety blocking
+  - approval packet decisioning
+  - signed apply/rollback
+  - monitoring KPI/alert computation
+  - rollback drill verification
+- Quality-gate contract is explicit in checklist:
+  - targeted core/cli tests for CLO lifecycle contracts,
+  - targeted clippy gate on `quotey-core` and `quotey-cli`,
+  - UBS scan on changed runtime scope with triage guidance,
+  - SQL query-pack parse check against CLO schema migration.
+- Acceptance-to-evidence mapping is explicit:
+  - each CLO rollout criterion maps to checklist step(s) and artifact locations.
+- Rollout decision contract is explicit:
+  - defined `Go/No-Go` conditions and required sign-off roles (Runtime Owner, Safety Owner, Revenue Ops Owner),
+  - includes no-go triggers for deterministic failures, unresolved critical runtime defects, and open safety incidents.
 
 ## Guardrail Exit Checklist (Before Task 2 Coding)
 - [ ] Scope/non-goals approved.
