@@ -11,7 +11,121 @@ use rmcp::{
 };
 use tracing::{debug, info, warn};
 
+use std::collections::hash_map::DefaultHasher;
+use std::hash::{Hash, Hasher};
+
 use crate::auth::{AuthManager, AuthResult};
+
+const MAX_PAGE_LIMIT: u32 = 100;
+const DEFAULT_PAGE_LIMIT: u32 = 20;
+
+fn tool_error(code: &str, message: &str, details: Option<serde_json::Value>) -> String {
+    let payload = serde_json::json!({
+        "error": {
+            "code": code,
+            "message": message,
+            "details": details
+        }
+    });
+    serde_json::to_string_pretty(&payload).unwrap_or_else(|_| {
+        format!(
+            "{{\n  \"error\": {{\n    \"code\": \"INTERNAL_ERROR\",\n    \"message\": \"Failed to encode error response\",\n    \"details\": \"{}\"\n  }}\n}}",
+            code
+        )
+    })
+}
+
+fn normalize_id(value: &str, field: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err(format!("{field} is required"));
+    }
+    Ok(trimmed.to_string())
+}
+
+fn normalize_limit(value: u32) -> u32 {
+    if value == 0 {
+        DEFAULT_PAGE_LIMIT
+    } else {
+        value.min(MAX_PAGE_LIMIT)
+    }
+}
+
+fn normalize_page(value: u32) -> u32 {
+    if value == 0 { 1 } else { value }
+}
+
+fn normalize_optional_trimmed(value: &Option<String>) -> Option<String> {
+    value.as_ref().and_then(|v| {
+        let trimmed = v.trim();
+        if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+    })
+}
+
+fn normalize_currency(value: &str) -> Result<String, String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return Err("currency is required".to_string());
+    }
+    if trimmed.len() > 8 || !trimmed.chars().all(|c| c.is_ascii_alphabetic()) {
+        return Err("currency must be alphabetic and <= 8 chars".to_string());
+    }
+    Ok(trimmed.to_ascii_uppercase())
+}
+
+fn normalize_discount(value: f64, field: &str) -> Result<f64, String> {
+    if !value.is_finite() {
+        return Err(format!("{field} must be a finite number"));
+    }
+    if !(0.0..=100.0).contains(&value) {
+        return Err(format!("{field} must be between 0 and 100"));
+    }
+    Ok(value)
+}
+
+fn decimal_to_f64(value: &rust_decimal::Decimal) -> f64 {
+    value.to_string().parse::<f64>().unwrap_or(0.0)
+}
+
+fn build_quote_id(account_id: &str, input: &QuoteCreateInput) -> String {
+    if let Some(key) = input.idempotency_key.as_deref().filter(|v| !v.trim().is_empty()) {
+        let mut hasher = DefaultHasher::new();
+        account_id.hash(&mut hasher);
+        key.hash(&mut hasher);
+        input.currency.hash(&mut hasher);
+        input.term_months.hash(&mut hasher);
+        input.deal_id.hash(&mut hasher);
+        for item in &input.line_items {
+            item.product_id.hash(&mut hasher);
+            item.quantity.hash(&mut hasher);
+            item.discount_pct.to_bits().hash(&mut hasher);
+        }
+        format!("Q-{:016x}", hasher.finish())
+    } else {
+        format!("Q-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000"))
+    }
+}
+
+fn allowed_pdf_templates() -> &'static [&'static str] {
+    &["standard", "compact", "detailed"]
+}
+
+fn template_is_allowed(template: &str) -> bool {
+    allowed_pdf_templates().contains(&template)
+}
+
+fn checksum_of(value: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    value.hash(&mut hasher);
+    format!("mock-checksum:{:016x}", hasher.finish())
+}
+
+fn sanitize_filename(value: &str) -> String {
+    value
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .collect()
+}
 
 /// Main MCP server for Quotey
 #[derive(Debug, Clone)]
@@ -166,7 +280,7 @@ fn default_true() -> bool {
     true
 }
 fn default_20() -> u32 {
-    20
+    DEFAULT_PAGE_LIMIT
 }
 fn default_1() -> u32 {
     1
@@ -264,6 +378,8 @@ pub struct QuoteCreateInput {
     #[serde(default)]
     pub notes: Option<String>,
     pub line_items: Vec<LineItemInput>,
+    #[serde(default)]
+    pub idempotency_key: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -272,6 +388,9 @@ pub struct LineItemResult {
     pub product_id: String,
     pub product_name: String,
     pub quantity: u32,
+    pub unit_price: f64,
+    pub discount_pct: f64,
+    pub subtotal: f64,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -281,6 +400,7 @@ pub struct QuoteCreateResult {
     pub status: String,
     pub account_id: String,
     pub currency: String,
+    pub idempotency_key: Option<String>,
     pub line_items: Vec<LineItemResult>,
     pub created_at: String,
     pub message: String,
@@ -515,13 +635,49 @@ impl QuoteyMcpServer {
     async fn catalog_search(&self, Parameters(input): Parameters<CatalogSearchInput>) -> String {
         debug!(query = %input.query, "catalog_search called");
 
+        let query = input.query.trim().to_string();
+        let category = normalize_optional_trimmed(&input.category);
+        let page = normalize_page(input.page);
+        let limit = normalize_limit(input.limit);
+        let fetch_limit = limit.saturating_mul(page).saturating_add(1);
+
+        if query.is_empty() && category.is_none() {
+            debug!("catalog_search rejected empty query with empty category");
+            return tool_error("VALIDATION_ERROR", "Query or category filter is required", None);
+        }
+
         let repo = quotey_db::repositories::SqlProductRepository::new(self.db_pool.clone());
         use quotey_db::repositories::ProductRepository;
 
-        match repo.search(&input.query, input.active_only, input.limit).await {
-            Ok(products) => {
+        let products = if let Some(category_filter) = category.as_deref() {
+            if query.is_empty() {
+                repo.list_by_family(category_filter).await
+            } else {
+                repo.search(&query, input.active_only, fetch_limit).await
+            }
+        } else {
+            repo.search(&query, input.active_only, fetch_limit).await
+        };
+
+        match products {
+            Ok(mut products) => {
+                if let Some(category_filter) = category.as_deref() {
+                    products.retain(|product| {
+                        product.family_id.as_ref().is_none_or(|f| f.0 == category_filter)
+                    });
+                }
+
+                if input.active_only {
+                    products.retain(|product| product.active);
+                }
+
+                let total = products.len() as u32;
+                let start = (page.saturating_sub(1) * limit) as usize;
+                let has_more = total > (start + limit as usize) as u32;
                 let items: Vec<ProductSummary> = products
                     .into_iter()
+                    .skip(start)
+                    .take(limit as usize)
                     .map(|p| ProductSummary {
                         id: p.id.0,
                         sku: p.sku,
@@ -535,10 +691,10 @@ impl QuoteyMcpServer {
 
                 let result = CatalogSearchResult {
                     pagination: PaginationInfo {
-                        total: items.len() as u32,
-                        page: input.page,
-                        per_page: input.limit,
-                        has_more: false,
+                        total,
+                        page,
+                        per_page: limit,
+                        has_more,
                     },
                     items,
                 };
@@ -547,7 +703,7 @@ impl QuoteyMcpServer {
             }
             Err(e) => {
                 warn!(error = %e, "catalog_search failed");
-                serde_json::json!({"error": e.to_string()}).to_string()
+                tool_error("INTERNAL_ERROR", &e.to_string(), None)
             }
         }
     }
@@ -556,11 +712,18 @@ impl QuoteyMcpServer {
     async fn catalog_get(&self, Parameters(input): Parameters<CatalogGetInput>) -> String {
         debug!(product_id = %input.product_id, "catalog_get called");
 
+        let product_id = match normalize_id(&input.product_id, "product_id") {
+            Ok(value) => value,
+            Err(msg) => {
+                return tool_error("VALIDATION_ERROR", &msg, None);
+            }
+        };
+
         let repo = quotey_db::repositories::SqlProductRepository::new(self.db_pool.clone());
         use quotey_core::domain::product::ProductId;
         use quotey_db::repositories::ProductRepository;
 
-        match repo.find_by_id(&ProductId(input.product_id.clone())).await {
+        match repo.find_by_id(&ProductId(product_id.clone())).await {
             Ok(Some(p)) => {
                 let attrs_json = if p.attributes.is_empty() {
                     None
@@ -584,12 +747,15 @@ impl QuoteyMcpServer {
                 serde_json::to_string_pretty(&result).unwrap_or_default()
             }
             Ok(None) => {
-                serde_json::json!({"error": format!("Product '{}' not found", input.product_id)})
-                    .to_string()
+                tool_error(
+                    "NOT_FOUND",
+                    &format!("Product '{}' not found", product_id),
+                    None,
+                )
             }
             Err(e) => {
                 warn!(error = %e, "catalog_get failed");
-                serde_json::json!({"error": e.to_string()}).to_string()
+                tool_error("INTERNAL_ERROR", &e.to_string(), None)
             }
         }
     }
@@ -603,10 +769,37 @@ impl QuoteyMcpServer {
         use quotey_core::domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
         use quotey_db::repositories::QuoteRepository;
         use rust_decimal::Decimal;
+        use rust_decimal::prelude::FromPrimitive;
 
+        let account_id = match normalize_id(&input.account_id, "account_id") {
+            Ok(value) => value,
+            Err(msg) => {
+                return tool_error("VALIDATION_ERROR", &msg, None);
+            }
+        };
+
+        let currency = match normalize_currency(&input.currency) {
+            Ok(value) => value,
+            Err(msg) => {
+                return tool_error("VALIDATION_ERROR", &msg, None);
+            }
+        };
+
+        if input.line_items.is_empty() {
+            return tool_error("VALIDATION_ERROR", "At least one line item is required", None);
+        }
+
+        if let Some(months) = input.term_months {
+            if months == 0 {
+                return tool_error("VALIDATION_ERROR", "term_months must be greater than 0", None);
+            }
+        }
+
+        let deal_id = normalize_optional_trimmed(&input.deal_id);
+        let notes = input.notes.clone();
+        let idempotency_key = normalize_optional_trimmed(&input.idempotency_key);
         let now = chrono::Utc::now();
-        let quote_id =
-            format!("Q-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000"));
+        let quote_id = build_quote_id(&account_id, &input);
 
         // Look up product names from catalog
         let product_repo = quotey_db::repositories::SqlProductRepository::new(self.db_pool.clone());
@@ -616,24 +809,79 @@ impl QuoteyMcpServer {
         let mut quote_lines = Vec::new();
 
         for (i, item) in input.line_items.iter().enumerate() {
-            let product_name =
-                match product_repo.find_by_id(&ProductId(item.product_id.clone())).await {
-                    Ok(Some(p)) => p.name,
-                    _ => format!("Product {}", item.product_id),
-                };
+            let product_id = match normalize_id(&item.product_id, "product_id") {
+                Ok(value) => value,
+                Err(msg) => {
+                    return tool_error("VALIDATION_ERROR", &msg, None);
+                }
+            };
+
+            if item.quantity == 0 {
+                return tool_error(
+                    "VALIDATION_ERROR",
+                    &format!("line_items[{}].quantity must be > 0", i),
+                    None,
+                );
+            }
+
+            let discount_pct = match normalize_discount(item.discount_pct, "line_item.discount_pct") {
+                Ok(value) => value,
+                Err(msg) => {
+                    return tool_error("VALIDATION_ERROR", &msg, None);
+                }
+            };
+
+            let product = match product_repo.find_by_id(&ProductId(product_id.clone())).await {
+                Ok(Some(p)) => p,
+                Ok(None) => {
+                    return tool_error(
+                        "NOT_FOUND",
+                        &format!("Product '{}' not found", product_id),
+                        None,
+                    );
+                }
+                Err(e) => {
+                    warn!(error = %e, "quote_create: failed to load product");
+                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                }
+            };
+
+            if !product.active {
+                return tool_error("CONFLICT", &format!("Product '{}' is inactive", product_id), None);
+            }
+
+            if product.currency.to_ascii_uppercase() != currency {
+                return tool_error(
+                    "CURRENCY_MISMATCH",
+                    &format!(
+                        "Product '{}' currency '{}' does not match quote currency '{}'",
+                        product_id, product.currency, currency
+                    ),
+                    None,
+                );
+            }
+
+            let unit_price = product.base_price.unwrap_or_else(|| Decimal::ZERO);
+            let subtotal = unit_price * Decimal::from(item.quantity as u32);
+            let discount_rate = Decimal::from_f64(discount_pct).unwrap_or_else(|| Decimal::ZERO);
+            let discount_amount = subtotal * discount_rate / Decimal::from(100);
+            let effective_subtotal = subtotal - discount_amount;
 
             line_items_result.push(LineItemResult {
                 line_id: format!("{}-ql-{}", quote_id, i + 1),
-                product_id: item.product_id.clone(),
-                product_name: product_name.clone(),
+                product_id: product_id.clone(),
+                product_name: product.name.clone(),
                 quantity: item.quantity,
+                unit_price: decimal_to_f64(&unit_price),
+                discount_pct,
+                subtotal: decimal_to_f64(&effective_subtotal),
             });
 
             quote_lines.push(QuoteLine {
-                product_id: ProductId(item.product_id.clone()),
+                product_id: ProductId(product_id),
                 quantity: item.quantity,
-                unit_price: Decimal::ZERO, // Will be set by pricing engine
-                discount_pct: item.discount_pct,
+                unit_price,
+                discount_pct,
                 notes: item.notes.clone(),
             });
         }
@@ -642,14 +890,14 @@ impl QuoteyMcpServer {
             id: QuoteId(quote_id.clone()),
             version: 1,
             status: QuoteStatus::Draft,
-            account_id: Some(input.account_id.clone()),
-            deal_id: input.deal_id,
-            currency: input.currency.clone(),
+            account_id: Some(account_id.clone()),
+            deal_id,
+            currency,
             term_months: input.term_months,
             start_date: input.start_date,
             end_date: None,
             valid_until: None,
-            notes: input.notes,
+            notes,
             created_by: "agent:mcp".to_string(),
             lines: quote_lines,
             created_at: now,
@@ -663,8 +911,9 @@ impl QuoteyMcpServer {
                     quote_id,
                     version: 1,
                     status: "draft".to_string(),
-                    account_id: input.account_id,
-                    currency: input.currency,
+                    account_id,
+                    currency,
+                    idempotency_key,
                     line_items: line_items_result,
                     created_at: now.to_rfc3339(),
                     message: "Quote created successfully".to_string(),
@@ -673,7 +922,7 @@ impl QuoteyMcpServer {
             }
             Err(e) => {
                 warn!(error = %e, "quote_create failed");
-                serde_json::json!({"error": e.to_string()}).to_string()
+                tool_error("INTERNAL_ERROR", &e.to_string(), None)
             }
         }
     }
@@ -682,12 +931,19 @@ impl QuoteyMcpServer {
     async fn quote_get(&self, Parameters(input): Parameters<QuoteGetInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_get called");
 
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(value) => value,
+            Err(msg) => {
+                return tool_error("VALIDATION_ERROR", &msg, None);
+            }
+        };
+
         use quotey_core::domain::quote::QuoteId;
         use quotey_db::repositories::QuoteRepository;
 
         let repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
 
-        match repo.find_by_id(&QuoteId(input.quote_id.clone())).await {
+        match repo.find_by_id(&QuoteId(quote_id.clone())).await {
             Ok(Some(q)) => {
                 use quotey_db::repositories::quote::quote_status_as_str;
                 let status = quote_status_as_str(&q.status).to_string();
@@ -767,12 +1023,11 @@ impl QuoteyMcpServer {
                 serde_json::to_string_pretty(&result).unwrap_or_default()
             }
             Ok(None) => {
-                serde_json::json!({"error": format!("Quote '{}' not found", input.quote_id)})
-                    .to_string()
+                tool_error("NOT_FOUND", &format!("Quote '{}' not found", quote_id), None)
             }
             Err(e) => {
                 warn!(error = %e, "quote_get failed");
-                serde_json::json!({"error": e.to_string()}).to_string()
+                tool_error("INTERNAL_ERROR", &e.to_string(), None)
             }
         }
     }
@@ -781,24 +1036,38 @@ impl QuoteyMcpServer {
     async fn quote_price(&self, Parameters(input): Parameters<QuotePriceInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_price called");
 
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(value) => value,
+            Err(msg) => {
+                return tool_error("VALIDATION_ERROR", &msg, None);
+            }
+        };
+
+        let requested_discount_pct = match normalize_discount(input.requested_discount_pct, "requested_discount_pct") {
+            Ok(value) => value,
+            Err(msg) => {
+                return tool_error("VALIDATION_ERROR", &msg, None);
+            }
+        };
+
         use quotey_core::cpq::policy::evaluate_policy_input;
         use quotey_core::cpq::policy::PolicyInput;
         use quotey_core::cpq::pricing::price_quote_with_trace;
         use quotey_core::domain::quote::QuoteId;
         use quotey_db::repositories::QuoteRepository;
         use rust_decimal::Decimal;
+        use rust_decimal::prelude::FromPrimitive;
 
         let quote_repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
 
-        let quote = match quote_repo.find_by_id(&QuoteId(input.quote_id.clone())).await {
+        let quote = match quote_repo.find_by_id(&QuoteId(quote_id.clone())).await {
             Ok(Some(q)) => q,
             Ok(None) => {
-                return serde_json::json!({"error": format!("Quote '{}' not found", input.quote_id)})
-                    .to_string();
+                return tool_error("NOT_FOUND", &format!("Quote '{}' not found", quote_id), None);
             }
             Err(e) => {
                 warn!(error = %e, "quote_price: failed to load quote");
-                return serde_json::json!({"error": e.to_string()}).to_string();
+                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
             }
         };
 
@@ -806,7 +1075,7 @@ impl QuoteyMcpServer {
         let pricing_result = price_quote_with_trace(&quote, &quote.currency);
 
         // Run deterministic policy engine
-        let discount_pct = Decimal::try_from(input.requested_discount_pct).unwrap_or(Decimal::ZERO);
+        let discount_pct = Decimal::from_f64(requested_discount_pct).unwrap_or(Decimal::ZERO);
         let deal_value_dec = pricing_result.total;
         // Estimate margin: if no discount requested, margin is 100%; otherwise approximate
         let margin_pct = if deal_value_dec > Decimal::ZERO {
@@ -835,12 +1104,12 @@ impl QuoteyMcpServer {
                 _ => format!("Product {}", line.product_id.0),
             };
 
-            let base_price_f64: f64 = line.unit_price.to_string().parse().unwrap_or(0.0);
+            let base_price_f64: f64 = decimal_to_f64(&line.unit_price);
             let line_subtotal = base_price_f64 * line.quantity as f64;
 
             // Apply both the line-level discount and the requested global discount
-            let effective_discount = if input.requested_discount_pct > 0.0 {
-                input.requested_discount_pct
+            let effective_discount = if requested_discount_pct > 0.0 {
+                requested_discount_pct
             } else {
                 line.discount_pct
             };
@@ -861,7 +1130,7 @@ impl QuoteyMcpServer {
             });
         }
 
-        let subtotal_f64: f64 = pricing_result.subtotal.to_string().parse().unwrap_or(0.0);
+        let subtotal_f64: f64 = line_pricing.iter().map(|l| l.subtotal_before_discount).sum();
         let discount_f64: f64 = line_pricing.iter().map(|l| l.discount_amount).sum();
         let total_f64 = subtotal_f64 - discount_f64;
 
@@ -907,27 +1176,37 @@ impl QuoteyMcpServer {
     async fn quote_list(&self, Parameters(input): Parameters<QuoteListInput>) -> String {
         debug!("quote_list called");
 
+        let account_id = normalize_optional_trimmed(&input.account_id);
+        let status = normalize_optional_trimmed(&input.status);
+        let page = normalize_page(input.page);
+        let limit = normalize_limit(input.limit);
+        let fetch_limit = limit.saturating_add(1);
+        let offset = (page.saturating_sub(1)).saturating_mul(limit);
+
         use quotey_db::repositories::QuoteRepository;
 
         let repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
-        let offset = (input.page.saturating_sub(1)) * input.limit;
 
         match repo
-            .list(input.account_id.as_deref(), input.status.as_deref(), input.limit, offset)
+            .list(account_id.as_deref(), status.as_deref(), fetch_limit, offset)
             .await
         {
             Ok(quotes) => {
                 use quotey_db::repositories::quote::quote_status_as_str;
 
+                let mut quotes = quotes;
+                let has_more = quotes.len() > limit as usize;
+                quotes.truncate(limit as usize);
+
                 let items: Vec<QuoteListItem> = quotes
-                    .iter()
+                    .into_iter()
                     .map(|q| {
                         let status = quote_status_as_str(&q.status).to_string();
                         let total: f64 = q
                             .lines
                             .iter()
                             .map(|l| {
-                                let unit: f64 = l.unit_price.to_string().parse().unwrap_or(0.0);
+                                let unit: f64 = decimal_to_f64(&l.unit_price);
                                 let line_subtotal = unit * l.quantity as f64;
                                 let discount = line_subtotal * l.discount_pct / 100.0;
                                 line_subtotal - discount
@@ -951,9 +1230,9 @@ impl QuoteyMcpServer {
                 let result = QuoteListResult {
                     pagination: PaginationInfo {
                         total: items.len() as u32,
-                        page: input.page,
-                        per_page: input.limit,
-                        has_more: items.len() as u32 >= input.limit,
+                        page,
+                        per_page: limit,
+                        has_more,
                     },
                     items,
                 };
@@ -962,7 +1241,7 @@ impl QuoteyMcpServer {
             }
             Err(e) => {
                 warn!(error = %e, "quote_list failed");
-                serde_json::json!({"error": e.to_string()}).to_string()
+                tool_error("INTERNAL_ERROR", &e.to_string(), None)
             }
         }
     }
@@ -978,38 +1257,100 @@ impl QuoteyMcpServer {
         use quotey_core::domain::approval::{
             ApprovalId, ApprovalRequest as DomainApproval, ApprovalStatus,
         };
-        use quotey_core::domain::quote::QuoteId;
-        use quotey_db::repositories::ApprovalRepository;
-
+        use quotey_core::domain::quote::{QuoteId, QuoteStatus};
         // Verify quote exists
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(value) => value,
+            Err(msg) => {
+                return tool_error("VALIDATION_ERROR", &msg, None);
+            }
+        };
+
+        let justification = input.justification.trim().to_string();
+        if justification.is_empty() {
+            return tool_error("VALIDATION_ERROR", "justification is required", None);
+        }
+
+        if justification.len() > 2000 {
+            return tool_error(
+                "VALIDATION_ERROR",
+                "justification must be 2000 characters or fewer",
+                None,
+            );
+        }
+
+        let approver_role = input
+            .approver_role
+            .as_deref()
+            .map(str::trim)
+            .filter(|r| !r.is_empty())
+            .unwrap_or("sales_manager")
+            .to_string();
+
         let quote_repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
         use quotey_db::repositories::QuoteRepository;
 
-        let quote = match quote_repo.find_by_id(&QuoteId(input.quote_id.clone())).await {
+        let quote = match quote_repo.find_by_id(&QuoteId(quote_id.clone())).await {
             Ok(Some(q)) => q,
             Ok(None) => {
-                return serde_json::json!({"error": format!("Quote '{}' not found", input.quote_id)})
-                    .to_string();
+                return tool_error("NOT_FOUND", &format!("Quote '{}' not found", quote_id), None);
             }
             Err(e) => {
                 warn!(error = %e, "approval_request: failed to load quote");
-                return serde_json::json!({"error": e.to_string()}).to_string();
+                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
             }
         };
+
+        let normalized_status = quotey_db::repositories::quote::quote_status_as_str(&quote.status).to_string();
+        if matches!(
+            quote.status,
+            QuoteStatus::Approved | QuoteStatus::Sent | QuoteStatus::Expired | QuoteStatus::Cancelled
+        ) {
+            return tool_error(
+                "CONFLICT",
+                &format!("Quote '{}' is in '{}' state and cannot be submitted for approval", quote_id, normalized_status),
+                None,
+            );
+        }
+
+        let existing = match quotey_db::repositories::SqlApprovalRepository::new(self.db_pool.clone())
+            .find_by_quote_id(&QuoteId(quote_id.clone()))
+            .await
+        {
+            Ok(existing) => existing,
+            Err(e) => {
+                warn!(error = %e, "approval_request: failed to load existing approvals");
+                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+            }
+        };
+
+        if let Some(existing_pending) = existing.iter().find(|a| {
+            a.status == ApprovalStatus::Pending && a.approver_role.eq_ignore_ascii_case(&approver_role)
+        }) {
+            return tool_error(
+                "CONFLICT",
+                &format!(
+                    "A pending approval already exists for this quote and approver role. existing_approval_id={}",
+                    existing_pending.id.0
+                ),
+                Some(serde_json::json!({
+                    "quote_id": quote_id,
+                    "approval_id": existing_pending.id.0,
+                })),
+            );
+        }
 
         let now = chrono::Utc::now();
         let approval_id =
             format!("APR-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000"));
         let expires_at = now + chrono::Duration::hours(4);
-        let approver_role =
-            input.approver_role.clone().unwrap_or_else(|| "sales_manager".to_string());
 
         let approval = DomainApproval {
             id: ApprovalId(approval_id.clone()),
             quote_id: quote.id.clone(),
             approver_role: approver_role.clone(),
             reason: format!("Approval requested for quote {}", quote.id.0),
-            justification: input.justification.clone(),
+            justification,
             status: ApprovalStatus::Pending,
             requested_by: "agent:mcp".to_string(),
             expires_at: Some(expires_at),
@@ -1020,16 +1361,16 @@ impl QuoteyMcpServer {
         let repo = quotey_db::repositories::SqlApprovalRepository::new(self.db_pool.clone());
         if let Err(e) = repo.save(approval).await {
             warn!(error = %e, "approval_request: failed to save");
-            return serde_json::json!({"error": e.to_string()}).to_string();
+            return tool_error("INTERNAL_ERROR", &e.to_string(), None);
         }
 
         let result = ApprovalRequestResult {
             approval_id,
-            quote_id: input.quote_id,
+            quote_id,
             status: "pending".to_string(),
             approver_role,
             requested_by: "agent:mcp".to_string(),
-            justification: input.justification,
+            justification,
             created_at: now.to_rfc3339(),
             expires_at: expires_at.to_rfc3339(),
             message: "Approval request submitted and persisted".to_string(),
@@ -1042,17 +1383,24 @@ impl QuoteyMcpServer {
     async fn approval_status(&self, Parameters(input): Parameters<ApprovalStatusInput>) -> String {
         debug!(quote_id = %input.quote_id, "approval_status called");
 
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(value) => value,
+            Err(msg) => {
+                return tool_error("VALIDATION_ERROR", &msg, None);
+            }
+        };
+
         use quotey_core::domain::approval::ApprovalStatus as DomainStatus;
         use quotey_core::domain::quote::QuoteId;
         use quotey_db::repositories::approval::approval_status_as_str;
         use quotey_db::repositories::ApprovalRepository;
 
         let repo = quotey_db::repositories::SqlApprovalRepository::new(self.db_pool.clone());
-        let approvals = match repo.find_by_quote_id(&QuoteId(input.quote_id.clone())).await {
+        let approvals = match repo.find_by_quote_id(&QuoteId(quote_id.clone())).await {
             Ok(a) => a,
             Err(e) => {
                 warn!(error = %e, "approval_status: failed to load approvals");
-                return serde_json::json!({"error": e.to_string()}).to_string();
+                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
             }
         };
 
@@ -1084,7 +1432,7 @@ impl QuoteyMcpServer {
         };
 
         let result = ApprovalStatusResult {
-            quote_id: input.quote_id,
+            quote_id,
             current_status,
             pending_requests: pending,
             can_proceed: has_approved && !has_pending && !has_rejected,
@@ -1100,15 +1448,18 @@ impl QuoteyMcpServer {
     ) -> String {
         debug!("approval_pending called");
 
+        let limit = normalize_limit(input.limit);
+        let approver_role = normalize_optional_trimmed(&input.approver_role);
+
         use quotey_db::repositories::ApprovalRepository;
         use quotey_db::repositories::QuoteRepository;
 
         let repo = quotey_db::repositories::SqlApprovalRepository::new(self.db_pool.clone());
-        let pending = match repo.list_pending(input.approver_role.as_deref(), input.limit).await {
+        let pending = match repo.list_pending(approver_role.as_deref(), limit).await {
             Ok(p) => p,
             Err(e) => {
                 warn!(error = %e, "approval_pending: failed to list");
-                return serde_json::json!({"error": e.to_string()}).to_string();
+                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
             }
         };
 
@@ -1117,7 +1468,7 @@ impl QuoteyMcpServer {
         let mut items = Vec::new();
         for approval in &pending {
             // Look up quote to get total
-            let quote_total = match quote_repo.find_by_id(&approval.quote_id).await {
+            let (account_name, quote_total) = match quote_repo.find_by_id(&approval.quote_id).await {
                 Ok(Some(q)) => {
                     let total: f64 = q
                         .lines
@@ -1129,15 +1480,15 @@ impl QuoteyMcpServer {
                             subtotal - discount
                         })
                         .sum();
-                    total
+                    (q.account_id.clone().unwrap_or_else(|| "unknown".to_string()), total)
                 }
-                _ => 0.0,
+                _ => ("unknown".to_string(), 0.0),
             };
 
             items.push(ApprovalPendingItem {
                 approval_id: approval.id.0.clone(),
                 quote_id: approval.quote_id.0.clone(),
-                account_name: String::new(), // TODO: customer repo lookup
+                account_name,
                 quote_total,
                 requested_by: approval.requested_by.clone(),
                 justification: approval.justification.clone(),
@@ -1155,14 +1506,102 @@ impl QuoteyMcpServer {
     #[tool(description = "Generate PDF for a quote")]
     async fn quote_pdf(&self, Parameters(input): Parameters<QuotePdfInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_pdf called");
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(value) => value,
+            Err(msg) => {
+                return tool_error("VALIDATION_ERROR", &msg, None);
+            }
+        };
+
+        let template = if input.template.trim().is_empty() {
+            default_template()
+        } else {
+            input.template.trim()
+        };
+        if !template_is_allowed(template) {
+            return tool_error(
+                "VALIDATION_ERROR",
+                &format!(
+                    "Unsupported template '{}'. Allowed templates: {}",
+                    template,
+                    allowed_pdf_templates().join(", ")
+                ),
+                None,
+            );
+        }
+
+        use quotey_core::domain::quote::QuoteId;
+        use quotey_db::repositories::QuoteRepository;
+
+        let quote_repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
+        let quote = match quote_repo.find_by_id(&QuoteId(quote_id.clone())).await {
+            Ok(Some(q)) => q,
+            Ok(None) => {
+                return tool_error("NOT_FOUND", &format!("Quote '{}' not found", quote_id), None);
+            }
+            Err(e) => {
+                warn!(error = %e, "quote_pdf: failed to load quote");
+                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+            }
+        };
+
+        let line_total: f64 = quote
+            .lines
+            .iter()
+            .map(|line| {
+                let unit_price: f64 = decimal_to_f64(&line.unit_price);
+                let line_subtotal = unit_price * line.quantity as f64;
+                let discount = line_subtotal * line.discount_pct / 100.0;
+                line_subtotal - discount
+            })
+            .sum();
+
+        let payload = serde_json::json!({
+            "quote_id": quote.id.0,
+            "version": quote.version,
+            "status": quotey_db::repositories::quote::quote_status_as_str(&quote.status),
+            "account_id": quote.account_id,
+            "currency": quote.currency,
+            "subtotal": line_total,
+            "generated_by": "quotey-mcp",
+            "template": template,
+            "generated_at": chrono::Utc::now().to_rfc3339(),
+            "lines": quote
+                .lines
+                .iter()
+                .map(|line| serde_json::json!({
+                    "product_id": line.product_id.0,
+                    "quantity": line.quantity,
+                    "unit_price": decimal_to_f64(&line.unit_price),
+                    "discount_pct": line.discount_pct,
+                }))
+                .collect::<Vec<_>>(),
+        });
+
+        let artifact = format!(
+            "%PDF-1.4\n% Generated quote artifact for MCP client\n{}",
+            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
+        );
+        let file_name = format!("quote-{}-{}.pdf", sanitize_filename(&quote_id), template);
+        let dir = std::env::temp_dir().join("quotey-mcp").join("pdf");
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            warn!(error = %e, "quote_pdf: failed to create output directory");
+            return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+        }
+
+        let file_path = dir.join(file_name);
+        if let Err(e) = std::fs::write(&file_path, artifact.as_bytes()) {
+            warn!(error = %e, "quote_pdf: failed to write artifact");
+            return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+        }
 
         let result = QuotePdfResult {
-            quote_id: input.quote_id.clone(),
+            quote_id,
             pdf_generated: true,
-            file_path: format!("/tmp/quote_{}.pdf", input.quote_id),
-            file_size_bytes: 45678,
-            checksum: "sha256:abc123...".to_string(),
-            template_used: input.template,
+            file_path: file_path.to_string_lossy().to_string(),
+            file_size_bytes: artifact.len() as u64,
+            checksum: checksum_of(&artifact),
+            template_used: template.to_string(),
             generated_at: chrono::Utc::now().to_rfc3339(),
         };
 
