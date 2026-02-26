@@ -22,12 +22,12 @@
 {
   "id": "quotey-002",
   "title": "EPIC-V2-SUGGEST: Smart Product Suggestions Engine",
-  "status": "open",
+  "status": "in_progress",
   "priority": 1,
   "issue_type": "epic",
   "created_at": "2026-02-26T11:01:00Z",
   "created_by": "ubuntuman",
-  "updated_at": "2026-02-26T11:01:00Z",
+  "updated_at": "2026-02-26T12:30:00Z",
   "description": "## Overview\nAfter a rep selects a customer, the system automatically recommends products based on what similar customers bought, the customer's industry, their current contract, seasonal trends, and cross-sell/upsell opportunities. One-click to add.\n\n## Why This Matters\nReps spend too much time hunting through catalogs. This makes the system feel magical - it knows what the customer likely needs. Increases average deal size through intelligent cross-sell/upsell suggestions. Reduces training burden - reps don't need to memorize the entire catalog.\n\n## Background\nThis is a recommendation engine built on top of historical quote data. The system learns from past successful deals and applies that pattern to new opportunities. It's not about replacing human judgment - it's about surfacing relevant options quickly.\n\n## Technical Considerations\n- Similarity scoring algorithm based on: customer segment, industry, deal size, product categories\n- Collaborative filtering: \"customers like this also bought...\"\n- Content-based: product relationships, bundles, add-ons\n- Time-decay for seasonality (Q4 deals different from Q1)\n- Configurable suggestion rules (e.g., always suggest onboarding for Enterprise)\n- Privacy-aware: suggestions based on anonymized aggregate data, not individual customer data\n\n## User Experience\nWhen rep selects a customer, show 3-5 product suggestions with brief reasoning:\n- \"Based on Acme's industry (FinTech), we typically include SOC2 compliance add-on\"\n- \"Enterprise customers like Acme often add premium support in year 1\"\n- \"Similar mid-market deals included SSO (3 of last 5)\"\n\n## Goals\n1. Display 3-5 relevant product suggestions per customer\n2. Show reasoning for each suggestion\n3. One-click add to quote\n4. Learn from accepted/rejected suggestions (feedback loop)\n5. Configurable suggestion rules by segment\n\n## Dependencies\n- EPIC-V2-MCP (can be independent but suggestions enhance MCP tools)\n- Historical quote data (existing in v1)\n\n[Created from: ultrathink feature ideation - TOP 10 IDEA #2]",
   "labels": [
     "v2",
@@ -35,7 +35,8 @@
     "ux",
     "epic",
     "productivity"
-  ]
+  ],
+  "assigned_to": "Kimi"
 }
 {
   "id": "quotey-003",
@@ -290,12 +291,12 @@
 {
   "id": "quotey-002-1",
   "title": "TASK: Design similarity scoring algorithm",
-  "status": "open",
+  "status": "closed",
   "priority": 1,
   "issue_type": "task",
   "created_at": "2026-02-26T11:15:00Z",
   "created_by": "ubuntuman",
-  "updated_at": "2026-02-26T11:15:00Z",
+  "updated_at": "2026-02-26T12:30:00Z",
   "parent": "quotey-002",
   "description": "## Overview\nDesign the algorithm that determines which products to suggest for a customer.\n\n## Why This Matters\nThe core of the recommendation engine. Must balance relevance with diversity. Should be explainable.\n\n## Algorithm Components\n1. **Customer similarity**: Find similar customers (segment, industry, size)\n2. **Purchase patterns**: What did similar customers buy?\n3. **Product relationships**: Bundles, add-ons, replacements\n4. **Time factors**: Seasonal trends, recent popularity\n5. **Business rules**: Always suggest X for segment Y\n\n## Scoring Formula\n```\nscore = (similar_customer_buy * 0.4) +\n        (product_relationship * 0.3) +\n        (time_decay * 0.2) +\n        (business_rule_boost * 0.1)\n```\n\n## Output\nAlgorithm design doc with:\n- Component definitions\n- Scoring formula\n- Weight rationale\n- Examples\n\n[Created from: ultrathink - EPIC-V2-SUGGEST subtask]",
   "labels": [
@@ -303,7 +304,10 @@
     "recommendations",
     "algorithm",
     "design"
-  ]
+  ],
+  "assigned_to": "Kimi",
+  "resolution": "completed",
+  "completed_at": "2026-02-26T12:35:00Z"
 }
 {
   "id": "quotey-002-2",
