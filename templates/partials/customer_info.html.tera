@@ -1,0 +1,36 @@
+{# Reusable Customer Info Component for Quote Templates #}
+{# Usage: {% include "partials/customer_info.html.tera" %} #}
+
+<section class="customer-section">
+  <div class="customer-info">
+    <h2>{% if bill_to %}Bill To{% else %}Prepared For{% endif %}</h2>
+    <div class="customer-name">{{ account.name }}</div>
+    <div class="customer-contact">
+      {% if account.domain %}{{ account.domain }}<br>{% endif %}
+      {% if account.industry %}{{ account.industry }}<br>{% endif %}
+      {% if account.region %}{{ account.region }}{% endif %}
+      {% if primary_contact %}<br><br>Attn: {{ primary_contact.name }}<br>{{ primary_contact.email }}{% endif %}
+    </div>
+  </div>
+  <div class="quote-details">
+    <h2>Quote Details</h2>
+    <div class="detail-row">
+      <span class="detail-label">Quote ID</span>
+      <span class="detail-value">{{ quote.id }}</span>
+    </div>
+    {% if quote.version %}
+    <div class="detail-row">
+      <span class="detail-label">Version</span>
+      <span class="detail-value">{{ quote.version }}</span>
+    </div>
+    {% endif %}
+    <div class="detail-row">
+      <span class="detail-label">Valid Until</span>
+      <span class="detail-value">{{ quote.valid_until | date(format="%B %d, %Y") }}</span>
+    </div>
+    <div class="detail-row">
+      <span class="detail-label">Payment Terms</span>
+      <span class="detail-value">{{ quote.payment_terms | default(value="Net 30") }}</span>
+    </div>
+  </div>
+</section>
