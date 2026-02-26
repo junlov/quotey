@@ -43,7 +43,10 @@ impl QuoteFeatures {
             .map(|l| l.unit_price * Decimal::from(l.quantity))
             .sum();
         
-        let unique_products = quote.lines.len() as u32;
+        let unique_products = quote.lines.iter()
+            .map(|l| &l.product_id)
+            .collect::<std::collections::HashSet<_>>()
+            .len() as u32;
         
         let avg_unit_price = if line_count > 0 {
             total_value / Decimal::from(line_count)
@@ -300,24 +303,38 @@ impl WinProbabilityModel {
 
     /// Compute classification accuracy
     fn compute_accuracy(&self, x: &[Vec<f64>], y: &[f64]) -> f64 {
+        if x.is_empty() {
+            return 0.0;
+        }
+
         let mut correct = 0;
-        
+
         for i in 0..x.len() {
             let z: f64 = self.weights.iter().zip(x[i].iter()).map(|(w, xi)| w * xi).sum();
             let pred = Self::sigmoid(z);
             let pred_class = pred >= 0.5;
             let true_class = y[i] >= 0.5;
-            
+
             if pred_class == true_class {
                 correct += 1;
             }
         }
-        
+
         correct as f64 / x.len() as f64
     }
 
     /// Evaluate model on test set
     pub fn evaluate(&self, outcomes: &[DealOutcome]) -> ModelMetrics {
+        if outcomes.is_empty() {
+            return ModelMetrics {
+                accuracy: 0.0,
+                precision: 0.0,
+                recall: 0.0,
+                f1_score: 0.0,
+                sample_count: 0,
+            };
+        }
+
         let x: Vec<Vec<f64>> = outcomes.iter()
             .map(|o| o.features.to_normalized_vector())
             .collect();
