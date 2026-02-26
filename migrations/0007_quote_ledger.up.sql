@@ -1,3 +1,9 @@
+-- Migration: 0007_quote_ledger
+-- Description: Add immutable quote ledger for audit trail
+-- Stores content-addressed quote versions for deterministic replay
+-- Author: Quotey Team
+-- Date: 2024
+
 CREATE TABLE IF NOT EXISTS quote_ledger (
     entry_id TEXT PRIMARY KEY,
     quote_id TEXT NOT NULL,

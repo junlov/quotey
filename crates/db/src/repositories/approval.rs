@@ -110,7 +110,12 @@ impl ApprovalRepository for SqlApprovalRepository {
                                            status, requested_by, expires_at, created_at, updated_at)
              VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
+                 approver_role = excluded.approver_role,
+                 reason = excluded.reason,
+                 justification = excluded.justification,
                  status = excluded.status,
+                 requested_by = excluded.requested_by,
+                 expires_at = excluded.expires_at,
                  updated_at = excluded.updated_at",
         )
         .bind(&approval.id.0)

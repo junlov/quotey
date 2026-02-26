@@ -1,3 +1,9 @@
+-- Migration: 0006_quote_sessions
+-- Description: Add quote session management for collaborative editing
+-- Tracks active editing sessions with conflict detection
+-- Author: Quotey Team
+-- Date: 2024
+
 CREATE TABLE IF NOT EXISTS quote_sessions (
     id TEXT PRIMARY KEY,
     quote_id TEXT NOT NULL,

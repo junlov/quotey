@@ -205,7 +205,8 @@ impl ScoreCalculator {
         // Return category with highest score
         scores
             .iter()
-            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap())
+            .filter(|(score, _)| score.is_finite())
+            .max_by(|a, b| a.0.partial_cmp(&b.0).unwrap_or(std::cmp::Ordering::Equal))
             .map(|(_, cat)| *cat)
             .unwrap_or(SuggestionCategory::SimilarCustomersBought)
     }

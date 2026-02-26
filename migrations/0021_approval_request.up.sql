@@ -1,3 +1,9 @@
+-- Migration: 0021_approval_request
+-- Description: Add approval workflow support for quote discount authorization
+-- Tracks approval requests with status, justification, and expiration
+-- Author: Quotey Team
+-- Date: 2024
+
 CREATE TABLE IF NOT EXISTS approval_request (
     id TEXT PRIMARY KEY,
     quote_id TEXT NOT NULL,

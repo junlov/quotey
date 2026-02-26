@@ -1,0 +1,22 @@
+{
+  "project": "/data/projects/quotey/.ubs-mini",
+  "timestamp": "2026-02-24 11:02:18",
+  "scanners": [
+    {
+      "project": "/data/projects/quotey/.ubs-mini",
+      "files": 2,
+      "critical": 1,
+      "warning": 371,
+      "info": 97,
+      "timestamp": "2026-02-24T11:02:18Z",
+      "format": "json",
+      "language": "rust"
+    }
+  ],
+  "totals": {
+    "critical": 1,
+    "warning": 371,
+    "info": 97,
+    "files": 2
+  }
+}

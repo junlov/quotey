@@ -1,3 +1,9 @@
+-- Migration: 0001_initial
+-- Description: Initial schema creation for Quotey CPQ system
+-- Creates core tables: quote, quote_line, flow_state, audit_event
+-- Author: Quotey Team
+-- Date: 2024
+
 CREATE TABLE IF NOT EXISTS quote (
     id TEXT PRIMARY KEY,
     status TEXT NOT NULL DEFAULT 'draft',

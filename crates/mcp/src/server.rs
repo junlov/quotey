@@ -418,6 +418,11 @@ pub struct QuoteListResult {
 pub struct ApprovalRequestInput {
     pub quote_id: String,
     pub justification: String,
+    #[serde(default)]
+    #[schemars(
+        description = "Approver role (e.g. sales_manager, vp_finance). Defaults to sales_manager."
+    )]
+    pub approver_role: Option<String>,
 }
 
 #[derive(Debug, Serialize, JsonSchema)]
@@ -996,11 +1001,13 @@ impl QuoteyMcpServer {
         let approval_id =
             format!("APR-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000"));
         let expires_at = now + chrono::Duration::hours(4);
+        let approver_role =
+            input.approver_role.clone().unwrap_or_else(|| "sales_manager".to_string());
 
         let approval = DomainApproval {
             id: ApprovalId(approval_id.clone()),
             quote_id: quote.id.clone(),
-            approver_role: "sales_manager".to_string(),
+            approver_role: approver_role.clone(),
             reason: format!("Approval requested for quote {}", quote.id.0),
             justification: input.justification.clone(),
             status: ApprovalStatus::Pending,
@@ -1020,7 +1027,7 @@ impl QuoteyMcpServer {
             approval_id,
             quote_id: input.quote_id,
             status: "pending".to_string(),
-            approver_role: "sales_manager".to_string(),
+            approver_role,
             requested_by: "agent:mcp".to_string(),
             justification: input.justification,
             created_at: now.to_rfc3339(),
@@ -1064,12 +1071,14 @@ impl QuoteyMcpServer {
         let has_approved = approvals.iter().any(|a| a.status == DomainStatus::Approved);
         let has_pending = !pending.is_empty();
 
-        let current_status = if has_approved && !has_pending {
-            "approved".to_string()
+        let has_rejected = approvals.iter().any(|a| a.status == DomainStatus::Rejected);
+
+        let current_status = if has_rejected {
+            "rejected".to_string()
         } else if has_pending {
             "pending_approval".to_string()
-        } else if approvals.iter().any(|a| a.status == DomainStatus::Rejected) {
-            "rejected".to_string()
+        } else if has_approved {
+            "approved".to_string()
         } else {
             "no_approvals".to_string()
         };
@@ -1078,7 +1087,7 @@ impl QuoteyMcpServer {
             quote_id: input.quote_id,
             current_status,
             pending_requests: pending,
-            can_proceed: has_approved && !has_pending,
+            can_proceed: has_approved && !has_pending && !has_rejected,
         };
 
         serde_json::to_string_pretty(&result).unwrap_or_default()

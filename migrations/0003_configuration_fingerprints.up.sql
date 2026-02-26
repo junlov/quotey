@@ -1,3 +1,9 @@
+-- Migration: 0003_configuration_fingerprints
+-- Description: Add SimHash-based configuration fingerprinting for precedent intelligence
+-- Stores quote configurations as 128-bit hashes for similarity matching
+-- Author: Quotey Team
+-- Date: 2024
+
 CREATE TABLE IF NOT EXISTS configuration_fingerprints (
     id TEXT PRIMARY KEY,
     quote_id TEXT NOT NULL,

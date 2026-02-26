@@ -19,6 +19,7 @@ use quotey_db::DbPool;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
 use tracing::{error, info, warn};
+use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct PortalState {
@@ -46,6 +47,21 @@ pub struct RejectRequest {
 #[derive(Debug, Deserialize)]
 pub struct CommentRequest {
     pub text: String,
+    pub author_name: Option<String>,
+    pub author_email: Option<String>,
+    pub parent_id: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct CommentResponse {
+    pub id: String,
+    pub quote_id: String,
+    pub quote_line_id: Option<String>,
+    pub parent_id: Option<String>,
+    pub author_name: String,
+    pub author_email: String,
+    pub body: String,
+    pub created_at: String,
 }
 
 #[derive(Debug, Serialize)]
@@ -88,6 +104,8 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/quote/{token}/approve", post(approve_quote))
         .route("/quote/{token}/reject", post(reject_quote))
         .route("/quote/{token}/comment", post(add_comment))
+        .route("/quote/{token}/comments", get(list_comments))
+        .route("/quote/{token}/line/{line_id}/comment", post(add_line_comment))
         .route("/api/v1/portal/links", post(create_link))
         .route("/api/v1/portal/links/revoke", post(revoke_link))
         .route("/api/v1/portal/links/{quote_id}", get(list_links))
@@ -248,6 +266,42 @@ async fn add_comment(
         ));
     }
 
+    let author_name = body.author_name.unwrap_or_else(|| "Portal Customer".to_string());
+    let author_email = body.author_email.unwrap_or_else(|| "noreply@portal.local".to_string());
+
+    if let Some(parent_id) = &body.parent_id {
+        let parent_quote_id: Option<String> =
+            sqlx::query_scalar("SELECT quote_id FROM portal_comment WHERE id = ? AND quote_id = ?")
+                .bind(parent_id)
+                .bind(&quote_id)
+                .fetch_optional(&state.db_pool)
+                .await
+                .map_err(db_error)?;
+
+        if parent_quote_id.is_none() {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(PortalError { error: "parent comment not found for this quote".to_string() }),
+            ));
+        }
+    }
+
+    let id = uuid_v4();
+    sqlx::query(
+        "INSERT INTO portal_comment
+            (id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at)
+         VALUES (?, ?, NULL, ?, ?, ?, ?, datetime('now'))",
+    )
+    .bind(&id)
+    .bind(&quote_id)
+    .bind(&body.parent_id)
+    .bind(&author_name)
+    .bind(&author_email)
+    .bind(text)
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
     // Record audit event as a comment
     record_audit_event(
         &state.db_pool,
@@ -266,6 +320,140 @@ async fn add_comment(
     Ok(Json(PortalResponse {
         success: true,
         message: "Comment added. Your sales rep will be notified.".to_string(),
+    }))
+}
+
+async fn list_comments(
+    Path(token): Path<String>,
+    State(state): State<PortalState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<PortalError>)> {
+    let quote_id = resolve_quote_by_token(&state.db_pool, &token).await?;
+
+    let rows = sqlx::query(
+        "SELECT id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at
+         FROM portal_comment
+         WHERE quote_id = ?
+         ORDER BY created_at DESC",
+    )
+    .bind(&quote_id)
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    let comments: Vec<CommentResponse> = rows
+        .into_iter()
+        .map(|row| {
+            let map_err = |err| {
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    Json(PortalError { error: format!("failed to load comments: {err}") }),
+                )
+            };
+
+            let id: String = row.try_get("id").map_err(map_err)?;
+            let quote_id: String = row.try_get("quote_id").map_err(map_err)?;
+            let quote_line_id: Option<String> = row.try_get("quote_line_id").map_err(map_err)?;
+            let parent_id: Option<String> = row.try_get("parent_id").map_err(map_err)?;
+            let author_name: String = row.try_get("author_name").map_err(map_err)?;
+            let author_email: String = row.try_get("author_email").map_err(map_err)?;
+            let body: String = row.try_get("body").map_err(map_err)?;
+            let created_at: String = row.try_get("created_at").map_err(map_err)?;
+
+            Ok(CommentResponse {
+                id,
+                quote_id,
+                quote_line_id,
+                parent_id,
+                author_name,
+                author_email,
+                body,
+                created_at,
+            })
+        })
+        .collect::<Result<Vec<_>, (StatusCode, Json<PortalError>)>>()?;
+
+    Ok(Json(serde_json::json!({
+        "comments": comments,
+        "quote_id": quote_id,
+    })))
+}
+
+async fn add_line_comment(
+    Path((token, line_id)): Path<(String, String)>,
+    State(state): State<PortalState>,
+    Json(body): Json<CommentRequest>,
+) -> Result<Json<PortalResponse>, (StatusCode, Json<PortalError>)> {
+    let quote_id = resolve_quote_by_token(&state.db_pool, &token).await?;
+
+    let text = body.text.trim();
+    if text.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(PortalError { error: "comment text is required".to_string() }),
+        ));
+    }
+
+    let line_exists: Option<i64> =
+        sqlx::query_scalar("SELECT 1 FROM quote_line WHERE id = ? AND quote_id = ?")
+            .bind(&line_id)
+            .bind(&quote_id)
+            .fetch_optional(&state.db_pool)
+            .await
+            .map_err(db_error)?;
+    if line_exists.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(PortalError { error: format!("quote line `{line_id}` not found") }),
+        ));
+    }
+
+    if let Some(parent_id) = &body.parent_id {
+        let parent_quote_id: Option<String> =
+            sqlx::query_scalar("SELECT quote_id FROM portal_comment WHERE id = ? AND quote_id = ?")
+                .bind(parent_id)
+                .bind(&quote_id)
+                .fetch_optional(&state.db_pool)
+                .await
+                .map_err(db_error)?;
+
+        if parent_quote_id.is_none() {
+            return Err((
+                StatusCode::NOT_FOUND,
+                Json(PortalError { error: "parent comment not found for this quote".to_string() }),
+            ));
+        }
+    }
+
+    let author_name = body.author_name.unwrap_or_else(|| "Portal Customer".to_string());
+    let author_email = body.author_email.unwrap_or_else(|| "noreply@portal.local".to_string());
+    let id = uuid_v4();
+    sqlx::query(
+        "INSERT INTO portal_comment
+            (id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?, datetime('now'))",
+    )
+    .bind(&id)
+    .bind(&quote_id)
+    .bind(&line_id)
+    .bind(&body.parent_id)
+    .bind(&author_name)
+    .bind(&author_email)
+    .bind(text)
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    record_audit_event(
+        &state.db_pool,
+        &quote_id,
+        "portal.comment.line",
+        &format!("Customer comment on line {line_id}: {text}"),
+    )
+    .await;
+
+    Ok(Json(PortalResponse {
+        success: true,
+        message: format!("Comment on line {line_id} recorded."),
     }))
 }
 
@@ -383,13 +571,16 @@ async fn list_links(
     Path(quote_id): Path<String>,
     State(state): State<PortalState>,
 ) -> Result<Json<Vec<LinkResponse>>, (StatusCode, Json<PortalError>)> {
+    let now = Utc::now().to_rfc3339();
+
     let rows = sqlx::query(
         "SELECT id, token, quote_id, expires_at
          FROM portal_link
-         WHERE quote_id = ? AND revoked = 0
+         WHERE quote_id = ? AND revoked = 0 AND expires_at > ?
          ORDER BY created_at DESC",
     )
     .bind(&quote_id)
+    .bind(&now)
     .fetch_all(&state.db_pool)
     .await
     .map_err(db_error)?;
@@ -463,29 +654,11 @@ async fn resolve_quote_by_token(
         ));
     }
 
-    // Fallback: raw quote ID
-    let quote_row: Option<sqlx::sqlite::SqliteRow> =
-        sqlx::query("SELECT id FROM quote WHERE id = ?")
-            .bind(token)
-            .fetch_optional(pool)
-            .await
-            .map_err(db_error)?;
-
-    match quote_row {
-        Some(r) => {
-            let id: String = r.try_get("id").map_err(|e| {
-                db_error(sqlx::Error::ColumnDecode { index: "id".to_string(), source: Box::new(e) })
-            })?;
-            Ok(id)
-        }
-        None => {
-            warn!(token = %token, "portal: invalid or expired quote token");
-            Err((
-                StatusCode::NOT_FOUND,
-                Json(PortalError { error: "quote not found or link has expired".to_string() }),
-            ))
-        }
-    }
+    warn!(token = %token, "portal: invalid or expired quote token");
+    Err((
+        StatusCode::NOT_FOUND,
+        Json(PortalError { error: "quote not found or link has expired".to_string() }),
+    ))
 }
 
 /// Record an audit event for traceability.
@@ -529,38 +702,14 @@ fn db_error(error: sqlx::Error) -> (StatusCode, Json<PortalError>) {
     )
 }
 
-fn uuid_v4() -> String {
-    use std::time::{SystemTime, UNIX_EPOCH};
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    // Deterministic-ish unique ID from timestamp + thread ID for local-first use
-    let thread_id = std::thread::current().id();
-    format!("{:016x}{:?}", nanos, thread_id)
-        .chars()
-        .filter(|c| c.is_ascii_alphanumeric())
-        .take(32)
-        .collect()
+/// Generate a URL-safe random-looking token for portal links.
+fn generate_token() -> String {
+    // Use a cryptographically random UUID for link tokens to avoid guessability.
+    Uuid::new_v4().simple().to_string()
 }
 
-/// Generate a URL-safe random-looking token for portal links.
-/// Uses timestamp entropy + thread ID to produce an opaque, unguessable token.
-fn generate_token() -> String {
-    use std::collections::hash_map::DefaultHasher;
-    use std::hash::{Hash, Hasher};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
-    let thread_id = format!("{:?}", std::thread::current().id());
-
-    let mut hasher = DefaultHasher::new();
-    nanos.hash(&mut hasher);
-    thread_id.hash(&mut hasher);
-    let h1 = hasher.finish();
-
-    // Second hash round for more entropy
-    h1.hash(&mut hasher);
-    let h2 = hasher.finish();
-
-    format!("{:016x}{:016x}", h1, h2)
+fn uuid_v4() -> String {
+    Uuid::new_v4().simple().to_string()
 }
 
 #[cfg(test)]
@@ -717,7 +866,12 @@ mod tests {
         let result = add_comment(
             axum::extract::Path(quote_id.clone()),
             state(pool.clone()),
-            Json(CommentRequest { text: "Can we discuss pricing?".to_string() }),
+            Json(CommentRequest {
+                text: "Can we discuss pricing?".to_string(),
+                author_name: None,
+                author_email: None,
+                parent_id: None,
+            }),
         )
         .await
         .expect("should succeed");
@@ -742,7 +896,12 @@ mod tests {
         let result = add_comment(
             axum::extract::Path(quote_id),
             state(pool),
-            Json(CommentRequest { text: "  ".to_string() }),
+            Json(CommentRequest {
+                text: "  ".to_string(),
+                author_name: None,
+                author_email: None,
+                parent_id: None,
+            }),
         )
         .await;
 
@@ -1023,9 +1182,48 @@ mod tests {
     async fn resolve_quote_by_raw_id_fallback() {
         let (pool, quote_id) = setup().await;
 
-        // No portal link created — should fall back to raw quote ID lookup
-        let resolved =
-            resolve_quote_by_token(&pool, &quote_id).await.expect("fallback should succeed");
-        assert_eq!(resolved, quote_id);
+        let result = resolve_quote_by_token(&pool, &quote_id).await;
+
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_links_excludes_expired_links() {
+        let (pool, quote_id) = setup().await;
+
+        let first = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest {
+                quote_id: quote_id.clone(),
+                expires_in_days: Some(1),
+                created_by: None,
+            }),
+        )
+        .await
+        .expect("first link");
+
+        // Expire the first link in DB
+        sqlx::query("UPDATE portal_link SET expires_at = ? WHERE token = ?")
+            .bind((Utc::now() - chrono::Duration::days(1)).to_rfc3339())
+            .bind(&first.0.token)
+            .execute(&pool)
+            .await
+            .expect("expire link");
+
+        let active = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest { quote_id, expires_in_days: Some(1), created_by: None }),
+        )
+        .await
+        .expect("active link");
+
+        let result = list_links(axum::extract::Path(first.0.quote_id.clone()), state(pool))
+            .await
+            .expect("list links");
+
+        let links = result.0;
+        assert_eq!(links.len(), 1);
+        assert_eq!(links[0].token, active.0.token);
     }
 }
