@@ -1,6 +1,11 @@
 //! Web portal routes for customer-facing quote approval and interaction.
 //!
-//! Endpoints:
+//! HTML Endpoints:
+//! - `GET  /quote/{token}`                      — view quote details (HTML)
+//! - `GET  /quote/{token}/download`             — download quote PDF
+//! - `GET  /portal`                             — portal homepage (quote list)
+//!
+//! JSON API Endpoints:
 //! - `POST /quote/{token}/approve`              — capture electronic approval
 //! - `POST /quote/{token}/reject`               — capture rejection with reason
 //! - `POST /quote/{token}/comment`              — add an overall customer comment
@@ -11,8 +16,9 @@
 //! - `GET  /api/v1/portal/links/{quote_id}`     — list active links for a quote
 
 use axum::{
-    extract::{Path, State},
+    extract::{Path, Query, State},
     http::StatusCode,
+    response::Html,
     routing::{get, post},
     Json, Router,
 };
@@ -20,12 +26,15 @@ use chrono::Utc;
 use quotey_db::DbPool;
 use serde::{Deserialize, Serialize};
 use sqlx::Row;
+use std::sync::Arc;
+use tera::{Context, Tera};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
 #[derive(Clone)]
 pub struct PortalState {
     db_pool: DbPool,
+    templates: Arc<Tera>,
 }
 
 // ---------------------------------------------------------------------------
@@ -101,8 +110,36 @@ pub struct RevokeLinkRequest {
 // Router
 // ---------------------------------------------------------------------------
 
+/// Initialize Tera template engine with portal templates.
+fn init_templates() -> Arc<Tera> {
+    let mut tera = match Tera::new("templates/portal/**/*") {
+        Ok(t) => t,
+        Err(e) => {
+            warn!(error = %e, "Failed to load portal templates from filesystem, using empty Tera instance");
+            Tera::default()
+        }
+    };
+
+    // Add built-in fallback templates in case filesystem templates are not available
+    tera.add_raw_template(
+        "quote_viewer.html",
+        include_str!("../../../templates/portal/quote_viewer.html"),
+    )
+    .ok();
+    tera.add_raw_template("index.html", include_str!("../../../templates/portal/index.html")).ok();
+
+    Arc::new(tera)
+}
+
 pub fn router(db_pool: DbPool) -> Router {
+    let templates = init_templates();
+
     Router::new()
+        // HTML routes
+        .route("/quote/{token}", get(view_quote_page))
+        .route("/quote/{token}/download", get(download_quote_pdf))
+        .route("/portal", get(portal_index_page))
+        // JSON API routes
         .route("/quote/{token}/approve", post(approve_quote))
         .route("/quote/{token}/reject", post(reject_quote))
         .route("/quote/{token}/comment", post(add_comment))
@@ -111,11 +148,288 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/api/v1/portal/links", post(create_link))
         .route("/api/v1/portal/links/revoke", post(revoke_link))
         .route("/api/v1/portal/links/{quote_id}", get(list_links))
-        .with_state(PortalState { db_pool })
+        .with_state(PortalState { db_pool, templates })
 }
 
 // ---------------------------------------------------------------------------
-// Handlers
+// HTML Handlers
+// ---------------------------------------------------------------------------
+
+/// Query parameters for the portal index page
+#[derive(Debug, Deserialize, Default)]
+pub struct PortalIndexQuery {
+    pub status: Option<String>,
+    pub search: Option<String>,
+}
+
+/// Render the quote viewer HTML page.
+async fn view_quote_page(
+    Path(token): Path<String>,
+    State(state): State<PortalState>,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    let quote_id = resolve_quote_by_token(&state.db_pool, &token)
+        .await
+        .map_err(|(status, err)| (status, Html(format!("<h1>Error</h1><p>{}</p>", err.0.error))))?;
+
+    // Fetch quote details
+    let quote_row = sqlx::query(
+        "SELECT id, status, version, currency, term_months, payment_terms, 
+                subtotal, discount_total, tax_total, total, valid_until, 
+                created_at, updated_at, created_by
+         FROM quote WHERE id = ?",
+    )
+    .bind(&quote_id)
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
+    })?;
+
+    let quote_row = match quote_row {
+        Some(row) => row,
+        None => return Err((StatusCode::NOT_FOUND, Html("<h1>Quote not found</h1>".to_string()))),
+    };
+
+    // Fetch quote lines
+    let line_rows = sqlx::query(
+        "SELECT id, product_id, quantity, unit_price, discount_pct, subtotal, notes
+         FROM quote_line WHERE quote_id = ? ORDER BY sort_order",
+    )
+    .bind(&quote_id)
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
+    })?;
+
+    let lines: Vec<serde_json::Value> = line_rows
+        .iter()
+        .map(|row| {
+            serde_json::json!({
+                "product_name": row.try_get::<String, _>("product_id").unwrap_or_default(),
+                "quantity": row.try_get::<i64, _>("quantity").unwrap_or(0),
+                "unit_price": format_price(row.try_get::<f64, _>("unit_price").unwrap_or(0.0)),
+                "total": format_price(row.try_get::<f64, _>("subtotal").unwrap_or(0.0)),
+                "description": row.try_get::<String, _>("notes").unwrap_or_default(),
+            })
+        })
+        .collect();
+
+    // Fetch comments
+    let comment_rows = sqlx::query(
+        "SELECT id, author_name, author_email, body, created_at
+         FROM portal_comment WHERE quote_id = ? AND quote_line_id IS NULL
+         ORDER BY created_at DESC",
+    )
+    .bind(&quote_id)
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
+    let comments: Vec<serde_json::Value> = comment_rows.iter().map(|row| {
+        serde_json::json!({
+            "author": row.try_get::<String, _>("author_name").unwrap_or_default(),
+            "text": row.try_get::<String, _>("body").unwrap_or_default(),
+            "timestamp": row.try_get::<String, _>("created_at").unwrap_or_default(),
+            "is_customer": !row.try_get::<String, _>("author_email").unwrap_or_default().contains("@quotey"),
+        })
+    }).collect();
+
+    // Build template context
+    let mut context = Context::new();
+    context.insert("quote", &serde_json::json!({
+        "quote_id": quote_id,
+        "token": token,
+        "status": quote_row.try_get::<String, _>("status").unwrap_or_default(),
+        "version": quote_row.try_get::<i64, _>("version").unwrap_or(1),
+        "created_at": quote_row.try_get::<String, _>("created_at").unwrap_or_default(),
+        "valid_until": quote_row.try_get::<String, _>("valid_until").unwrap_or_default(),
+        "term_months": quote_row.try_get::<i64, _>("term_months").unwrap_or(12),
+        "payment_terms": quote_row.try_get::<String, _>("payment_terms").unwrap_or_else(|_| "Net 30".to_string()),
+        "subtotal": format_price(quote_row.try_get::<f64, _>("subtotal").unwrap_or(0.0)),
+        "discount_total": format_price(quote_row.try_get::<f64, _>("discount_total").unwrap_or(0.0)),
+        "tax_amount": format_price(quote_row.try_get::<f64, _>("tax_total").unwrap_or(0.0)),
+        "total": format_price(quote_row.try_get::<f64, _>("total").unwrap_or(0.0)),
+        "lines": lines,
+        "expires_soon": false, // TODO: calculate from valid_until
+    }));
+
+    context.insert(
+        "customer",
+        &serde_json::json!({
+            "name": "Customer", // TODO: fetch from account table
+            "email": "",
+            "phone": "",
+        }),
+    );
+
+    context.insert(
+        "rep",
+        &serde_json::json!({
+            "name": quote_row.try_get::<String, _>("created_by").unwrap_or_default(),
+            "email": "",
+        }),
+    );
+
+    context.insert("comments", &comments);
+
+    context.insert(
+        "branding",
+        &serde_json::json!({
+            "company_name": "Quotey",
+            "logo_url": Option::<String>::None,
+            "primary_color": "#2563eb",
+        }),
+    );
+
+    let html = state.templates.render("quote_viewer.html", &context).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>Template Error</h1><pre>{:?}</pre>", e)),
+        )
+    })?;
+
+    Ok(Html(html))
+}
+
+/// Handle PDF download request.
+async fn download_quote_pdf(
+    Path(token): Path<String>,
+    State(state): State<PortalState>,
+) -> Result<(StatusCode, Json<PortalResponse>), (StatusCode, Json<PortalError>)> {
+    let quote_id = resolve_quote_by_token(&state.db_pool, &token).await?;
+
+    // TODO: Generate PDF and return as attachment
+    // For now, return a message indicating the feature is coming soon
+    info!(
+        event_name = "portal.pdf.download_requested",
+        quote_id = %quote_id,
+        "PDF download requested"
+    );
+
+    // In the future, this would:
+    // 1. Generate PDF using the templates from templates/quotes/
+    // 2. Store or stream the PDF
+    // 3. Return as application/pdf content type
+
+    Err((
+        StatusCode::NOT_IMPLEMENTED,
+        Json(PortalError { error: "PDF generation coming soon".to_string() }),
+    ))
+}
+
+/// Render the portal index page (list of quotes).
+async fn portal_index_page(
+    Query(query): Query<PortalIndexQuery>,
+    State(state): State<PortalState>,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    // Fetch all quotes with optional status filter
+    let status_filter = query.status.as_deref().unwrap_or("all");
+
+    let quote_rows = if status_filter == "all" {
+        sqlx::query(
+            "SELECT id, status, created_at, valid_until, total
+             FROM quote ORDER BY created_at DESC LIMIT 100",
+        )
+        .fetch_all(&state.db_pool)
+        .await
+    } else {
+        sqlx::query(
+            "SELECT id, status, created_at, valid_until, total
+             FROM quote WHERE status = ? ORDER BY created_at DESC LIMIT 100",
+        )
+        .bind(status_filter)
+        .fetch_all(&state.db_pool)
+        .await
+    }
+    .map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
+    })?;
+
+    // Calculate stats
+    let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quote")
+        .fetch_one(&state.db_pool)
+        .await
+        .unwrap_or(0);
+
+    let pending_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE status = 'sent'")
+        .fetch_one(&state.db_pool)
+        .await
+        .unwrap_or(0);
+
+    let approved_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE status = 'approved'")
+            .fetch_one(&state.db_pool)
+            .await
+            .unwrap_or(0);
+
+    // Build quotes list
+    let quotes: Vec<serde_json::Value> = quote_rows
+        .iter()
+        .map(|row| {
+            let quote_id: String = row.try_get("id").unwrap_or_default();
+            let status: String = row.try_get("status").unwrap_or_default();
+
+            // Get the active token for this quote
+            let token = format!("token-{}", &quote_id); // Simplified for now
+
+            serde_json::json!({
+                "token": token,
+                "quote_id": quote_id,
+                "created_at": row.try_get::<String, _>("created_at").unwrap_or_default(),
+                "valid_until": row.try_get::<String, _>("valid_until").unwrap_or_default(),
+                "status": status,
+                "total_amount": format_price(row.try_get::<f64, _>("total").unwrap_or(0.0)),
+            })
+        })
+        .collect();
+
+    // Build template context
+    let mut context = Context::new();
+    context.insert(
+        "customer",
+        &serde_json::json!({
+            "name": "All Customers",
+            "email": "",
+        }),
+    );
+
+    context.insert(
+        "stats",
+        &serde_json::json!({
+            "total": total_count,
+            "pending": pending_count,
+            "approved": approved_count,
+        }),
+    );
+
+    context.insert("quotes", &quotes);
+
+    context.insert(
+        "branding",
+        &serde_json::json!({
+            "company_name": "Quotey",
+            "logo_url": Option::<String>::None,
+        }),
+    );
+
+    let html = state.templates.render("index.html", &context).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>Template Error</h1><pre>{:?}</pre>", e)),
+        )
+    })?;
+
+    Ok(Html(html))
+}
+
+/// Format a price for display
+fn format_price(amount: f64) -> String {
+    format!("${:.2}", amount)
+}
+
+// ---------------------------------------------------------------------------
+// JSON API Handlers
 // ---------------------------------------------------------------------------
 
 async fn approve_quote(
@@ -756,7 +1070,16 @@ mod tests {
     }
 
     fn state(pool: sqlx::SqlitePool) -> State<PortalState> {
-        State(PortalState { db_pool: pool })
+        let mut tera = Tera::default();
+        // Add minimal templates for testing
+        tera.add_raw_template(
+            "quote_viewer.html",
+            "<html><body>Quote {{ quote.quote_id }}</body></html>",
+        )
+        .ok();
+        tera.add_raw_template("index.html", "<html><body>Portal</body></html>").ok();
+
+        State(PortalState { db_pool: pool, templates: Arc::new(tera) })
     }
 
     #[tokio::test]
