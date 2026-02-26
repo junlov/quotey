@@ -1,0 +1,407 @@
+/* Quotey PDF Quote Styles - Shared CSS */
+
+:root {
+    --primary-color: {{ branding.primary_color | default(value="#2563eb") }};
+    --secondary-color: {{ branding.secondary_color | default(value="#64748b") }};
+    --accent-color: {{ branding.accent_color | default(value="#f59e0b") }};
+    --text-dark: #1e293b;
+    --text-light: #64748b;
+    --border-color: #e2e8f0;
+    --bg-light: #f8fafc;
+    --success-color: #10b981;
+    --warning-color: #f59e0b;
+    --error-color: #ef4444;
+}
+
+* {
+    margin: 0;
+    padding: 0;
+    box-sizing: border-box;
+}
+
+body {
+    font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+    font-size: 11pt;
+    line-height: 1.5;
+    color: var(--text-dark);
+    background: white;
+}
+
+.quote-container {
+    max-width: 800px;
+    margin: 0 auto;
+    padding: 40px;
+}
+
+/* Header Styles */
+.quote-header {
+    display: flex;
+    justify-content: space-between;
+    align-items: flex-start;
+    border-bottom: 3px solid var(--primary-color);
+    padding-bottom: 24px;
+    margin-bottom: 32px;
+}
+
+.company-branding {
+    display: flex;
+    align-items: center;
+    gap: 16px;
+}
+
+.company-logo {
+    max-height: 60px;
+    max-width: 200px;
+    object-fit: contain;
+}
+
+.company-name {
+    font-size: 20pt;
+    font-weight: 700;
+    color: var(--primary-color);
+    margin-bottom: 4px;
+}
+
+.company-tagline {
+    font-size: 10pt;
+    color: var(--text-light);
+    font-style: italic;
+}
+
+.quote-meta {
+    text-align: right;
+}
+
+.quote-title {
+    font-size: 24pt;
+    font-weight: 700;
+    color: var(--primary-color);
+    letter-spacing: 2px;
+    margin-bottom: 8px;
+}
+
+.quote-number {
+    font-size: 11pt;
+    font-weight: 600;
+    color: var(--text-dark);
+}
+
+.quote-date {
+    font-size: 10pt;
+    color: var(--text-light);
+}
+
+.quote-version {
+    font-size: 9pt;
+    color: var(--text-light);
+    margin-top: 4px;
+}
+
+/* Customer Section */
+.customer-section {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 32px;
+    margin-bottom: 32px;
+    padding: 20px;
+    background: var(--bg-light);
+    border-radius: 8px;
+}
+
+.customer-section h3 {
+    font-size: 10pt;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    color: var(--text-light);
+    margin-bottom: 12px;
+    font-weight: 600;
+}
+
+.customer-name {
+    font-size: 14pt;
+    font-weight: 600;
+    color: var(--text-dark);
+    margin-bottom: 4px;
+}
+
+.customer-contact, .customer-email {
+    font-size: 10pt;
+    color: var(--text-light);
+}
+
+.quote-details p {
+    font-size: 10pt;
+    margin-bottom: 4px;
+}
+
+.quote-details strong {
+    color: var(--text-dark);
+}
+
+/* Table Styles */
+.line-items-table {
+    width: 100%;
+    border-collapse: collapse;
+    margin: 24px 0;
+    font-size: 10pt;
+}
+
+.line-items-table th {
+    background: var(--primary-color);
+    color: white;
+    padding: 12px;
+    text-align: left;
+    font-weight: 600;
+    text-transform: uppercase;
+    font-size: 9pt;
+    letter-spacing: 0.5px;
+}
+
+.line-items-table td {
+    padding: 12px;
+    border-bottom: 1px solid var(--border-color);
+    vertical-align: top;
+}
+
+.line-items-table tr:nth-child(even) {
+    background: var(--bg-light);
+}
+
+.line-items-table .text-right {
+    text-align: right;
+}
+
+.line-items-table .text-center {
+    text-align: center;
+}
+
+.product-name {
+    font-weight: 600;
+    color: var(--text-dark);
+}
+
+.product-description {
+    font-size: 9pt;
+    color: var(--text-light);
+    margin-top: 2px;
+}
+
+/* Totals Section */
+.totals-section {
+    margin-top: 24px;
+    border-top: 2px solid var(--border-color);
+    padding-top: 16px;
+}
+
+.totals-table {
+    width: 50%;
+    margin-left: auto;
+    font-size: 10pt;
+}
+
+.totals-table td {
+    padding: 6px 12px;
+}
+
+.totals-table .label {
+    text-align: right;
+    color: var(--text-light);
+}
+
+.totals-table .value {
+    text-align: right;
+    font-weight: 500;
+}
+
+.totals-table .total-row {
+    font-size: 14pt;
+    font-weight: 700;
+    color: var(--primary-color);
+    border-top: 2px solid var(--primary-color);
+}
+
+.totals-table .total-row td {
+    padding-top: 12px;
+}
+
+/* Footer Styles */
+.quote-footer {
+    margin-top: 48px;
+    padding-top: 24px;
+    border-top: 1px solid var(--border-color);
+    text-align: center;
+    font-size: 9pt;
+    color: var(--text-light);
+}
+
+.footer-content p {
+    margin-bottom: 4px;
+}
+
+.generated-by {
+    margin-top: 16px;
+    font-style: italic;
+    opacity: 0.7;
+}
+
+/* Utility Classes */
+.text-success { color: var(--success-color); }
+.text-warning { color: var(--warning-color); }
+.text-error { color: var(--error-color); }
+.font-bold { font-weight: 700; }
+.font-semibold { font-weight: 600; }
+.text-sm { font-size: 9pt; }
+.text-lg { font-size: 14pt; }
+.mb-4 { margin-bottom: 16px; }
+.mt-4 { margin-top: 16px; }
+
+/* Print Optimization */
+@media print {
+    .quote-container {
+        padding: 20px;
+    }
+    
+    body {
+        print-color-adjust: exact;
+        -webkit-print-color-adjust: exact;
+    }
+}
+
+/* Compact Template Adjustments */
+.compact .quote-header {
+    padding-bottom: 12px;
+    margin-bottom: 16px;
+}
+
+.compact .company-name {
+    font-size: 14pt;
+}
+
+.compact .quote-title {
+    font-size: 18pt;
+}
+
+.compact .customer-section {
+    padding: 12px;
+    margin-bottom: 16px;
+}
+
+.compact .line-items-table {
+    font-size: 9pt;
+}
+
+.compact .line-items-table th,
+.compact .line-items-table td {
+    padding: 8px;
+}
+
+/* Comparison Template */
+.comparison-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 24px;
+    margin: 24px 0;
+}
+
+.comparison-option {
+    border: 2px solid var(--border-color);
+    border-radius: 8px;
+    padding: 20px;
+}
+
+.comparison-option.recommended {
+    border-color: var(--success-color);
+    background: rgba(16, 185, 129, 0.05);
+}
+
+.option-header {
+    text-align: center;
+    padding-bottom: 16px;
+    border-bottom: 1px solid var(--border-color);
+    margin-bottom: 16px;
+}
+
+.option-title {
+    font-size: 14pt;
+    font-weight: 700;
+    color: var(--text-dark);
+}
+
+.option-price {
+    font-size: 24pt;
+    font-weight: 700;
+    color: var(--primary-color);
+    margin: 8px 0;
+}
+
+.option-period {
+    font-size: 10pt;
+    color: var(--text-light);
+}
+
+.recommended-badge {
+    display: inline-block;
+    background: var(--success-color);
+    color: white;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 8pt;
+    font-weight: 600;
+    text-transform: uppercase;
+    margin-top: 8px;
+}
+
+/* Renewal Template */
+.change-indicator {
+    display: inline-flex;
+    align-items: center;
+    gap: 4px;
+    font-size: 9pt;
+    font-weight: 600;
+    padding: 2px 8px;
+    border-radius: 4px;
+}
+
+.change-increase {
+    background: rgba(239, 68, 68, 0.1);
+    color: var(--error-color);
+}
+
+.change-decrease {
+    background: rgba(16, 185, 129, 0.1);
+    color: var(--success-color);
+}
+
+.change-neutral {
+    background: var(--bg-light);
+    color: var(--text-light);
+}
+
+/* Executive Summary */
+.executive-summary .key-metrics {
+    display: grid;
+    grid-template-columns: repeat(3, 1fr);
+    gap: 16px;
+    margin: 24px 0;
+}
+
+.metric-card {
+    background: var(--bg-light);
+    padding: 16px;
+    border-radius: 8px;
+    text-align: center;
+}
+
+.metric-value {
+    font-size: 20pt;
+    font-weight: 700;
+    color: var(--primary-color);
+}
+
+.metric-label {
+    font-size: 9pt;
+    color: var(--text-light);
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    margin-top: 4px;
+}

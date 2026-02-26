@@ -1,0 +1,253 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quote {{ quote.id }} - Executive Summary</title>
+  <style>
+    {% include "styles/quote-base.css" %}
+    
+    /* Executive Summary specific styles */
+    .executive-summary {
+      max-height: 100vh;
+      overflow: hidden;
+    }
+    
+    .summary-highlight {
+      background: linear-gradient(135deg, var(--primary-color) 0%, var(--secondary-color) 100%);
+      color: white;
+      padding: 24px;
+      border-radius: 12px;
+      margin-bottom: 24px;
+      text-align: center;
+    }
+    
+    .summary-highlight .total-amount {
+      font-size: 32pt;
+      font-weight: 700;
+      margin: 8px 0;
+    }
+    
+    .summary-highlight .total-label {
+      font-size: 10pt;
+      text-transform: uppercase;
+      letter-spacing: 1px;
+      opacity: 0.9;
+    }
+    
+    .summary-highlight .term-info {
+      font-size: 11pt;
+      margin-top: 8px;
+      opacity: 0.9;
+    }
+    
+    .key-metrics {
+      display: grid;
+      grid-template-columns: repeat(3, 1fr);
+      gap: 16px;
+      margin-bottom: 24px;
+    }
+    
+    .metric-card {
+      background: var(--bg-light);
+      padding: 16px;
+      border-radius: 8px;
+      text-align: center;
+      border-top: 3px solid var(--primary-color);
+    }
+    
+    .metric-value {
+      font-size: 18pt;
+      font-weight: 700;
+      color: var(--primary-color);
+    }
+    
+    .metric-label {
+      font-size: 9pt;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-top: 4px;
+    }
+    
+    .top-products {
+      margin-bottom: 24px;
+    }
+    
+    .top-products h2 {
+      font-size: 11pt;
+      font-weight: 600;
+      color: var(--text-secondary);
+      text-transform: uppercase;
+      letter-spacing: 0.5px;
+      margin-bottom: 12px;
+    }
+    
+    .product-chips {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+    
+    .product-chip {
+      background: var(--bg-light);
+      border: 1px solid var(--border-color);
+      padding: 8px 12px;
+      border-radius: 20px;
+      font-size: 9pt;
+    }
+    
+    .product-chip strong {
+      color: var(--primary-color);
+    }
+    
+    .quick-actions {
+      display: flex;
+      gap: 12px;
+      margin-top: 24px;
+      padding-top: 24px;
+      border-top: 1px solid var(--border-color);
+    }
+    
+    .action-note {
+      font-size: 9pt;
+      color: var(--text-muted);
+      font-style: italic;
+    }
+    
+    /* Single page optimization */
+    @page {
+      margin: 30px;
+    }
+    
+    body {
+      font-size: 10pt;
+    }
+    
+    .quote-header {
+      margin-bottom: 20px;
+      padding-bottom: 16px;
+    }
+    
+    .customer-section {
+      margin-bottom: 16px;
+      padding: 12px;
+    }
+    
+    .totals-section {
+      width: 250px;
+    }
+  </style>
+</head>
+<body class="executive-summary">
+  <!-- Header -->
+  <header class="quote-header">
+    <div class="company-branding">
+      {% if company_logo %}
+      <img src="{{ company_logo }}" alt="{{ company_name }}" class="company-logo">
+      {% endif %}
+      <div class="company-info">
+        <h1>{{ company_name | default(value="Quotey") }}</h1>
+        <p>
+          {{ company_address | default(value="") }}<br>
+          {{ company_email | default(value="sales@example.com") }}
+        </p>
+      </div>
+    </div>
+    <div class="quote-meta">
+      <div class="quote-id">{{ quote.id }}</div>
+      <span class="quote-status {{ quote.status | lower }}">{{ quote.status }}</span>
+      <div class="quote-date">{{ quote.created_at | date(format="%B %d, %Y") }}</div>
+    </div>
+  </header>
+
+  <!-- Customer Info -->
+  <section class="customer-section">
+    <div class="customer-info">
+      <h2>Prepared For</h2>
+      <div class="customer-name">{{ account.name }}</div>
+      <div class="customer-contact">
+        {% if account.industry %}{{ account.industry }}<br>{% endif %}
+        {% if primary_contact %}
+          Attn: {{ primary_contact.name }}<br>
+          {{ primary_contact.email }}
+        {% endif %}
+      </div>
+    </div>
+    <div class="quote-details">
+      <h2>Quote Details</h2>
+      <div class="detail-row">
+        <span class="detail-label">Valid Until</span>
+        <span class="detail-value">{{ quote.valid_until | date(format="%B %d, %Y") }}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Payment Terms</span>
+        <span class="detail-value">{{ quote.payment_terms | default(value="Net 30") }}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Currency</span>
+        <span class="detail-value">{{ quote.currency | default(value="USD") }}</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Summary Highlight -->
+  <section class="summary-highlight">
+    <div class="total-label">Total Annual Contract Value</div>
+    <div class="total-amount">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total) }}</div>
+    <div class="term-info">
+      {{ quote.term_months | default(value=12) }} month term 
+      {% if quote.start_date %}starting {{ quote.start_date | date(format="%B %d, %Y") }}{% endif %}
+    </div>
+  </section>
+
+  <!-- Key Metrics -->
+  <section class="key-metrics">
+    <div class="metric-card">
+      <div class="metric-value">{{ lines | length }}</div>
+      <div class="metric-label">Products</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">{{ pricing.discount_total | default(value=0) | money }}</div>
+      <div class="metric-label">Discount Applied</div>
+    </div>
+    <div class="metric-card">
+      <div class="metric-value">{{ quote.currency | default(value="$") }}{{ "%.0f" | format(pricing.total / (quote.term_months | default(value=12))) }}/mo</div>
+      <div class="metric-label">Monthly</div>
+    </div>
+  </section>
+
+  <!-- Top Products -->
+  <section class="top-products">
+    <h2>Included Products</h2>
+    <div class="product-chips">
+      {% for line in lines | slice(end=5) %}
+      <div class="product-chip">
+        <strong>{{ line.quantity }}×</strong> {{ line.product_name }}
+      </div>
+      {% endfor %}
+      {% if lines | length > 5 %}
+      <div class="product-chip">+{{ lines | length - 5 }} more</div>
+      {% endif %}
+    </div>
+  </section>
+
+  <!-- Quick Summary -->
+  <section class="terms-section">
+    <h3>What's Next</h3>
+    <p>This executive summary provides a high-level overview of your quote. A detailed breakdown with full line items and terms is available upon request.</p>
+    <p class="action-note mt-2">To accept this quote, please sign and return the attached detailed quote document or contact your sales representative.</p>
+  </section>
+
+  <!-- Footer -->
+  <footer class="quote-footer">
+    <p class="footer-text">
+      This quote is valid until {{ quote.valid_until | date(format="%B %d, %Y") }}. 
+      Prices and availability subject to change thereafter.
+    </p>
+    {% if not white_label %}
+    <p class="footer-text mt-1">Generated by Quotey</p>
+    {% endif %}
+  </footer>
+</body>
+</html>
