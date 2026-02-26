@@ -63,7 +63,8 @@ pub fn router(db_pool: DbPool) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/v1/quotes/{id}/similar-deals", get(similar_deals))
-        .with_state(HealthState { db_pool })
+        .with_state(HealthState { db_pool: db_pool.clone() })
+        .merge(crate::portal::router(db_pool))
 }
 
 pub async fn spawn(bind_address: &str, port: u16, db_pool: DbPool) -> std::io::Result<()> {

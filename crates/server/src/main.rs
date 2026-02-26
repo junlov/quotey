@@ -1,5 +1,6 @@
 mod bootstrap;
 mod health;
+pub mod portal;
 
 use anyhow::Result;
 use quotey_core::config::{AppConfig, LoadOptions};
