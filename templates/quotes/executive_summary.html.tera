@@ -115,6 +115,33 @@
       font-style: italic;
     }
     
+    /* Assumption indicators for F-003 */
+    .assumed-inline {
+      font-size: 7pt;
+      color: #92400e;
+      background: #fef3c7;
+      padding: 1px 4px;
+      border-radius: 3px;
+      margin-left: 4px;
+      font-weight: 500;
+    }
+    
+    .assumptions-notice {
+      margin-top: 16px;
+      padding: 12px;
+      background: #fef3c7;
+      border-radius: 8px;
+      border-left: 3px solid #f59e0b;
+      font-size: 8pt;
+      color: #78350f;
+    }
+    
+    .assumptions-notice h4 {
+      margin: 0 0 4px 0;
+      font-size: 9pt;
+      color: #92400e;
+    }
+    
     /* Single page optimization */
     @page {
       margin: 30px;
@@ -182,11 +209,11 @@
       </div>
       <div class="detail-row">
         <span class="detail-label">Payment Terms</span>
-        <span class="detail-value">{{ quote.payment_terms | default(value="Net 30") }}</span>
+        <span class="detail-value">{{ quote.payment_terms | default(value="Net 30") }}{% if not payment_terms_explicit %}<span class="assumed-inline">(assumed)</span>{% endif %}</span>
       </div>
       <div class="detail-row">
         <span class="detail-label">Currency</span>
-        <span class="detail-value">{{ quote.currency | default(value="USD") }}</span>
+        <span class="detail-value">{{ quote.currency | default(value="USD") }}{% if not currency_explicit %}<span class="assumed-inline">(assumed)</span>{% endif %}</span>
       </div>
     </div>
   </section>
@@ -231,6 +258,14 @@
       {% endif %}
     </div>
   </section>
+
+  <!-- Assumptions Notice (F-003) -->
+  {% if has_assumptions %}
+  <section class="assumptions-notice">
+    <h4>⚠️ Assumptions Made</h4>
+    <p>Some values were assumed: {% for assumption in assumptions %}{{ assumption.label }}{% if not loop.last %}, {% endif %}{% endfor %}. Please verify these with your sales representative.</p>
+  </section>
+  {% endif %}
 
   <!-- Quick Summary -->
   <section class="terms-section">

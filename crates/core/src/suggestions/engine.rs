@@ -219,8 +219,6 @@ fn infer_segment(normalized: &str) -> &'static str {
         || normalized.contains("early")
     {
         "smb"
-    } else if normalized.contains("ent") || normalized.contains("enterprise") {
-        "enterprise"
     } else {
         "enterprise"
     }
@@ -242,9 +240,7 @@ fn infer_industry(normalized: &str) -> Option<String> {
         }
     }
 
-    if normalized.contains("saas") {
-        Some("saas".to_owned())
-    } else if normalized.contains("cloud") {
+    if normalized.contains("saas") || normalized.contains("cloud") {
         Some("saas".to_owned())
     } else {
         None
@@ -309,17 +305,16 @@ fn build_product_catalog() -> Vec<ProductInfo> {
 }
 
 fn resolve_product(product_id: &str) -> Option<ProductInfo> {
-    PRODUCT_SEEDS
-        .iter()
-        .find(|seed| seed.id.eq_ignore_ascii_case(product_id))
-        .map(|seed| ProductInfo {
+    PRODUCT_SEEDS.iter().find(|seed| seed.id.eq_ignore_ascii_case(product_id)).map(|seed| {
+        ProductInfo {
             id: seed.id.to_owned(),
             sku: seed.sku.to_owned(),
             name: seed.name.to_owned(),
             category: seed.category.to_owned(),
             unit_price: seed.unit_price,
             active: true,
-        })
+        }
+    })
 }
 
 fn synthetic_peer_profiles() -> Vec<CustomerProfile> {
@@ -466,8 +461,11 @@ fn now_quarter(now: DateTime<Utc>) -> u8 {
     ((now.month() - 1) / 3 + 1) as u8
 }
 
-fn apply_context_boosts(catalog: Vec<ProductInfo>, customer: &CustomerProfile, context: Option<&QuoteContext>)
--> Vec<ProductInfo> {
+fn apply_context_boosts(
+    catalog: Vec<ProductInfo>,
+    customer: &CustomerProfile,
+    context: Option<&QuoteContext>,
+) -> Vec<ProductInfo> {
     if let Some(context) = context {
         let quote_value = context.quote_value.unwrap_or(customer.avg_deal_size);
 
@@ -559,8 +557,9 @@ impl SuggestionEngine {
             .await?;
 
         for candidate in candidate_products {
-            let scores =
-                self.score_product(&customer, &current_products, &candidate, &similar_customers).await?;
+            let scores = self
+                .score_product(&customer, &current_products, &candidate, &similar_customers)
+                .await?;
             let total_score = self.calculator.calculate_total_score(&scores);
 
             // Skip if below threshold
@@ -594,9 +593,7 @@ impl SuggestionEngine {
         }
 
         let max_suggestions = request.max_suggestions.max(1);
-        let final_suggestions = self
-            .calculator
-            .filter_and_diversify(deduped, max_suggestions);
+        let final_suggestions = self.calculator.filter_and_diversify(deduped, max_suggestions);
 
         Ok(final_suggestions)
     }
@@ -611,8 +608,12 @@ impl SuggestionEngine {
     ) -> SuggestionResult<ComponentScores> {
         // Similar customer score
         let purchase_counts = self.get_purchase_counts(similar_customers, candidate).await?;
-        let similar_score =
-            self.calculator.similar_customer_score(customer, candidate, similar_customers, &purchase_counts);
+        let similar_score = self.calculator.similar_customer_score(
+            customer,
+            candidate,
+            similar_customers,
+            &purchase_counts,
+        );
 
         // Product relationship score
         let relationships = self.get_product_relationships(candidate).await?;
@@ -704,11 +705,14 @@ impl SuggestionEngine {
         current_products: &[ProductInfo],
     ) -> SuggestionResult<Vec<ProductInfo>> {
         let mut candidates = build_product_catalog();
-        let current_ids: HashSet<&str> = current_products.iter().map(|product| product.id.as_str()).collect();
+        let current_ids: HashSet<&str> =
+            current_products.iter().map(|product| product.id.as_str()).collect();
 
-        candidates.retain(|product| current_ids.is_empty() || !current_ids.contains(product.id.as_str()));
+        candidates
+            .retain(|product| current_ids.is_empty() || !current_ids.contains(product.id.as_str()));
 
-        let quote_value = quote_context.and_then(|context| context.quote_value).unwrap_or(customer.avg_deal_size);
+        let quote_value =
+            quote_context.and_then(|context| context.quote_value).unwrap_or(customer.avg_deal_size);
         let term = quote_context.and_then(|context| context.term_months).unwrap_or(12);
 
         // Region-aware and segment-aware ranking:
@@ -719,9 +723,11 @@ impl SuggestionEngine {
             let (a_preferred, a_tags) = customer_profile_preferences(&a.id);
             let (b_preferred, b_tags) = customer_profile_preferences(&b.id);
 
-            let a_match = a_preferred.iter().filter(|segment| **segment == customer.segment).count() as i32
+            let a_match = a_preferred.iter().filter(|segment| **segment == customer.segment).count()
+                as i32
                 + a_tags.iter().filter(|tag| tag == &&"growth").count() as i32;
-            let b_match = b_preferred.iter().filter(|segment| **segment == customer.segment).count() as i32
+            let b_match = b_preferred.iter().filter(|segment| **segment == customer.segment).count()
+                as i32
                 + b_tags.iter().filter(|tag| tag == &&"growth").count() as i32;
 
             // Prefer products with a price that aligns with the quote context.
@@ -754,9 +760,7 @@ impl SuggestionEngine {
             let a_score = a_match + a_price_signal + a_term_signal;
             let b_score = b_match + b_price_signal + b_term_signal;
 
-            b_score
-                .cmp(&a_score)
-                .then_with(|| a.id.cmp(&b.id))
+            b_score.cmp(&a_score).then_with(|| a.id.cmp(&b.id))
         });
 
         Ok(apply_context_boosts(candidates, customer, quote_context))
@@ -803,16 +807,16 @@ impl SuggestionEngine {
         for (similar_customer, similarity) in customers {
             let mut count = 1.0f64;
 
-            if customer_profile_preferences(&product.id).0.iter().any(|segment| *segment == similar_customer.segment)
+            if customer_profile_preferences(&product.id)
+                .0
+                .iter()
+                .any(|segment| *segment == similar_customer.segment)
             {
                 count += 1.5;
             }
 
             if similar_customer.industry.is_some()
-                && customer_profile_preferences(&product.id)
-                    .1
-                    .iter()
-                    .any(|tag| tag == &&"growth")
+                && customer_profile_preferences(&product.id).1.iter().any(|tag| tag == &"growth")
             {
                 count += 0.5;
             }
@@ -822,7 +826,7 @@ impl SuggestionEngine {
             }
 
             count *= similarity.max(0.25);
-            counts.insert(similar_customer.id.clone(), (count.round() as u32).max(1).min(5));
+            counts.insert(similar_customer.id.clone(), (count.round() as u32).clamp(1, 5));
         }
 
         Ok(counts)
@@ -857,7 +861,10 @@ impl SuggestionEngine {
 
         relationships.sort_by(|a, b| {
             b.co_occurrence_count.cmp(&a.co_occurrence_count).then_with(|| {
-                b.relationship_type.base_score().partial_cmp(&a.relationship_type.base_score()).unwrap_or(std::cmp::Ordering::Equal)
+                b.relationship_type
+                    .base_score()
+                    .partial_cmp(&a.relationship_type.base_score())
+                    .unwrap_or(std::cmp::Ordering::Equal)
             })
         });
 

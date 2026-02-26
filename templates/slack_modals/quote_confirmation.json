@@ -112,7 +112,7 @@
         },
         {
           "type": "mrkdwn",
-          "text": "*Payment Terms:*\n{{ quote.payment_terms | default(value='Net 30') }}"
+          "text": "*Payment Terms:*\n{{ quote.payment_terms | default(value='Net 30') }}{% if not payment_terms_explicit %} _(assumed)_{% endif %}"
         },
         {
           "type": "mrkdwn",
