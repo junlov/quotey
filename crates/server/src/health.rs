@@ -5,6 +5,7 @@ use axum::{
     Json, Router,
 };
 use chrono::Utc;
+use quotey_core::config::CrmConfig;
 use quotey_db::DbPool;
 use serde::{Deserialize, Serialize};
 use tracing::{error, info};
@@ -59,15 +60,21 @@ struct SimilarDealRow {
     close_date: Option<String>,
 }
 
-pub fn router(db_pool: DbPool) -> Router {
+pub fn router(db_pool: DbPool, crm_config: CrmConfig) -> Router {
     Router::new()
         .route("/health", get(health))
         .route("/api/v1/quotes/{id}/similar-deals", get(similar_deals))
         .with_state(HealthState { db_pool: db_pool.clone() })
-        .merge(crate::portal::router(db_pool))
+        .merge(crate::portal::router(db_pool.clone()))
+        .merge(crate::crm::router(db_pool, crm_config))
 }
 
-pub async fn spawn(bind_address: &str, port: u16, db_pool: DbPool) -> std::io::Result<()> {
+pub async fn spawn(
+    bind_address: &str,
+    port: u16,
+    db_pool: DbPool,
+    crm_config: CrmConfig,
+) -> std::io::Result<()> {
     let address = format!("{bind_address}:{port}");
     let listener = tokio::net::TcpListener::bind(&address).await?;
 
@@ -81,7 +88,7 @@ pub async fn spawn(bind_address: &str, port: u16, db_pool: DbPool) -> std::io::R
     );
 
     tokio::spawn(async move {
-        if let Err(error) = axum::serve(listener, router(db_pool)).await {
+        if let Err(error) = axum::serve(listener, router(db_pool, crm_config)).await {
             error!(
                 event_name = "system.health.error",
                 correlation_id = "bootstrap",

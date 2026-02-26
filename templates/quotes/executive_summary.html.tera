@@ -194,9 +194,9 @@
   <!-- Summary Highlight -->
   <section class="summary-highlight">
     <div class="total-label">Total Annual Contract Value</div>
-    <div class="total-amount">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total) }}</div>
+    <div class="total-amount">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.total) }}</div>
     <div class="term-info">
-      {{ quote.term_months | default(value=12) }} month term 
+      {{ quote.term_months }} month term 
       {% if quote.start_date %}starting {{ quote.start_date | date(format="%B %d, %Y") }}{% endif %}
     </div>
   </section>
@@ -212,7 +212,7 @@
       <div class="metric-label">Discount Applied</div>
     </div>
     <div class="metric-card">
-      <div class="metric-value">{{ quote.currency | default(value="$") }}{{ "%.0f" | format(pricing.total / (quote.term_months | default(value=12))) }}/mo</div>
+      <div class="metric-value">{{ quote.currency | default(value="$") }}{{ "%.0f" | format(value=pricing.total / (quote.term_months)) }}/mo</div>
       <div class="metric-label">Monthly</div>
     </div>
   </section>

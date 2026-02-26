@@ -157,7 +157,7 @@
       <h2>Contract Details</h2>
       <div class="detail-row">
         <span class="detail-label">Term</span>
-        <span class="detail-value">{{ quote.term_months | default(value=12) }} months</span>
+        <span class="detail-value">{{ quote.term_months }} months</span>
       </div>
       {% if quote.start_date %}
       <div class="detail-row">
@@ -209,16 +209,16 @@
             {% endif %}
           </td>
           <td class="numeric quantity-cell">{{ line.quantity }}</td>
-          <td class="numeric">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.unit_price | default(value=0)) }}</td>
+          <td class="numeric">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=line.unit_price) }}</td>
           <td class="numeric">
             {% if line.discount_pct and line.discount_pct > 0 %}
               {{ line.discount_pct }}%<br>
-              <small class="text-muted">-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.discount_amount | default(value=0)) }}</small>
+              <small class="text-muted">-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=line.discount_amount) }}</small>
             {% else %}
               -
             {% endif %}
           </td>
-          <td class="numeric subtotal-cell">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.subtotal | default(value=0)) }}</td>
+          <td class="numeric subtotal-cell">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=line.subtotal) }}</td>
         </tr>
         {% endfor %}
       </tbody>
@@ -230,23 +230,23 @@
     <table class="totals-table">
       <tr>
         <td>Subtotal</td>
-        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.subtotal) }}</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.subtotal) }}</td>
       </tr>
       {% if pricing.discount_total and pricing.discount_total > 0 %}
       <tr>
         <td>Discount</td>
-        <td class="discount-positive">-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.discount_total) }}</td>
+        <td class="discount-positive">-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.discount_total) }}</td>
       </tr>
       {% endif %}
       {% if pricing.tax_total and pricing.tax_total > 0 %}
       <tr>
         <td>Tax ({{ pricing.tax_rate | default(value=0) }}%)</td>
-        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.tax_total) }}</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.tax_total) }}</td>
       </tr>
       {% endif %}
       <tr class="total-row">
         <td>Total</td>
-        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total) }}</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.total) }}</td>
       </tr>
     </table>
   </section>
@@ -266,7 +266,7 @@
         {% if line_trace.volume_tier_applied %}
         <div class="breakdown-row tier-applied">
           <span>• {{ line_trace.product_name }}: Volume tier "{{ line_trace.volume_tier_applied.tier }}" applied</span>
-          <span>-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line_trace.volume_tier_applied.discount_from_base) }}/unit</span>
+          <span>-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=line_trace.volume_tier_applied.discount_from_base) }}/unit</span>
         </div>
         {% endif %}
       {% endfor %}

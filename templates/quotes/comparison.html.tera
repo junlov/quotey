@@ -244,7 +244,7 @@
       <h2>Quote Details</h2>
       <div class="detail-row">
         <span class="detail-label">Term</span>
-        <span class="detail-value">{{ quote.term_months | default(value=12) }} months</span>
+        <span class="detail-value">{{ quote.term_months }} months</span>
       </div>
       <div class="detail-row">
         <span class="detail-label">Payment Terms</span>
@@ -282,8 +282,8 @@
         <td><strong>Total Price</strong></td>
         {% for option in comparison_options %}
         <td class="price-cell">
-          {{ quote.currency | default(value="$") }}{{ "%.2f" | format(option.total_price) }}
-          <span class="price-period">/ {{ quote.term_months | default(value=12) }} mo</span>
+          {{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=option.total_price) }}
+          <span class="price-period">/ {{ quote.term_months }} mo</span>
         </td>
         {% endfor %}
       </tr>
@@ -292,7 +292,7 @@
       <tr>
         <td>Monthly Cost</td>
         {% for option in comparison_options %}
-        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(option.total_price / (quote.term_months | default(value=12))) }}</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=option.total_price / (quote.term_months)) }}</td>
         {% endfor %}
       </tr>
       
@@ -362,18 +362,18 @@
       <tr class="highlight">
         <td><strong>Total Price</strong></td>
         <td class="price-cell">
-          {{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total * 0.8) }}
-          <span class="price-period">/ {{ quote.term_months | default(value=12) }} mo</span>
+          {{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.total * 0.8) }}
+          <span class="price-period">/ {{ quote.term_months }} mo</span>
         </td>
         <td class="price-cell">
-          {{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total) }}
-          <span class="price-period">/ {{ quote.term_months | default(value=12) }} mo</span>
+          {{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.total) }}
+          <span class="price-period">/ {{ quote.term_months }} mo</span>
         </td>
       </tr>
       <tr>
         <td>Monthly Cost</td>
-        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total * 0.8 / (quote.term_months | default(value=12))) }}</td>
-        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total / (quote.term_months | default(value=12))) }}</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.total * 0.8 / (quote.term_months)) }}</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.total / (quote.term_months)) }}</td>
       </tr>
       <tr class="feature-row">
         <td>Products Included</td>
@@ -405,20 +405,20 @@
       {% for option in comparison_options %}
       <div class="summary-card {% if option.recommended %}recommended{% endif %}">
         <h3>{{ option.name }}</h3>
-        <div class="price">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(option.total_price) }}</div>
+        <div class="price">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=option.total_price) }}</div>
         {% if option.savings_vs_base %}
-        <div class="savings">Save {{ quote.currency | default(value="$") }}{{ "%.2f" | format(option.savings_vs_base) }}</div>
+        <div class="savings">Save {{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=option.savings_vs_base) }}</div>
         {% endif %}
       </div>
       {% endfor %}
     {% else %}
       <div class="summary-card">
         <h3>Option A</h3>
-        <div class="price">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total * 0.8) }}</div>
+        <div class="price">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.total * 0.8) }}</div>
       </div>
       <div class="summary-card recommended">
         <h3>Option B (Recommended)</h3>
-        <div class="price">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total) }}</div>
+        <div class="price">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.total) }}</div>
         <div class="savings">Best value for your needs</div>
       </div>
       <div class="summary-card">

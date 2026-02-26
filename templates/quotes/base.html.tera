@@ -43,7 +43,7 @@
             <div class="quote-details">
                 <h3>Quote Details:</h3>
                 <p><strong>Valid Until:</strong> {{ quote.valid_until | default(value="30 days") }}</p>
-                <p><strong>Term:</strong> {{ quote.term_months | default(value=12) }} months</p>
+                <p><strong>Term:</strong> {{ quote.term_months }} months</p>
                 <p><strong>Payment Terms:</strong> {{ quote.payment_terms | default(value="Net 30") }}</p>
             </div>
         </section>

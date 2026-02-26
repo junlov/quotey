@@ -1319,8 +1319,14 @@ pub fn suggestion_message(view: &SuggestionCardView) -> MessageTemplate {
         let bar = score_bar(item.score);
         let price_str =
             item.unit_price.map(|p| format!(" • {}", format_currency(p))).unwrap_or_default();
+        let score_pct = (item.score * 100.0).round() as u32;
+        let reason_lines: Vec<&str> = item.reasoning.iter().take(2).map(String::as_str).collect();
+        let reason_summary = if reason_lines.is_empty() {
+            "—".to_owned()
+        } else {
+            reason_lines.join(" • ")
+        };
 
-        let top_reason = item.reasoning.first().map(|r| r.as_str()).unwrap_or("—");
 
         let section_id = format!("suggest.item.{index}.v1");
         let actions_id = format!("suggest.item.actions.{index}.v1");
@@ -1329,7 +1335,7 @@ pub fn suggestion_message(view: &SuggestionCardView) -> MessageTemplate {
             .section(section_id, |section| {
                 section.mrkdwn(format!(
                     "*#{rank} {name}* (`{sku}`){price}\n\
-                     {conf_icon} {confidence} confidence • {bar}\n\
+                     {conf_icon} {confidence} confidence ({score_pct}% match) • {bar}\n\
                      _{category}_\n\
                      {reason}",
                     rank = index + 1,
@@ -1337,8 +1343,9 @@ pub fn suggestion_message(view: &SuggestionCardView) -> MessageTemplate {
                     sku = item.product_sku,
                     price = price_str,
                     confidence = item.confidence,
+                    score_pct = score_pct,
                     category = item.category_description,
-                    reason = top_reason,
+                    reason = reason_summary,
                 ));
             })
             .actions(actions_id, |actions| {
