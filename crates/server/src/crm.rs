@@ -23,9 +23,9 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use quotey_core::config::CrmConfig;
 use quotey_core::{
-    DeterministicExecutionEngine, ExecutionError, ExecutionTask, ExecutionTaskId,
-    ExecutionTaskState, ExecutionTransitionEvent, IdempotencyRecord, IdempotencyRecordState, OperationKey,
-    QuoteId, RetryPolicy, ExecutionEngineConfig,
+    DeterministicExecutionEngine, ExecutionEngineConfig, ExecutionError, ExecutionTask,
+    ExecutionTaskId, ExecutionTaskState, ExecutionTransitionEvent, IdempotencyRecord,
+    IdempotencyRecordState, OperationKey, QuoteId, RetryPolicy,
 };
 use quotey_db::repositories::{
     ExecutionQueueRepository, IdempotencyRepository, RepositoryError, SqlExecutionQueueRepository,
@@ -82,6 +82,12 @@ enum CrmProvider {
     Hubspot,
 }
 
+impl std::fmt::Display for CrmProvider {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}", self.as_str())
+    }
+}
+
 impl CrmProvider {
     fn parse(raw: &str) -> Option<Self> {
         match raw.to_lowercase().as_str() {
@@ -91,7 +97,7 @@ impl CrmProvider {
         }
     }
 
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Self::Salesforce => "salesforce",
             Self::Hubspot => "hubspot",
@@ -112,7 +118,7 @@ impl CrmProvider {
     }
 }
 
-#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 enum CrmDirection {
     QuoteyToCrm,
@@ -120,7 +126,7 @@ enum CrmDirection {
 }
 
 impl CrmDirection {
-    fn as_str(self) -> &'static str {
+    fn as_str(&self) -> &'static str {
         match self {
             Self::QuoteyToCrm => "quotey_to_crm",
             Self::CrmToQuotey => "crm_to_quotey",
@@ -129,11 +135,7 @@ impl CrmDirection {
 }
 
 fn to_direction(raw: &str) -> Option<CrmDirection> {
-    let normalized = raw
-        .trim()
-        .to_ascii_lowercase()
-        .replace('-', "_")
-        .replace(' ', "_");
+    let normalized = raw.trim().to_ascii_lowercase().replace('-', "_").replace(' ', "_");
     match normalized.as_str() {
         "quotey_to_crm" => Some(CrmDirection::QuoteyToCrm),
         "crm_to_quotey" => Some(CrmDirection::CrmToQuotey),
@@ -588,10 +590,7 @@ fn mapping_catalog(
 
 fn normalize_quotey_field_key(raw: &str) -> String {
     let normalized = raw.trim().to_ascii_lowercase().replace(' ', "_").replace('-', "_");
-    normalized
-        .trim_start_matches("quotey.")
-        .trim_start_matches("quote.")
-        .to_string()
+    normalized.trim_start_matches("quotey.").trim_start_matches("quote.").to_string()
 }
 
 fn normalize_quotey_field_for_direction(raw: &str, direction: CrmDirection) -> String {
@@ -607,11 +606,7 @@ fn normalize_quotey_field_for_direction(raw: &str, direction: CrmDirection) -> S
         if template.quotey_field == candidate {
             return candidate;
         }
-        if template
-            .aliases
-            .iter()
-            .any(|alias| normalize_quotey_field_key(alias) == candidate)
-        {
+        if template.aliases.iter().any(|alias| normalize_quotey_field_key(alias) == candidate) {
             return template.quotey_field.to_string();
         }
     }
@@ -708,7 +703,7 @@ struct SyncEventsQuery {
     limit: Option<i64>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Serialize, Deserialize)]
 struct WebhookPayload {
     #[serde(default)]
     quote_id: Option<String>,
@@ -785,9 +780,9 @@ fn infer_crm_object_identity(
     (None, None)
 }
 
-fn webhook_string_field(value: Option<&Value>) -> Option<String> {
+fn webhook_string_field(value: &Value) -> Option<String> {
     match value {
-        Some(Value::String(value)) => {
+        Value::String(value) => {
             let trimmed = value.trim();
             if trimmed.is_empty() {
                 None
@@ -795,14 +790,17 @@ fn webhook_string_field(value: Option<&Value>) -> Option<String> {
                 Some(trimmed.to_string())
             }
         }
-        Some(Value::Bool(value)) => Some(value.to_string()),
-        Some(Value::Number(value)) => Some(value.to_string()),
-        Some(Value::Null) | Some(Value::Array(_)) | Some(Value::Object(_)) | None => None,
+        Value::Bool(value) => Some(value.to_string()),
+        Value::Number(value) => Some(value.to_string()),
+        Value::Null | Value::Array(_) | Value::Object(_) => None,
     }
 }
 
 fn normalize_webhook_payload(raw: &Value) -> WebhookPayload {
-    let payload = raw.as_object().cloned().unwrap_or_default();
+    let payload: HashMap<String, Value> = raw
+        .as_object()
+        .map(|m| m.iter().map(|(k, v)| (k.clone(), v.clone())).collect())
+        .unwrap_or_default();
     let quote_id = payload.get("quote_id").and_then(webhook_string_field);
     let account_id = payload.get("account_id").and_then(webhook_string_field);
     let deal_id = payload.get("deal_id").and_then(webhook_string_field);
@@ -831,13 +829,18 @@ fn normalize_webhook_payload(raw: &Value) -> WebhookPayload {
 
 fn build_contact_snapshot_note(payload: &WebhookPayload) -> Option<String> {
     let mut parts = Vec::new();
-    if let Some(contact_name) = payload.contact_name.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(contact_name) =
+        payload.contact_name.as_deref().filter(|value| !value.trim().is_empty())
+    {
         parts.push(format!("contact_added: {}", contact_name.trim()));
     }
-    if let Some(contact_email) = payload.contact_email.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(contact_email) =
+        payload.contact_email.as_deref().filter(|value| !value.trim().is_empty())
+    {
         parts.push(format!("contact_email: {}", contact_email.trim()));
     }
-    if let Some(contact_id) = payload.contact_id.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(contact_id) = payload.contact_id.as_deref().filter(|value| !value.trim().is_empty())
+    {
         parts.push(format!("contact_id: {}", contact_id.trim()));
     }
 
@@ -856,7 +859,8 @@ fn webhook_to_mapping_source(payload: &WebhookPayload) -> Value {
     if let Some(quote_id) = payload.quote_id.as_deref().filter(|value| !value.trim().is_empty()) {
         source.insert("quote_id".to_string(), json!(quote_id));
     }
-    if let Some(account_id) = payload.account_id.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(account_id) = payload.account_id.as_deref().filter(|value| !value.trim().is_empty())
+    {
         source.insert("account_id".to_string(), json!(account_id));
     }
     if let Some(deal_id) = payload.deal_id.as_deref().filter(|value| !value.trim().is_empty()) {
@@ -871,13 +875,18 @@ fn webhook_to_mapping_source(payload: &WebhookPayload) -> Value {
     if let Some(notes) = payload.notes.as_deref().filter(|value| !value.trim().is_empty()) {
         source.insert("notes".to_string(), json!(notes));
     }
-    if let Some(contact_name) = payload.contact_name.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(contact_name) =
+        payload.contact_name.as_deref().filter(|value| !value.trim().is_empty())
+    {
         source.insert("contact_name".to_string(), json!(contact_name));
     }
-    if let Some(contact_email) = payload.contact_email.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(contact_email) =
+        payload.contact_email.as_deref().filter(|value| !value.trim().is_empty())
+    {
         source.insert("contact_email".to_string(), json!(contact_email));
     }
-    if let Some(contact_id) = payload.contact_id.as_deref().filter(|value| !value.trim().is_empty()) {
+    if let Some(contact_id) = payload.contact_id.as_deref().filter(|value| !value.trim().is_empty())
+    {
         source.insert("contact_id".to_string(), json!(contact_id));
     }
 
@@ -901,9 +910,11 @@ fn extract_inbound_quote_update(
             .expression
             .as_deref()
             .and_then(|expression| extract_template_value(expression, &source))
-            .or_else(|| resolve_payload_value(&source, &mapping.crm_field));
+            .or_else(|| {
+                resolve_payload_value(&source, &mapping.crm_field).and_then(|v| value_to_text(&v))
+            });
 
-        let Some(value) = value.and_then(value_to_text) else {
+        let Some(value) = value else {
             continue;
         };
 
@@ -912,7 +923,8 @@ fn extract_inbound_quote_update(
             continue;
         }
         let value = trimmed.to_string();
-        let quotey_field = normalize_quotey_field_for_direction(&mapping.quotey_field, CrmDirection::CrmToQuotey);
+        let quotey_field =
+            normalize_quotey_field_for_direction(&mapping.quotey_field, CrmDirection::CrmToQuotey);
         if !is_supported_quotey_field(&quotey_field, CrmDirection::CrmToQuotey) {
             continue;
         }
@@ -996,11 +1008,8 @@ struct CrmFieldMapping {
 }
 
 pub fn router(db_pool: DbPool, config: CrmConfig) -> Router {
-    let state = CrmState {
-        db_pool,
-        config: CrmConfig::from(&config).into(),
-        client: Client::new(),
-    };
+    let state =
+        CrmState { db_pool, config: CrmRuntimeConfig::from(&config), client: Client::new() };
 
     Router::new()
         .route("/api/v1/crm/connect/{provider}", get(start_oauth))
@@ -1030,11 +1039,14 @@ async fn crm_state_guard(
     }
 
     if let Some(provider) = provider {
-        if state.config.credentials(provider).is_none() {
+        if provider.credentials(&state.config).is_none() {
             return Err((
                 StatusCode::BAD_REQUEST,
                 Json(CrmError {
-                    error: format!("crm credentials not configured for provider `{}`", provider.as_str()),
+                    error: format!(
+                        "crm credentials not configured for provider `{}`",
+                        provider.as_str()
+                    ),
                 }),
             ));
         }
@@ -1042,9 +1054,8 @@ async fn crm_state_guard(
 
     if require_webhook_secret {
         if let Some(secret) = &state.config.webhook_secret {
-            let provided = headers
-                .get("x-quotey-webhook-secret")
-                .and_then(|value| value.to_str().ok());
+            let provided =
+                headers.get("x-quotey-webhook-secret").and_then(|value| value.to_str().ok());
             if let Some(value) = provided {
                 if value != secret {
                     return Err((
@@ -1095,7 +1106,7 @@ struct SyncAttemptResult {
 }
 
 fn crm_sync_max_retries() -> u32 {
-    MAX_SYNC_ATTEMPTS.saturating_sub(1)
+    MAX_SYNC_ATTEMPTS.saturating_sub(1) as u32
 }
 
 fn crm_execution_engine_config() -> ExecutionEngineConfig {
@@ -1144,17 +1155,12 @@ fn map_execution_error(error: ExecutionError) -> (StatusCode, Json<CrmError>) {
     match error {
         ExecutionError::TaskNotFound(task_id) => (
             StatusCode::NOT_FOUND,
-            Json(CrmError {
-                error: format!("execution task `{task_id}` not found"),
-            }),
+            Json(CrmError { error: format!("execution task `{task_id}` not found") }),
         ),
         ExecutionError::ClaimConflict(task_id, actor) => (
             StatusCode::CONFLICT,
             Json(CrmError {
-                error: format!(
-                    "execution task `{task_id}` is already claimed by `{}`",
-                    actor
-                ),
+                error: format!("execution task `{task_id}` is already claimed by `{}`", actor),
             }),
         ),
         ExecutionError::TaskNotYetAvailable(task_id) => (
@@ -1171,9 +1177,7 @@ fn map_execution_error(error: ExecutionError) -> (StatusCode, Json<CrmError>) {
         ),
         ExecutionError::IdempotencyConflict(op, state) => (
             StatusCode::CONFLICT,
-            Json(CrmError {
-                error: format!("idempotency conflict for `{op}` in state `{state}`"),
-            }),
+            Json(CrmError { error: format!("idempotency conflict for `{op}` in state `{state}`") }),
         ),
     }
 }
@@ -1253,7 +1257,7 @@ async fn oauth_callback(
 
     let state_row = fetch_and_reserve_oauth_state(&state, &query.state).await?;
     let provider_config = ProviderConfig::from_provider(provider);
-    let (client_id, client_secret) = state.config.credentials(provider).ok_or_else(|| {
+    let (client_id, client_secret) = provider.credentials(&state.config).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
             Json(CrmError {
@@ -1281,11 +1285,12 @@ async fn oauth_callback(
         token.token_type.as_deref().unwrap_or("Bearer"),
         &token.access_token,
     )
-    .await
-    .ok();
+    .await;
 
     let token_expires_at = token.expires_in.and_then(|seconds| {
-        Utc::now().checked_add_signed(Duration::seconds(seconds.into())).map(|value| value.to_rfc3339())
+        Utc::now()
+            .checked_add_signed(Duration::seconds(seconds.into()))
+            .map(|value| value.to_rfc3339())
     });
 
     let row_id = format!("CRMINT-{}", Uuid::new_v4().simple());
@@ -1305,7 +1310,7 @@ async fn oauth_callback(
     .bind(token.token_type.as_deref().unwrap_or("Bearer"))
     .bind(token.scope.as_deref())
     .bind(token_expires_at.as_deref())
-    .bind(Option::<String>::None::<String>)
+    .bind(None::<String>)
     .bind(Utc::now().to_rfc3339())
     .execute(&state.db_pool)
     .await
@@ -1329,17 +1334,12 @@ async fn sync_quote_to_crm(
     crm_state_guard(&HeaderMap::new(), &state, None, false).await?;
     ensure_quote_exists(&state, &quote_id).await?;
 
-    let direction = query
-        .direction
-        .as_deref()
-        .and_then(to_direction)
-        .unwrap_or(CrmDirection::QuoteyToCrm);
+    let direction =
+        query.direction.as_deref().and_then(to_direction).unwrap_or(CrmDirection::QuoteyToCrm);
     if direction != CrmDirection::QuoteyToCrm {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(CrmError {
-                error: "direction must be quotey_to_crm".to_string(),
-            }),
+            Json(CrmError { error: "direction must be quotey_to_crm".to_string() }),
         ));
     }
 
@@ -1366,11 +1366,8 @@ async fn sync_quote_to_crm(
     let mut results = Vec::with_capacity(providers.len());
     for integration in providers {
         let mappings = fetch_mappings(&state, direction, Some(integration.provider)).await?;
-        let mut event_payload = map_quote_payload_for_provider(
-            &payload,
-            &integration.provider,
-            &mappings,
-        );
+        let mut event_payload =
+            map_quote_payload_for_provider(&payload, &integration.provider, &mappings);
         event_payload["provider"] = json!(integration.provider.as_str());
         event_payload["crm_account_id"] = json!(integration.crm_account_id);
         event_payload["quote_id"] = json!(&quote_id);
@@ -1468,38 +1465,19 @@ async fn run_crm_sync_task(
     task.max_retries = crm_sync_max_retries();
     task.payload_json = payload_json.clone();
     idempotency_record.attempt_count = attempts as u32;
-    idempotency_record.payload_hash = payload_hash;
+    idempotency_record.payload_hash = payload_hash.clone();
 
-    repository
-        .save_task(task.clone())
-        .await
-        .map_err(repository_error)?;
-    repository
-        .save_operation(idempotency_record.clone())
-        .await
-        .map_err(repository_error)?;
+    repository.save_task(task.clone()).await.map_err(repository_error)?;
+    repository.save_operation(idempotency_record.clone()).await.map_err(repository_error)?;
 
-    update_sync_event_status(
-        &state,
-        event_id,
-        initial_status,
-        attempts,
-        initial_error,
-    )
-    .await?;
+    update_sync_event_status(&state, event_id, initial_status, attempts, initial_error).await?;
 
     let claimed = execution_engine
         .claim_task(task, CRM_SYNC_WORKER_ID, &mut idempotency_record)
         .map_err(map_execution_error)?;
     task = claimed.task;
-    repository
-        .save_task(task.clone())
-        .await
-        .map_err(repository_error)?;
-    repository
-        .append_transition(claimed.transition.clone())
-        .await
-        .map_err(repository_error)?;
+    repository.save_task(task.clone()).await.map_err(repository_error)?;
+    repository.append_transition(claimed.transition.clone()).await.map_err(repository_error)?;
     update_sync_event_status(
         &state,
         event_id,
@@ -1516,14 +1494,8 @@ async fn run_crm_sync_task(
                 .complete_task(task, payload_hash.clone(), &mut idempotency_record)
                 .map_err(map_execution_error)?;
             task = completed.task;
-            repository
-                .append_transition(completed.transition)
-                .await
-                .map_err(repository_error)?;
-            repository
-                .save_task(task.clone())
-                .await
-                .map_err(repository_error)?;
+            repository.append_transition(completed.transition).await.map_err(repository_error)?;
+            repository.save_task(task.clone()).await.map_err(repository_error)?;
             repository
                 .save_operation({
                     idempotency_record.result_snapshot_json = Some(payload_hash.clone());
@@ -1532,7 +1504,8 @@ async fn run_crm_sync_task(
                 .await
                 .map_err(repository_error)?;
 
-            let _ = set_integration_sync_state(&state, integration.provider, "connected", None).await;
+            let _ =
+                set_integration_sync_state(&state, integration.provider, "connected", None).await;
             QueueSyncResult {
                 status: crm_sync_queue_status(&ExecutionTaskState::Completed).to_string(),
                 message,
@@ -1540,11 +1513,12 @@ async fn run_crm_sync_task(
             }
         }
         Err(attempt_failure) => {
-            let retry_policy = if matches!(attempt_failure.kind, SyncAttemptResultKind::RetryableFailure) {
-                RetryPolicy::Retry
-            } else {
-                classify_retry_policy(&attempt_failure.message)
-            };
+            let retry_policy =
+                if matches!(attempt_failure.kind, SyncAttemptResultKind::RetryableFailure) {
+                    RetryPolicy::Retry
+                } else {
+                    classify_retry_policy(&attempt_failure.message)
+                };
             let failed = execution_engine
                 .fail_task(
                     task,
@@ -1555,18 +1529,11 @@ async fn run_crm_sync_task(
                 )
                 .map_err(map_execution_error)?;
             task = failed.task;
-            repository
-                .append_transition(failed.transition)
-                .await
-                .map_err(repository_error)?;
-            repository
-                .save_task(task.clone())
-                .await
-                .map_err(repository_error)?;
+            repository.append_transition(failed.transition).await.map_err(repository_error)?;
+            repository.save_task(task.clone()).await.map_err(repository_error)?;
             repository
                 .save_operation({
-                    idempotency_record.error_snapshot_json =
-                        Some(attempt_failure.message.clone());
+                    idempotency_record.error_snapshot_json = Some(attempt_failure.message.clone());
                     idempotency_record.updated_by_component = "crm-sync-worker".to_string();
                     idempotency_record.clone()
                 })
@@ -1616,9 +1583,7 @@ async fn list_mappings(
             CrmProvider::parse(raw).ok_or_else(|| {
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(CrmError {
-                        error: "provider must be salesforce or hubspot".to_string(),
-                    }),
+                    Json(CrmError { error: "provider must be salesforce or hubspot".to_string() }),
                 )
             })
         })
@@ -1662,47 +1627,44 @@ async fn list_mappings(
     for value in where_values {
         rows = rows.bind(value);
     }
-    let rows = rows
-        .fetch_all(&state.db_pool)
-        .await
-        .map_err(db_error)?;
+    let rows = rows.fetch_all(&state.db_pool).await.map_err(db_error)?;
 
     let mut out = Vec::with_capacity(rows.len());
     let mut seen = HashSet::new();
     for row in rows {
         let row_id = row.try_get::<String, _>("id").unwrap_or_default();
-        let provider = match CrmProvider::parse(row.try_get::<String, _>("provider").unwrap_or_default()) {
-            Some(value) => value,
-            None => {
-                warn!(row_id, "skipping crm field mapping with unsupported provider in storage");
-                continue;
-            }
-        };
-        let direction = match row
-            .try_get::<String, _>("direction")
+        let provider =
+            match CrmProvider::parse(&row.try_get::<String, _>("provider").unwrap_or_default()) {
+                Some(value) => value,
+                None => {
+                    warn!(
+                        row_id,
+                        "skipping crm field mapping with unsupported provider in storage"
+                    );
+                    continue;
+                }
+            };
+        let direction =
+            match row.try_get::<String, _>("direction").ok().as_deref().and_then(to_direction) {
+                Some(value) => value,
+                None => {
+                    warn!(
+                        row_id,
+                        "skipping crm field mapping with unsupported direction in storage"
+                    );
+                    continue;
+                }
+            };
+        let Some(quotey_field) = row
+            .try_get::<String, _>("quotey_field")
             .ok()
-            .as_deref()
-            .and_then(to_direction)
-        {
-            Some(value) => value,
-            None => {
-                warn!(row_id, "skipping crm field mapping with unsupported direction in storage");
-                continue;
-            }
-        };
-        let Some(quotey_field) =
-            row.try_get::<String, _>("quotey_field").ok().and_then(|quotey_field| {
-                normalize_and_validate_quotey_field(&quotey_field, direction)
-            })
+            .and_then(|quotey_field| normalize_and_validate_quotey_field(&quotey_field, direction))
         else {
             warn!(row_id, "skipping crm field mapping with unsupported quotey_field");
             continue;
         };
-        let crm_field = row
-            .try_get::<String, _>("crm_field")
-            .unwrap_or_default()
-            .trim()
-            .to_string();
+        let crm_field =
+            row.try_get::<String, _>("crm_field").unwrap_or_default().trim().to_string();
         let dedupe_key = (
             provider.as_str().to_string(),
             direction.as_str().to_string(),
@@ -1740,9 +1702,7 @@ async fn list_mapping_catalog(
             CrmProvider::parse(raw).ok_or_else(|| {
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(CrmError {
-                        error: "provider must be salesforce or hubspot".to_string(),
-                    }),
+                    Json(CrmError { error: "provider must be salesforce or hubspot".to_string() }),
                 )
             })
         })
@@ -1762,14 +1722,10 @@ async fn list_mapping_catalog(
         .transpose()?;
 
     let provider = provider_filter.as_ref().map(CrmProvider::as_str).map(str::to_string);
-    let direction = direction_filter.map(CrmDirection::as_str).map(str::to_string);
+    let direction = direction_filter.as_ref().map(CrmDirection::as_str).map(str::to_string);
     let fields = mapping_catalog(provider_filter, direction_filter);
 
-    Ok(Json(MappingCatalogItemList {
-        provider,
-        direction,
-        fields,
-    }))
+    Ok(Json(MappingCatalogItemList { provider, direction, fields }))
 }
 
 async fn upsert_mappings(
@@ -1780,15 +1736,15 @@ async fn upsert_mappings(
     let provider = CrmProvider::parse(&payload.provider).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            Json(CrmError {
-                error: "provider must be salesforce or hubspot".to_string(),
-            }),
+            Json(CrmError { error: "provider must be salesforce or hubspot".to_string() }),
         )
     })?;
     let direction = to_direction(&payload.direction).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            Json(CrmError { error: "direction must be quotey_to_crm or crm_to_quotey".to_string() }),
+            Json(CrmError {
+                error: "direction must be quotey_to_crm or crm_to_quotey".to_string(),
+            }),
         )
     })?;
 
@@ -1799,9 +1755,7 @@ async fn upsert_mappings(
         if quotey_field.is_empty() || crm_field.is_empty() {
             return Err((
                 StatusCode::BAD_REQUEST,
-                Json(CrmError {
-                    error: "quotey_field and crm_field are required".to_string(),
-                }),
+                Json(CrmError { error: "quotey_field and crm_field are required".to_string() }),
             ));
         }
         let Some(normalized_quotey_field) =
@@ -1916,7 +1870,7 @@ async fn list_sync_events(
     let rows = db_query.fetch_all(&state.db_pool).await.map_err(db_error)?;
     let mut events = Vec::with_capacity(rows.len());
     for row in rows {
-        let status = row.try_get("status").unwrap_or_default();
+        let status: String = row.try_get("status").unwrap_or_default();
         let attempts = row.try_get::<i32, _>("attempts").unwrap_or(0);
         events.push(SyncEventResponse {
             id: row.try_get("id").unwrap_or_default(),
@@ -1947,31 +1901,18 @@ async fn retry_sync_event(
     let maybe_event = fetch_sync_event(&state, &event_id).await?;
 
     let event = maybe_event.ok_or_else(|| {
-        (
-            StatusCode::NOT_FOUND,
-            Json(CrmError {
-                error: "sync event not found".to_string(),
-            }),
-        )
+        (StatusCode::NOT_FOUND, Json(CrmError { error: "sync event not found".to_string() }))
     })?;
 
     let direction = to_direction(&event.direction).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(CrmError {
-                error: "invalid event direction".to_string(),
-            }),
-        )
+        (StatusCode::BAD_REQUEST, Json(CrmError { error: "invalid event direction".to_string() }))
     })?;
 
     if event.attempts >= MAX_SYNC_ATTEMPTS {
         return Err((
             StatusCode::CONFLICT,
             Json(CrmError {
-                error: format!(
-                    "event has reached retry limit of {} attempts",
-                    MAX_SYNC_ATTEMPTS
-                ),
+                error: format!("event has reached retry limit of {} attempts", MAX_SYNC_ATTEMPTS),
             }),
         ));
     }
@@ -1979,9 +1920,7 @@ async fn retry_sync_event(
     if event.provider.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(CrmError {
-                error: "invalid event data".to_string(),
-            }),
+            Json(CrmError { error: "invalid event data".to_string() }),
         ));
     }
     if !sync_status_is_retryable(event.status.as_str()) {
@@ -1995,31 +1934,17 @@ async fn retry_sync_event(
 
     let next_attempt = event.attempts.saturating_add(1);
     let provider = CrmProvider::parse(&event.provider).ok_or_else(|| {
-        (
-            StatusCode::BAD_REQUEST,
-            Json(CrmError {
-                error: "invalid event provider".to_string(),
-            }),
-        )
+        (StatusCode::BAD_REQUEST, Json(CrmError { error: "invalid event provider".to_string() }))
     })?;
     let payload: Value = serde_json::from_str(&event.payload_json).map_err(|error| {
         error!(error = %error, event_id = %event_id, "stored retry payload is invalid json");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(CrmError {
-                error: "stored sync event payload is corrupted".to_string(),
-            }),
+            Json(CrmError { error: "stored sync event payload is corrupted".to_string() }),
         )
     })?;
 
-    update_sync_event_status(
-        &state,
-        &event_id,
-        "queued",
-        next_attempt,
-        None,
-    )
-    .await?;
+    update_sync_event_status(&state, &event_id, "queued", next_attempt, None).await?;
 
     match direction {
         CrmDirection::QuoteyToCrm => {
@@ -2038,26 +1963,17 @@ async fn retry_sync_event(
                     "provider `{}` is not connected; reconnect and retry",
                     provider.as_str()
                 );
-                update_sync_event_status(
-                    &state,
-                    &event_id,
-                    "failed",
-                    next_attempt,
-                    Some(reason),
-                )
-                .await?;
+                update_sync_event_status(&state, &event_id, "failed", next_attempt, Some(reason))
+                    .await?;
             } else {
-                let integration = integrations
-                    .first()
-                    .cloned()
-                    .ok_or_else(|| {
-                        (
-                            StatusCode::CONFLICT,
-                            Json(CrmError {
-                                error: "provider integration missing after lookup".to_string(),
-                            }),
-                        )
-                    })?;
+                let integration = integrations.first().cloned().ok_or_else(|| {
+                    (
+                        StatusCode::CONFLICT,
+                        Json(CrmError {
+                            error: "provider integration missing after lookup".to_string(),
+                        }),
+                    )
+                })?;
                 let _ = run_crm_sync_task(
                     &state,
                     &integration,
@@ -2074,10 +1990,12 @@ async fn retry_sync_event(
             }
         }
         CrmDirection::CrmToQuotey => {
-            let webhook_payload =
-                serde_json::from_value(payload.clone()).unwrap_or_else(|_| normalize_webhook_payload(&payload));
-            let mappings = fetch_mappings(&state, CrmDirection::CrmToQuotey, Some(provider)).await?;
-            let inbound_update = extract_inbound_quote_update(&webhook_payload, provider, &mappings);
+            let webhook_payload = serde_json::from_value(payload.clone())
+                .unwrap_or_else(|_| normalize_webhook_payload(&payload));
+            let mappings =
+                fetch_mappings(&state, CrmDirection::CrmToQuotey, Some(provider)).await?;
+            let inbound_update =
+                extract_inbound_quote_update(&webhook_payload, provider, &mappings);
             let quote_id = resolve_webhook_quote_id(
                 &state,
                 inbound_update.quote_id.as_deref().or_else(|| event.quote_id.as_deref()),
@@ -2112,7 +2030,7 @@ async fn retry_sync_event(
                             &event_id,
                             "failed",
                             next_attempt,
-                            Some(err.error),
+                            Some(err.0.error.clone()),
                         )
                         .await?;
                     } else {
@@ -2133,16 +2051,12 @@ async fn retry_sync_event(
         }
     }
 
-    let event = fetch_sync_event(&state, &event_id)
-        .await?
-        .ok_or_else(|| {
-            (
-                StatusCode::NOT_FOUND,
-                Json(CrmError {
-                    error: "sync event disappeared while retrying".to_string(),
-                }),
-            )
-        })?;
+    let event = fetch_sync_event(&state, &event_id).await?.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(CrmError { error: "sync event disappeared while retrying".to_string() }),
+        )
+    })?;
 
     Ok(Json(SyncEventResponse {
         id: event_id,
@@ -2152,7 +2066,7 @@ async fn retry_sync_event(
         quote_id: event.quote_id,
         crm_object_type: event.crm_object_type,
         crm_object_id: event.crm_object_id,
-        status: event.status,
+        status: event.status.clone(),
         attempts: event.attempts,
         error_message: event.error_message,
         next_retry_in_seconds: next_retry_delay_seconds(&event.status, event.attempts),
@@ -2173,38 +2087,41 @@ async fn crm_status(
     .await
     .map_err(db_error)?;
 
-    let mut configured_integrations: HashMap<String, (String, Option<String>, Option<String>, Option<String>, bool)> =
-        rows
-            .into_iter()
-            .filter_map(|row| {
-                let provider = row.try_get::<String, _>("provider").ok()?;
-                let status = row
-                    .try_get::<String, _>("status")
-                    .unwrap_or_else(|_| "disconnected".to_string());
-                let crm_account_id = row.try_get("crm_account_id").ok();
-                let last_synced_at = row.try_get("last_synced_at").ok();
-                let last_error = row.try_get("last_error").ok();
-                let access_token = row.try_get::<String, _>("access_token").unwrap_or_default();
-                let refresh_token = row.try_get::<Option<String>, _>("refresh_token").ok();
-                let token_expires_at = row.try_get::<Option<String>, _>("token_expires_at").ok();
-                let has_tokens = (!access_token.is_empty())
-                    && (!has_expired_token(&token_expires_at) || refresh_token.is_some());
-                Some((provider, (status, crm_account_id, last_synced_at, last_error, has_tokens)))
-            })
-            .collect();
+    let mut configured_integrations: HashMap<
+        String,
+        (String, Option<String>, Option<String>, Option<String>, bool),
+    > = rows
+        .into_iter()
+        .filter_map(|row| {
+            let provider = row.try_get::<String, _>("provider").ok()?;
+            let status =
+                row.try_get::<String, _>("status").unwrap_or_else(|_| "disconnected".to_string());
+            let crm_account_id = row.try_get("crm_account_id").ok();
+            let last_synced_at = row.try_get("last_synced_at").ok();
+            let last_error = row.try_get("last_error").ok();
+            let access_token = row.try_get::<String, _>("access_token").unwrap_or_default();
+            let refresh_token = row.try_get::<Option<String>, _>("refresh_token").ok();
+            let token_expires_at =
+                row.try_get::<Option<String>, _>("token_expires_at").ok().flatten();
+            let has_tokens = (!access_token.is_empty())
+                && (!has_expired_token(&token_expires_at) || refresh_token.is_some());
+            Some((provider, (status, crm_account_id, last_synced_at, last_error, has_tokens)))
+        })
+        .collect();
 
     let providers: Vec<CrmProvider> = vec![CrmProvider::Salesforce, CrmProvider::Hubspot];
     let mut status_rows = Vec::with_capacity(providers.len());
     for provider in providers {
         let key = provider.as_str().to_string();
         let entry = configured_integrations.remove(&key);
-        let (status, crm_account_id, last_synced_at, last_error, has_tokens) = entry.unwrap_or_else(|| {
-            if state.config.credentials(provider).is_some() {
-                ("disconnected".to_string(), None, None, None, false)
-            } else {
-                ("not_configured".to_string(), None, None, None, false)
-            }
-        });
+        let (status, crm_account_id, last_synced_at, last_error, has_tokens) = entry
+            .unwrap_or_else(|| {
+                if provider.credentials(&state.config).is_some() {
+                    ("disconnected".to_string(), None, None, None, false)
+                } else {
+                    ("not_configured".to_string(), None, None, None, false)
+                }
+            });
 
         status_rows.push(CrmStatus {
             provider: key,
@@ -2237,10 +2154,10 @@ async fn sync_event_stats(
     let mut total = 0i64;
     for row in aggregated {
         let status = row.try_get::<String, _>("status").unwrap_or_else(|_| "unknown".to_string());
-        let provider = row.try_get::<String, _>("provider").unwrap_or_else(|_| "unknown".to_string());
-        let direction = row
-            .try_get::<String, _>("direction")
-            .unwrap_or_else(|_| "unknown".to_string());
+        let provider =
+            row.try_get::<String, _>("provider").unwrap_or_else(|_| "unknown".to_string());
+        let direction =
+            row.try_get::<String, _>("direction").unwrap_or_else(|_| "unknown".to_string());
         let count = row.try_get::<i64, _>("count").unwrap_or(0);
 
         total += count;
@@ -2254,7 +2171,7 @@ async fn sync_event_stats(
     let failed_last_24h: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)\n         FROM crm_sync_event\n         WHERE status = 'failed' AND updated_at >= ?",
     )
-    .bind(cutoff)
+    .bind(&cutoff)
     .fetch_one(&state.db_pool)
     .await
     .map_err(db_error)?;
@@ -2262,7 +2179,7 @@ async fn sync_event_stats(
     let success_last_24h: i64 = sqlx::query_scalar(
         "SELECT COUNT(*)\n         FROM crm_sync_event\n         WHERE status = 'success' AND updated_at >= ?",
     )
-    .bind(cutoff)
+    .bind(&cutoff)
     .fetch_one(&state.db_pool)
     .await
     .map_err(db_error)?;
@@ -2302,9 +2219,7 @@ async fn webhook_ingest(
     let mut event_payload = serde_json::to_value(&payload).map_err(|error| {
         (
             StatusCode::BAD_REQUEST,
-            Json(CrmError {
-                error: format!("invalid webhook payload: {error}"),
-            }),
+            Json(CrmError { error: format!("invalid webhook payload: {error}") }),
         )
     })?;
 
@@ -2346,7 +2261,7 @@ async fn webhook_ingest(
         .await
         {
             status = "failed";
-            error_msg = Some(err.error);
+            error_msg = Some(err.0.error.clone());
         }
     } else {
         status = "skipped";
@@ -2434,7 +2349,10 @@ async fn resolve_webhook_quote_id(
     Ok(None)
 }
 
-async fn ensure_quote_exists(state: &CrmState, quote_id: &str) -> Result<(), (StatusCode, Json<CrmError>)> {
+async fn ensure_quote_exists(
+    state: &CrmState,
+    quote_id: &str,
+) -> Result<(), (StatusCode, Json<CrmError>)> {
     let exists: Option<String> = sqlx::query_scalar("SELECT id FROM quote WHERE id = ?")
         .bind(quote_id)
         .fetch_optional(&state.db_pool)
@@ -2444,9 +2362,7 @@ async fn ensure_quote_exists(state: &CrmState, quote_id: &str) -> Result<(), (St
     if exists.is_none() {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(CrmError {
-                error: format!("quote `{quote_id}` not found"),
-            }),
+            Json(CrmError { error: format!("quote `{quote_id}` not found") }),
         ));
     }
     Ok(())
@@ -2486,7 +2402,10 @@ async fn fetch_quote_payload(
     }))
 }
 
-async fn fetch_quote_lines_payload(state: &CrmState, quote_id: &str) -> Result<Value, (StatusCode, Json<CrmError>)> {
+async fn fetch_quote_lines_payload(
+    state: &CrmState,
+    quote_id: &str,
+) -> Result<Value, (StatusCode, Json<CrmError>)> {
     let lines = sqlx::query(
         "SELECT id, product_id, quantity, unit_price, discount_pct, subtotal, notes\n         FROM quote_line\n         WHERE quote_id = ?\n         ORDER BY created_at ASC",
     )
@@ -2516,14 +2435,15 @@ fn parse_provider(raw: &str) -> Result<CrmProvider, (StatusCode, Json<CrmError>)
     CrmProvider::parse(raw).ok_or_else(|| {
         (
             StatusCode::BAD_REQUEST,
-            Json(CrmError {
-                error: "provider must be salesforce or hubspot".to_string(),
-            }),
+            Json(CrmError { error: "provider must be salesforce or hubspot".to_string() }),
         )
     })
 }
 
-fn callback_url(state: &CrmState, provider: &CrmProvider) -> Result<String, (StatusCode, Json<CrmError>)> {
+fn callback_url(
+    state: &CrmState,
+    provider: &CrmProvider,
+) -> Result<String, (StatusCode, Json<CrmError>)> {
     let base = state
         .config
         .callback_base_url
@@ -2533,9 +2453,7 @@ fn callback_url(state: &CrmState, provider: &CrmProvider) -> Result<String, (Sta
         .ok_or_else(|| {
             (
                 StatusCode::BAD_REQUEST,
-                Json(CrmError {
-                    error: "oauth callback base URL is not configured".to_string(),
-                }),
+                Json(CrmError { error: "oauth callback base URL is not configured".to_string() }),
             )
         })?;
 
@@ -2583,9 +2501,7 @@ async fn discover_provider_account_id(
         CrmProvider::Salesforce => {
             Some("https://login.salesforce.com/services/oauth2/userinfo".to_string())
         }
-        CrmProvider::Hubspot => {
-            Some("https://api.hubapi.com/oauth/v3/userinfo".to_string())
-        }
+        CrmProvider::Hubspot => Some("https://api.hubapi.com/oauth/v3/userinfo".to_string()),
     };
 
     let userinfo_url = match userinfo_url {
@@ -2593,13 +2509,8 @@ async fn discover_provider_account_id(
         None => return None,
     };
 
-    let response = state
-        .client
-        .get(&userinfo_url)
-        .header("Authorization", auth)
-        .send()
-        .await
-        .ok()?;
+    let response =
+        state.client.get(&userinfo_url).header("Authorization", auth).send().await.ok()?;
 
     if !response.status().is_success() {
         warn!(
@@ -2687,7 +2598,9 @@ fn extract_template_value(expression: &str, source: &Value) -> Option<String> {
             None => return None,
         };
         let key = &remainder[..end];
-        if let Some(value) = resolve_payload_value(source, key).and_then(value_to_text) {
+        if let Some(value) =
+            resolve_payload_value(source, key).as_ref().and_then(|v| value_to_text(v))
+        {
             output.push_str(&value);
         }
         cursor = absolute_start + 2 + end + 1;
@@ -2717,11 +2630,8 @@ fn set_nested_value(target: &mut Value, field: &str, value: Value) {
         *target = json!({});
     }
 
-    let segments: Vec<&str> = field
-        .split('.')
-        .map(str::trim)
-        .filter(|segment| !segment.is_empty())
-        .collect();
+    let segments: Vec<&str> =
+        field.split('.').map(str::trim).filter(|segment| !segment.is_empty()).collect();
     let Some(first) = segments.first() else {
         return;
     };
@@ -2732,19 +2642,11 @@ fn set_nested_value(target: &mut Value, field: &str, value: Value) {
     }
 
     for segment in segments.iter().take(segments.len() - 1) {
-        let next = cursor
-            .entry(segment.to_string())
-            .or_insert_with(|| json!({}))
-            .as_object_mut()
-            .unwrap_or_else(|| {
-                cursor.insert(segment.to_string(), json!({}));
-                cursor
-                    .get_mut(segment)
-                    .unwrap()
-                    .as_object_mut()
-                    .expect("inserted object")
-            });
-        cursor = next;
+        let seg = segment.to_string();
+        if !cursor.contains_key(&seg) {
+            cursor.insert(seg.clone(), json!({}));
+        }
+        cursor = cursor.get_mut(&seg).and_then(|v| v.as_object_mut()).expect("nested object");
     }
 
     cursor.insert(segments[segments.len() - 1].to_string(), value);
@@ -2777,12 +2679,10 @@ fn map_quote_payload_for_provider(
         let value = if let Some(expression) = mapping.expression.as_deref() {
             match extract_template_value(expression, payload) {
                 Some(rendered) => Value::String(rendered),
-                None => resolve_payload_value(payload, &quotey_field)
-                    .unwrap_or(Value::Null),
+                None => resolve_payload_value(payload, &quotey_field).unwrap_or(Value::Null),
             }
         } else {
-            resolve_payload_value(payload, &quotey_field)
-                .unwrap_or(Value::Null)
+            resolve_payload_value(payload, &quotey_field).unwrap_or(Value::Null)
         };
 
         if value.is_null() {
@@ -2839,14 +2739,12 @@ async fn simulate_crm_sync_attempt(
         });
     }
 
-    let has_line_items = payload
-        .get("lines")
-        .and_then(Value::as_array)
-        .is_some_and(|lines| !lines.is_empty());
+    let has_line_items =
+        payload.get("lines").and_then(|v| v.as_array()).is_some_and(|lines| !lines.is_empty());
     if !has_line_items {
         warn!(
             provider = integration.provider.as_str(),
-            quote_id = %payload.get("quote_id").and_then(Value::as_str).unwrap_or("unknown"),
+            quote_id = %payload.get("quote_id").and_then(|v| v.as_str()).unwrap_or("unknown"),
             "sync payload has no line items"
         );
     }
@@ -2855,12 +2753,14 @@ async fn simulate_crm_sync_attempt(
         if let Some(refresh_token) = &integration.refresh_token {
             info!(
                 provider = integration.provider.as_str(),
-            refresh_token_hint = &refresh_token[..std::cmp::min(4, refresh_token.len())],
-            "crm token is expired; best effort sync"
-        );
+                refresh_token_hint = &refresh_token[..std::cmp::min(4, refresh_token.len())],
+                "crm token is expired; best effort sync"
+            );
             return Err(SyncAttemptResult {
                 kind: SyncAttemptResultKind::RetryableFailure,
-                message: "access token expired; refresh token available for background worker retry".to_string(),
+                message:
+                    "access token expired; refresh token available for background worker retry"
+                        .to_string(),
                 error_class: Some("access_token_expired".to_string()),
             });
         }
@@ -2897,22 +2797,20 @@ async fn list_connected_integrations(
     if let Some(provider) = provider_filter {
         rows = rows.bind(provider.as_str());
     }
-    let rows = rows
-    .fetch_all(&state.db_pool)
-    .await
-    .map_err(db_error)?;
+    let rows = rows.fetch_all(&state.db_pool).await.map_err(db_error)?;
 
     let mut integrations = Vec::new();
     for row in rows {
-        let provider = CrmProvider::parse(row.try_get::<String, _>("provider").unwrap_or_default())
-            .ok_or_else(|| {
-                (
-                    StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(CrmError {
-                        error: "invalid provider stored for CRM integration".to_string(),
-                    }),
-                )
-            })?;
+        let provider =
+            CrmProvider::parse(&row.try_get::<String, _>("provider").unwrap_or_default())
+                .ok_or_else(|| {
+                    (
+                        StatusCode::INTERNAL_SERVER_ERROR,
+                        Json(CrmError {
+                            error: "invalid provider stored for CRM integration".to_string(),
+                        }),
+                    )
+                })?;
 
         integrations.push(CrmIntegration {
             provider,
@@ -2945,28 +2843,23 @@ async fn fetch_mappings(
     if let Some(provider) = provider_filter {
         rows = rows.bind(provider.as_str());
     }
-    let rows = rows
-        .fetch_all(&state.db_pool)
-        .await
-        .map_err(db_error)?;
+    let rows = rows.fetch_all(&state.db_pool).await.map_err(db_error)?;
 
     let mut out = Vec::new();
     let mut seen = HashSet::new();
 
     for row in rows {
         let id = row.try_get::<String, _>("id").unwrap_or_default();
-        let provider = match CrmProvider::parse(row.try_get::<String, _>("provider").unwrap_or_default()) {
-            Some(value) => value,
-            None => {
-                warn!(id, "skipping crm field mapping with unsupported provider");
-                continue;
-            }
-        };
-        let Some(row_direction) = row
-            .try_get::<String, _>("direction")
-            .ok()
-            .as_deref()
-            .and_then(to_direction)
+        let provider =
+            match CrmProvider::parse(&row.try_get::<String, _>("provider").unwrap_or_default()) {
+                Some(value) => value,
+                None => {
+                    warn!(id, "skipping crm field mapping with unsupported provider");
+                    continue;
+                }
+            };
+        let Some(row_direction) =
+            row.try_get::<String, _>("direction").ok().as_deref().and_then(to_direction)
         else {
             warn!(id, "skipping crm field mapping with unsupported direction");
             continue;
@@ -2975,10 +2868,10 @@ async fn fetch_mappings(
             warn!(id, "skipping crm field mapping with direction mismatch");
             continue;
         }
-        let Some(quotey_field) =
-            row.try_get::<String, _>("quotey_field").ok().and_then(|quotey_field| {
-                normalize_and_validate_quotey_field(&quotey_field, direction)
-            })
+        let Some(quotey_field) = row
+            .try_get::<String, _>("quotey_field")
+            .ok()
+            .and_then(|quotey_field| normalize_and_validate_quotey_field(&quotey_field, direction))
         else {
             warn!(id, "skipping crm field mapping with unsupported quotey_field");
             continue;
@@ -3012,34 +2905,29 @@ async fn fetch_mappings(
     Ok(out)
 }
 
-fn provider_credentials(state: &CrmState, provider: CrmProvider) -> Result<&str, (StatusCode, Json<CrmError>)> {
+fn provider_credentials(
+    state: &CrmState,
+    provider: CrmProvider,
+) -> Result<&str, (StatusCode, Json<CrmError>)> {
     match provider {
-        CrmProvider::Salesforce => state
-            .config
-            .salesforce_client_id
-            .as_deref()
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| {
+        CrmProvider::Salesforce => {
+            state.config.salesforce_client_id.as_deref().filter(|v| !v.is_empty()).ok_or_else(
+                || {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(CrmError { error: "missing salesforce client_id".to_string() }),
+                    )
+                },
+            )
+        }
+        CrmProvider::Hubspot => {
+            state.config.hubspot_client_id.as_deref().filter(|v| !v.is_empty()).ok_or_else(|| {
                 (
                     StatusCode::BAD_REQUEST,
-                    Json(CrmError {
-                        error: "missing salesforce client_id".to_string(),
-                    }),
+                    Json(CrmError { error: "missing hubspot client_id".to_string() }),
                 )
-            }),
-        CrmProvider::Hubspot => state
-            .config
-            .hubspot_client_id
-            .as_deref()
-            .filter(|v| !v.is_empty())
-            .ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(CrmError {
-                        error: "missing hubspot client_id".to_string(),
-                    }),
-                )
-            }),
+            })
+        }
     }
 }
 
@@ -3073,17 +2961,13 @@ async fn fetch_and_reserve_oauth_state(
     let redirect_uri = row.try_get::<String, _>("redirect_uri").map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(CrmError {
-                error: "failed to read oauth state row".to_string(),
-            }),
+            Json(CrmError { error: "failed to read oauth state row".to_string() }),
         )
     })?;
     let scope = row.try_get::<String, _>("scope").map_err(|_| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(CrmError {
-                error: "failed to read oauth state row".to_string(),
-            }),
+            Json(CrmError { error: "failed to read oauth state row".to_string() }),
         )
     })?;
 
@@ -3096,7 +2980,7 @@ async fn fetch_and_reserve_oauth_state(
     Ok(OAuthStateRow { redirect_uri, scope })
 }
 
-#[derive(Serialize)]
+#[derive(Serialize, Deserialize)]
 struct OAuthTokenResponse {
     access_token: String,
     refresh_token: Option<String>,
@@ -3137,9 +3021,7 @@ async fn exchange_token(
             error!(error = %error, "crm token exchange request failed");
             (
                 StatusCode::BAD_GATEWAY,
-                Json(CrmError {
-                    error: "oauth token exchange request failed".to_string(),
-                }),
+                Json(CrmError { error: "oauth token exchange request failed".to_string() }),
             )
         })?;
 
@@ -3161,9 +3043,7 @@ async fn exchange_token(
     if token.access_token.is_empty() {
         return Err((
             StatusCode::BAD_GATEWAY,
-            Json(CrmError {
-                error: "token endpoint returned empty access token".to_string(),
-            }),
+            Json(CrmError { error: "token endpoint returned empty access token".to_string() }),
         ));
     }
     Ok(token)
@@ -3186,7 +3066,10 @@ struct SyncEventRow {
     completed_at: Option<String>,
 }
 
-async fn fetch_sync_event(state: &CrmState, event_id: &str) -> Result<Option<SyncEventRow>, (StatusCode, Json<CrmError>)> {
+async fn fetch_sync_event(
+    state: &CrmState,
+    event_id: &str,
+) -> Result<Option<SyncEventRow>, (StatusCode, Json<CrmError>)> {
     let row = sqlx::query(
         "SELECT provider, direction, event_type, quote_id, crm_object_type, crm_object_id, payload_json, status, attempts, error_message,\n         created_at, updated_at, completed_at\n         FROM crm_sync_event WHERE id = ?",
     )
@@ -3249,13 +3132,7 @@ async fn create_sync_event(
 
     if direction == CrmDirection::CrmToQuotey {
         let quote = quote_id.unwrap_or_default();
-        record_audit(
-            &state.db_pool,
-            quote,
-            "crm.webhook_ingested",
-            direction.as_str(),
-        )
-        .await;
+        record_audit(&state.db_pool, quote, "crm.webhook_ingested", direction.as_str()).await;
     }
     Ok(())
 }
@@ -3349,9 +3226,7 @@ async fn apply_crm_update_to_quote(
     if result.rows_affected() == 0 {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(CrmError {
-                error: format!("quote `{quote_id}` not found"),
-            }),
+            Json(CrmError { error: format!("quote `{quote_id}` not found") }),
         ));
     }
 

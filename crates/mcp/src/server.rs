@@ -12,9 +12,15 @@ use rmcp::{
 use tracing::{debug, info, warn};
 
 use std::collections::hash_map::DefaultHasher;
+use std::collections::HashMap;
 use std::hash::{Hash, Hasher};
+use std::path::PathBuf;
+use std::process::Command;
+use tera::{Context, Tera};
 
 use crate::auth::{AuthManager, AuthResult};
+use quotey_core::domain::quote::Quote;
+use quotey_db::repositories::ApprovalRepository;
 
 const MAX_PAGE_LIMIT: u32 = 100;
 const DEFAULT_PAGE_LIMIT: u32 = 20;
@@ -52,13 +58,21 @@ fn normalize_limit(value: u32) -> u32 {
 }
 
 fn normalize_page(value: u32) -> u32 {
-    if value == 0 { 1 } else { value }
+    if value == 0 {
+        1
+    } else {
+        value
+    }
 }
 
 fn normalize_optional_trimmed(value: &Option<String>) -> Option<String> {
     value.as_ref().and_then(|v| {
         let trimmed = v.trim();
-        if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
     })
 }
 
@@ -81,6 +95,64 @@ fn normalize_discount(value: f64, field: &str) -> Result<f64, String> {
         return Err(format!("{field} must be between 0 and 100"));
     }
     Ok(value)
+}
+
+fn register_pdf_quote_filters(tera: &mut Tera) {
+    tera.register_filter("format", pdf_format_filter);
+    tera.register_filter("money", pdf_money_filter);
+}
+
+fn pdf_format_filter(
+    value: &tera::Value,
+    args: &HashMap<String, tera::Value>,
+) -> tera::Result<tera::Value> {
+    let format_str =
+        value.as_str().ok_or_else(|| tera::Error::msg("format filter expects a string input"))?;
+
+    let val = args
+        .get("value")
+        .ok_or_else(|| tera::Error::msg("format filter requires a 'value' argument"))?;
+
+    let num = match val {
+        tera::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+        tera::Value::Null => 0.0,
+        _ => 0.0,
+    };
+
+    let result = if let Some(rest) = format_str.strip_prefix("%.") {
+        if let Some(precision_str) = rest.strip_suffix('f') {
+            let precision: usize = precision_str.parse().unwrap_or(2);
+            format!("{:.*}", precision, num)
+        } else {
+            format!("{}", num)
+        }
+    } else {
+        format!("{}", num)
+    };
+
+    Ok(tera::Value::String(result))
+}
+
+fn pdf_money_filter(
+    value: &tera::Value,
+    _args: &HashMap<String, tera::Value>,
+) -> tera::Result<tera::Value> {
+    let num = match value {
+        tera::Value::Number(n) => n.as_f64().unwrap_or(0.0),
+        tera::Value::Null => 0.0,
+        _ => 0.0,
+    };
+    Ok(tera::Value::String(format!("{:.2}", num)))
+}
+
+fn register_quote_style_partials(tera: &mut Tera) {
+    tera.add_raw_template(
+        "styles/quote-base.css",
+        include_str!("../../../templates/styles/quote-base.css"),
+    )
+    .ok();
+    tera.add_raw_template("styles/quote.css", include_str!("../../../templates/styles/quote.css"))
+        .ok();
 }
 
 fn decimal_to_f64(value: &rust_decimal::Decimal) -> f64 {
@@ -107,7 +179,7 @@ fn build_quote_id(account_id: &str, input: &QuoteCreateInput) -> String {
 }
 
 fn allowed_pdf_templates() -> &'static [&'static str] {
-    &["standard", "compact", "detailed"]
+    &["detailed", "executive_summary", "compact"]
 }
 
 fn template_is_allowed(template: &str) -> bool {
@@ -120,10 +192,19 @@ fn checksum_of(value: &str) -> String {
     format!("mock-checksum:{:016x}", hasher.finish())
 }
 
+fn checksum_of_bytes(value: &[u8]) -> String {
+    use std::hash::Hasher as _;
+    let mut hasher = DefaultHasher::new();
+    hasher.write(value);
+    format!("mock-checksum:{:016x}", hasher.finish())
+}
+
 fn sanitize_filename(value: &str) -> String {
     value
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' })
+        .map(
+            |c| if c.is_ascii_alphanumeric() || c == '-' || c == '_' || c == '.' { c } else { '_' },
+        )
         .collect()
 }
 
@@ -289,7 +370,7 @@ fn default_currency() -> String {
     "USD".to_string()
 }
 fn default_template() -> String {
-    "standard".to_string()
+    "detailed".to_string()
 }
 
 // Catalog Types
@@ -624,6 +705,204 @@ pub struct QuotePdfResult {
     pub generated_at: String,
 }
 
+enum PdfRenderResult {
+    Pdf(Vec<u8>),
+    Html(String),
+}
+
+fn build_pdf_quote_payload(quote: &Quote) -> serde_json::Value {
+    let mut line_rows = Vec::with_capacity(quote.lines.len());
+    let mut subtotal = 0.0_f64;
+    let mut discount_total = 0.0_f64;
+
+    for line in &quote.lines {
+        let unit_price = decimal_to_f64(&line.unit_price);
+        let line_subtotal = unit_price * f64::from(line.quantity);
+        let discount_pct = line.discount_pct.max(0.0).min(100.0);
+        let line_discount = line_subtotal * discount_pct / 100.0;
+        let line_total = line_subtotal - line_discount;
+
+        subtotal += line_subtotal;
+        discount_total += line_discount;
+
+        line_rows.push(serde_json::json!({
+            "product_id": line.product_id.0,
+            "product_name": line.product_id.0,
+            "quantity": line.quantity,
+            "unit_price": unit_price,
+            "subtotal": line_total,
+            "discount_pct": discount_pct,
+            "discount_amount": line_discount,
+            "total_price": line_total,
+            "line_subtotal": line_total,
+        }));
+    }
+
+    let net_total = subtotal - discount_total;
+    let tax_rate = 0.0_f64;
+    let tax_total = net_total * tax_rate;
+    let account_id = quote.account_id.clone().unwrap_or_default();
+
+    serde_json::json!({
+        "id": quote.id.0,
+        "version": quote.version,
+        "status": quotey_db::repositories::quote::quote_status_as_str(&quote.status),
+        "created_at": quote.created_at.to_rfc3339(),
+        "valid_until": quote.valid_until.clone().unwrap_or_default(),
+        "term_months": quote.term_months.unwrap_or(12),
+        "payment_terms": "Net 30",
+        "account_id": account_id.clone(),
+        "currency": quote.currency.clone(),
+        "account": {
+            "id": account_id.clone(),
+            "name": account_id,
+        },
+        "subtotal": subtotal,
+        "discount_total": discount_total,
+        "total_discount": discount_total,
+        "tax_rate": tax_rate,
+        "tax": tax_total,
+        "tax_total": tax_total,
+        "total": net_total + tax_total,
+        "lines": line_rows,
+        "pricing": {
+            "subtotal": subtotal,
+            "total_discount": discount_total,
+            "discount_total": discount_total,
+            "tax_rate": tax_rate,
+            "tax": tax_total,
+            "tax_total": tax_total,
+            "total": net_total + tax_total,
+        },
+        "generated_by": "quotey-mcp",
+    })
+}
+
+async fn render_quote_pdf_html_to_bytes(
+    payload: &serde_json::Value,
+    template: &str,
+) -> Result<PdfRenderResult, String> {
+    let mut tera = Tera::default();
+    register_pdf_quote_filters(&mut tera);
+    register_quote_style_partials(&mut tera);
+
+    tera.add_raw_template(
+        "detailed.html.tera",
+        include_str!("../../../templates/quotes/detailed.html.tera"),
+    )
+    .map_err(|e| e.to_string())?;
+    tera.add_raw_template(
+        "executive_summary.html.tera",
+        include_str!("../../../templates/quotes/executive_summary.html.tera"),
+    )
+    .map_err(|e| e.to_string())?;
+    tera.add_raw_template(
+        "compact.html.tera",
+        include_str!("../../../templates/quotes/compact.html.tera"),
+    )
+    .map_err(|e| e.to_string())?;
+
+    let mut context = Context::new();
+    context.insert("quote", &payload);
+    context.insert("account", &payload.get("account").cloned().unwrap_or(serde_json::json!({})));
+    context.insert("lines", &payload.get("lines").cloned().unwrap_or(serde_json::json!([])));
+    context.insert("pricing", &payload.get("pricing").cloned().unwrap_or_else(|| {
+        serde_json::json!({
+            "subtotal": payload.get("subtotal").cloned().unwrap_or(serde_json::json!(0.0)),
+            "discount_total": payload.get("discount_total").cloned().unwrap_or(serde_json::json!(0.0)),
+            "tax_rate": payload.get("tax_rate").cloned().unwrap_or(serde_json::json!(0.0)),
+            "tax": payload.get("tax").cloned().unwrap_or(serde_json::json!(0.0)),
+            "tax_total": payload.get("tax_total").cloned().unwrap_or(serde_json::json!(0.0)),
+            "total": payload.get("total").cloned().unwrap_or(serde_json::json!(0.0)),
+        })
+    }));
+    context
+        .insert("sales_rep", &payload.get("sales_rep").cloned().unwrap_or(serde_json::json!({})));
+    context.insert(
+        "company_name",
+        &payload.get("company_name").cloned().unwrap_or(serde_json::json!("Quotey")),
+    );
+    context.insert(
+        "primary_color",
+        &payload.get("primary_color").cloned().unwrap_or(serde_json::json!("#2563eb")),
+    );
+    context.insert("white_label", &false);
+
+    let template_name = format!("{}.html.tera", template);
+    let html = tera.render(&template_name, &context).map_err(|e| e.to_string())?;
+
+    let temp_dir = std::env::temp_dir();
+    let html_path: PathBuf = temp_dir.join(format!("quotey-mcp-{}.html", uuid::Uuid::new_v4()));
+    let pdf_path: PathBuf = temp_dir.join(format!("quotey-mcp-{}.pdf", uuid::Uuid::new_v4()));
+    std::fs::write(&html_path, html.as_bytes()).map_err(|e| e.to_string())?;
+
+    let output = Command::new("wkhtmltopdf")
+        .arg("--page-size")
+        .arg("A4")
+        .arg("--margin-top")
+        .arg("10mm")
+        .arg("--margin-bottom")
+        .arg("10mm")
+        .arg("--margin-left")
+        .arg("10mm")
+        .arg("--margin-right")
+        .arg("10mm")
+        .arg("--encoding")
+        .arg("utf-8")
+        .arg("--enable-local-file-access")
+        .arg(html_path.to_string_lossy().to_string())
+        .arg(pdf_path.to_string_lossy().to_string())
+        .output();
+
+    let cleanup = |html_path: PathBuf, pdf_path: PathBuf| {
+        let _ = std::fs::remove_file(html_path);
+        let _ = std::fs::remove_file(pdf_path);
+    };
+
+    match output {
+        Ok(result) if result.status.success() => {
+            let pdf_bytes = match std::fs::read(&pdf_path) {
+                Ok(bytes) => bytes,
+                Err(read_err) => {
+                    warn!(error = %read_err, "quote_pdf: failed to read generated PDF, returning HTML fallback");
+                    cleanup(html_path, pdf_path);
+                    return Ok(PdfRenderResult::Html(html));
+                }
+            };
+            cleanup(html_path, pdf_path);
+            Ok(PdfRenderResult::Pdf(pdf_bytes))
+        }
+        Ok(result) => {
+            let stderr = String::from_utf8_lossy(&result.stderr);
+            warn!(stderr = %stderr, "quote_pdf: wkhtmltopdf returned non-zero status, using HTML fallback");
+            cleanup(html_path, pdf_path);
+            Ok(PdfRenderResult::Html(html))
+        }
+        Err(err) => {
+            if err.kind() == std::io::ErrorKind::NotFound {
+                warn!("quote_pdf: wkhtmltopdf not found, using HTML fallback");
+            } else {
+                warn!(error = %err, "quote_pdf: wkhtmltopdf command failed, using HTML fallback");
+            }
+            cleanup(html_path, pdf_path);
+            Ok(PdfRenderResult::Html(html))
+        }
+    }
+}
+
+fn payload_to_output_path(quote_id: &str, template: &str, is_pdf: bool) -> (PathBuf, PathBuf) {
+    let dir = std::env::temp_dir().join("quotey-mcp").join("quote-pdfs");
+    let extension = if is_pdf { "pdf" } else { "html" };
+    let filename = format!(
+        "quote-{}-{}.{}",
+        sanitize_filename(quote_id),
+        sanitize_filename(template),
+        extension
+    );
+    let path = dir.join(filename);
+    (dir, path)
+}
+
 // ============================================================================
 // Tool Router Implementation
 // ============================================================================
@@ -690,12 +969,7 @@ impl QuoteyMcpServer {
                     .collect();
 
                 let result = CatalogSearchResult {
-                    pagination: PaginationInfo {
-                        total,
-                        page,
-                        per_page: limit,
-                        has_more,
-                    },
+                    pagination: PaginationInfo { total, page, per_page: limit, has_more },
                     items,
                 };
 
@@ -747,11 +1021,7 @@ impl QuoteyMcpServer {
                 serde_json::to_string_pretty(&result).unwrap_or_default()
             }
             Ok(None) => {
-                tool_error(
-                    "NOT_FOUND",
-                    &format!("Product '{}' not found", product_id),
-                    None,
-                )
+                tool_error("NOT_FOUND", &format!("Product '{}' not found", product_id), None)
             }
             Err(e) => {
                 warn!(error = %e, "catalog_get failed");
@@ -768,8 +1038,8 @@ impl QuoteyMcpServer {
         use quotey_core::domain::product::ProductId;
         use quotey_core::domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
         use quotey_db::repositories::QuoteRepository;
-        use rust_decimal::Decimal;
         use rust_decimal::prelude::FromPrimitive;
+        use rust_decimal::Decimal;
 
         let account_id = match normalize_id(&input.account_id, "account_id") {
             Ok(value) => value,
@@ -824,7 +1094,8 @@ impl QuoteyMcpServer {
                 );
             }
 
-            let discount_pct = match normalize_discount(item.discount_pct, "line_item.discount_pct") {
+            let discount_pct = match normalize_discount(item.discount_pct, "line_item.discount_pct")
+            {
                 Ok(value) => value,
                 Err(msg) => {
                     return tool_error("VALIDATION_ERROR", &msg, None);
@@ -847,7 +1118,11 @@ impl QuoteyMcpServer {
             };
 
             if !product.active {
-                return tool_error("CONFLICT", &format!("Product '{}' is inactive", product_id), None);
+                return tool_error(
+                    "CONFLICT",
+                    &format!("Product '{}' is inactive", product_id),
+                    None,
+                );
             }
 
             if product.currency.to_ascii_uppercase() != currency {
@@ -892,7 +1167,7 @@ impl QuoteyMcpServer {
             status: QuoteStatus::Draft,
             account_id: Some(account_id.clone()),
             deal_id,
-            currency,
+            currency: currency.clone(),
             term_months: input.term_months,
             start_date: input.start_date,
             end_date: None,
@@ -1022,9 +1297,7 @@ impl QuoteyMcpServer {
 
                 serde_json::to_string_pretty(&result).unwrap_or_default()
             }
-            Ok(None) => {
-                tool_error("NOT_FOUND", &format!("Quote '{}' not found", quote_id), None)
-            }
+            Ok(None) => tool_error("NOT_FOUND", &format!("Quote '{}' not found", quote_id), None),
             Err(e) => {
                 warn!(error = %e, "quote_get failed");
                 tool_error("INTERNAL_ERROR", &e.to_string(), None)
@@ -1043,20 +1316,21 @@ impl QuoteyMcpServer {
             }
         };
 
-        let requested_discount_pct = match normalize_discount(input.requested_discount_pct, "requested_discount_pct") {
-            Ok(value) => value,
-            Err(msg) => {
-                return tool_error("VALIDATION_ERROR", &msg, None);
-            }
-        };
+        let requested_discount_pct =
+            match normalize_discount(input.requested_discount_pct, "requested_discount_pct") {
+                Ok(value) => value,
+                Err(msg) => {
+                    return tool_error("VALIDATION_ERROR", &msg, None);
+                }
+            };
 
         use quotey_core::cpq::policy::evaluate_policy_input;
         use quotey_core::cpq::policy::PolicyInput;
         use quotey_core::cpq::pricing::price_quote_with_trace;
         use quotey_core::domain::quote::QuoteId;
         use quotey_db::repositories::QuoteRepository;
-        use rust_decimal::Decimal;
         use rust_decimal::prelude::FromPrimitive;
+        use rust_decimal::Decimal;
 
         let quote_repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
 
@@ -1187,10 +1461,7 @@ impl QuoteyMcpServer {
 
         let repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
 
-        match repo
-            .list(account_id.as_deref(), status.as_deref(), fetch_limit, offset)
-            .await
-        {
+        match repo.list(account_id.as_deref(), status.as_deref(), fetch_limit, offset).await {
             Ok(quotes) => {
                 use quotey_db::repositories::quote::quote_status_as_str;
 
@@ -1301,31 +1572,40 @@ impl QuoteyMcpServer {
             }
         };
 
-        let normalized_status = quotey_db::repositories::quote::quote_status_as_str(&quote.status).to_string();
+        let normalized_status =
+            quotey_db::repositories::quote::quote_status_as_str(&quote.status).to_string();
         if matches!(
             quote.status,
-            QuoteStatus::Approved | QuoteStatus::Sent | QuoteStatus::Expired | QuoteStatus::Cancelled
+            QuoteStatus::Approved
+                | QuoteStatus::Sent
+                | QuoteStatus::Expired
+                | QuoteStatus::Cancelled
         ) {
             return tool_error(
                 "CONFLICT",
-                &format!("Quote '{}' is in '{}' state and cannot be submitted for approval", quote_id, normalized_status),
+                &format!(
+                    "Quote '{}' is in '{}' state and cannot be submitted for approval",
+                    quote_id, normalized_status
+                ),
                 None,
             );
         }
 
-        let existing = match quotey_db::repositories::SqlApprovalRepository::new(self.db_pool.clone())
-            .find_by_quote_id(&QuoteId(quote_id.clone()))
-            .await
-        {
-            Ok(existing) => existing,
-            Err(e) => {
-                warn!(error = %e, "approval_request: failed to load existing approvals");
-                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
-            }
-        };
+        let existing =
+            match quotey_db::repositories::SqlApprovalRepository::new(self.db_pool.clone())
+                .find_by_quote_id(&QuoteId(quote_id.clone()))
+                .await
+            {
+                Ok(existing) => existing,
+                Err(e) => {
+                    warn!(error = %e, "approval_request: failed to load existing approvals");
+                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                }
+            };
 
         if let Some(existing_pending) = existing.iter().find(|a| {
-            a.status == ApprovalStatus::Pending && a.approver_role.eq_ignore_ascii_case(&approver_role)
+            a.status == ApprovalStatus::Pending
+                && a.approver_role.eq_ignore_ascii_case(&approver_role)
         }) {
             return tool_error(
                 "CONFLICT",
@@ -1350,7 +1630,7 @@ impl QuoteyMcpServer {
             quote_id: quote.id.clone(),
             approver_role: approver_role.clone(),
             reason: format!("Approval requested for quote {}", quote.id.0),
-            justification,
+            justification: justification.clone(),
             status: ApprovalStatus::Pending,
             requested_by: "agent:mcp".to_string(),
             expires_at: Some(expires_at),
@@ -1468,7 +1748,8 @@ impl QuoteyMcpServer {
         let mut items = Vec::new();
         for approval in &pending {
             // Look up quote to get total
-            let (account_name, quote_total) = match quote_repo.find_by_id(&approval.quote_id).await {
+            let (account_name, quote_total) = match quote_repo.find_by_id(&approval.quote_id).await
+            {
                 Ok(Some(q)) => {
                     let total: f64 = q
                         .lines
@@ -1516,9 +1797,9 @@ impl QuoteyMcpServer {
         let template = if input.template.trim().is_empty() {
             default_template()
         } else {
-            input.template.trim()
+            input.template.trim().to_string()
         };
-        if !template_is_allowed(template) {
+        if !template_is_allowed(&template) {
             return tool_error(
                 "VALIDATION_ERROR",
                 &format!(
@@ -1545,64 +1826,58 @@ impl QuoteyMcpServer {
             }
         };
 
-        let line_total: f64 = quote
-            .lines
-            .iter()
-            .map(|line| {
-                let unit_price: f64 = decimal_to_f64(&line.unit_price);
-                let line_subtotal = unit_price * line.quantity as f64;
-                let discount = line_subtotal * line.discount_pct / 100.0;
-                line_subtotal - discount
-            })
-            .sum();
+        let payload = build_pdf_quote_payload(&quote);
+        let render_result = match render_quote_pdf_html_to_bytes(&payload, &template).await {
+            Ok(rendered) => rendered,
+            Err(err) => {
+                warn!(error = %err, "quote_pdf: failed to render PDF html");
+                return tool_error("INTERNAL_ERROR", &err, None);
+            }
+        };
 
-        let payload = serde_json::json!({
-            "quote_id": quote.id.0,
-            "version": quote.version,
-            "status": quotey_db::repositories::quote::quote_status_as_str(&quote.status),
-            "account_id": quote.account_id,
-            "currency": quote.currency,
-            "subtotal": line_total,
-            "generated_by": "quotey-mcp",
-            "template": template,
-            "generated_at": chrono::Utc::now().to_rfc3339(),
-            "lines": quote
-                .lines
-                .iter()
-                .map(|line| serde_json::json!({
-                    "product_id": line.product_id.0,
-                    "quantity": line.quantity,
-                    "unit_price": decimal_to_f64(&line.unit_price),
-                    "discount_pct": line.discount_pct,
-                }))
-                .collect::<Vec<_>>(),
-        });
+        let generated_at = chrono::Utc::now().to_rfc3339();
+        let (dir, file_path, pdf_generated, file_size_bytes, checksum) = match &render_result {
+            PdfRenderResult::Pdf(bytes) => {
+                let (dir, file_path) = payload_to_output_path(&quote_id, &template, true);
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    warn!(error = %e, "quote_pdf: failed to create output directory");
+                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                }
+                if let Err(e) = std::fs::write(&file_path, bytes) {
+                    warn!(error = %e, "quote_pdf: failed to write artifact");
+                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                }
+                let checksum = checksum_of_bytes(bytes);
+                (dir, file_path, true, bytes.len() as u64, checksum)
+            }
+            PdfRenderResult::Html(html) => {
+                let (dir, file_path) = payload_to_output_path(&quote_id, &template, false);
+                if let Err(e) = std::fs::create_dir_all(&dir) {
+                    warn!(error = %e, "quote_pdf: failed to create output directory");
+                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                }
+                if let Err(e) = std::fs::write(&file_path, html) {
+                    warn!(error = %e, "quote_pdf: failed to write artifact");
+                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                }
+                let checksum = checksum_of(html);
+                (dir, file_path, false, html.len() as u64, checksum)
+            }
+        };
 
-        let artifact = format!(
-            "%PDF-1.4\n% Generated quote artifact for MCP client\n{}",
-            serde_json::to_string_pretty(&payload).unwrap_or_else(|_| "{}".to_string())
-        );
-        let file_name = format!("quote-{}-{}.pdf", sanitize_filename(&quote_id), template);
-        let dir = std::env::temp_dir().join("quotey-mcp").join("pdf");
-        if let Err(e) = std::fs::create_dir_all(&dir) {
-            warn!(error = %e, "quote_pdf: failed to create output directory");
-            return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+        if let Some(parent) = file_path.parent() {
+            debug!(event_name = "quote_pdf.output_dir", path = %parent.display(), "PDF output prepared");
         }
 
-        let file_path = dir.join(file_name);
-        if let Err(e) = std::fs::write(&file_path, artifact.as_bytes()) {
-            warn!(error = %e, "quote_pdf: failed to write artifact");
-            return tool_error("INTERNAL_ERROR", &e.to_string(), None);
-        }
-
+        let file_path = file_path.to_string_lossy().to_string();
         let result = QuotePdfResult {
             quote_id,
-            pdf_generated: true,
-            file_path: file_path.to_string_lossy().to_string(),
-            file_size_bytes: artifact.len() as u64,
-            checksum: checksum_of(&artifact),
+            pdf_generated,
+            file_path,
+            file_size_bytes,
+            checksum,
             template_used: template.to_string(),
-            generated_at: chrono::Utc::now().to_rfc3339(),
+            generated_at,
         };
 
         serde_json::to_string_pretty(&result).unwrap_or_default()

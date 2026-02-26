@@ -1321,12 +1321,8 @@ pub fn suggestion_message(view: &SuggestionCardView) -> MessageTemplate {
             item.unit_price.map(|p| format!(" • {}", format_currency(p))).unwrap_or_default();
         let score_pct = (item.score * 100.0).round() as u32;
         let reason_lines: Vec<&str> = item.reasoning.iter().take(2).map(String::as_str).collect();
-        let reason_summary = if reason_lines.is_empty() {
-            "—".to_owned()
-        } else {
-            reason_lines.join(" • ")
-        };
-
+        let reason_summary =
+            if reason_lines.is_empty() { "—".to_owned() } else { reason_lines.join(" • ") };
 
         let section_id = format!("suggest.item.{index}.v1");
         let actions_id = format!("suggest.item.actions.{index}.v1");
