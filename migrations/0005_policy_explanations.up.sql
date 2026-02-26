@@ -1,3 +1,9 @@
+-- Migration: 0005_policy_explanations
+-- Description: Add policy engine with explainable rules
+-- Supports constraint-based rules with human-readable explanations
+-- Author: Quotey Team
+-- Date: 2024
+
 CREATE TABLE IF NOT EXISTS policy_rules (
     id TEXT PRIMARY KEY,
     rule_key TEXT NOT NULL UNIQUE,

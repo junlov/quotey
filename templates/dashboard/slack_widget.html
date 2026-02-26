@@ -1,0 +1,314 @@
+{# Slack-Compatible Dashboard Widget #}
+{# Minimal, fast-loading dashboard for embedding in Slack #}
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quotey Dashboard</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --success: #10b981;
+            --warning: #f59e0b;
+            --danger: #ef4444;
+            --bg: #f8fafc;
+            --card: #ffffff;
+            --text: #1e293b;
+            --text-secondary: #64748b;
+            --border: #e2e8f0;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-size: 14px;
+            line-height: 1.5;
+            color: var(--text);
+            background: var(--bg);
+            max-width: 600px;
+            margin: 0 auto;
+            padding: 16px;
+        }
+
+        .slack-widget {
+            background: var(--card);
+            border-radius: 8px;
+            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            overflow: hidden;
+        }
+
+        .widget-header {
+            background: linear-gradient(135deg, var(--primary) 0%, #1d4ed8 100%);
+            color: white;
+            padding: 16px;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .widget-header h2 {
+            font-size: 16px;
+            font-weight: 600;
+        }
+
+        .widget-header .period {
+            font-size: 12px;
+            opacity: 0.9;
+        }
+
+        .metrics-row {
+            display: grid;
+            grid-template-columns: repeat(3, 1fr);
+            gap: 12px;
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .metric-box {
+            text-align: center;
+        }
+
+        .metric-value {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text);
+        }
+
+        .metric-value.success { color: var(--success); }
+        .metric-value.warning { color: var(--warning); }
+        .metric-value.danger { color: var(--danger); }
+
+        .metric-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            margin-top: 2px;
+            text-transform: uppercase;
+        }
+
+        .metric-change {
+            font-size: 11px;
+            margin-top: 2px;
+        }
+
+        .metric-change.positive { color: var(--success); }
+        .metric-change.negative { color: var(--danger); }
+
+        .widget-section {
+            padding: 16px;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .widget-section:last-child {
+            border-bottom: none;
+        }
+
+        .section-title {
+            font-size: 12px;
+            font-weight: 600;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 12px;
+        }
+
+        .mini-chart {
+            height: 60px;
+            display: flex;
+            align-items: flex-end;
+            gap: 4px;
+            padding: 8px 0;
+        }
+
+        .chart-bar {
+            flex: 1;
+            background: var(--primary);
+            border-radius: 2px;
+            opacity: 0.8;
+            transition: opacity 0.2s;
+        }
+
+        .chart-bar:hover {
+            opacity: 1;
+        }
+
+        .top-list {
+            list-style: none;
+        }
+
+        .top-list li {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .top-list li:last-child {
+            border-bottom: none;
+        }
+
+        .item-name {
+            font-weight: 500;
+        }
+
+        .item-value {
+            font-family: monospace;
+            color: var(--text-secondary);
+        }
+
+        .progress-row {
+            margin-bottom: 12px;
+        }
+
+        .progress-label {
+            display: flex;
+            justify-content: space-between;
+            font-size: 12px;
+            margin-bottom: 4px;
+        }
+
+        .progress-bar {
+            height: 6px;
+            background: var(--border);
+            border-radius: 3px;
+            overflow: hidden;
+        }
+
+        .progress-fill {
+            height: 100%;
+            background: var(--primary);
+            border-radius: 3px;
+            transition: width 0.3s ease;
+        }
+
+        .progress-fill.success { background: var(--success); }
+        .progress-fill.warning { background: var(--warning); }
+        .progress-fill.danger { background: var(--danger); }
+
+        .widget-footer {
+            padding: 12px 16px;
+            background: var(--bg);
+            text-align: center;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .btn {
+            display: inline-block;
+            padding: 8px 16px;
+            background: var(--primary);
+            color: white;
+            text-decoration: none;
+            border-radius: 4px;
+            font-size: 13px;
+            font-weight: 500;
+            margin-top: 8px;
+        }
+
+        .status-indicator {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            font-size: 11px;
+        }
+
+        .status-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+        }
+
+        .status-dot.green { background: var(--success); }
+        .status-dot.yellow { background: var(--warning); }
+        .status-dot.red { background: var(--danger); }
+    </style>
+</head>
+<body>
+    <div class="slack-widget">
+        <div class="widget-header">
+            <div>
+                <h2>📊 Quotey Dashboard</h2>
+                <span class="period">{{ period | default(value="Last 30 days") }}</span>
+            </div>
+            <span class="status-indicator">
+                <span class="status-dot {% if health_score > 80 %}green{% elif health_score > 50 %}yellow{% else %}red{% endif %}"></span>
+                {{ health_score | default(value="85") }}% healthy
+            </span>
+        </div>
+
+        <div class="metrics-row">
+            <div class="metric-box">
+                <div class="metric-value">{{ total_quotes | default(value="42") }}</div>
+                <div class="metric-label">Quotes</div>
+                <div class="metric-change positive">↑ 12%</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value success">{{ win_rate | default(value="68") }}%</div>
+                <div class="metric-label">Win Rate</div>
+                <div class="metric-change positive">↑ 5%</div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value warning">${{ avg_discount | default(value="12.5") }}k</div>
+                <div class="metric-label">Avg Deal</div>
+                <div class="metric-change negative">↓ 3%</div>
+            </div>
+        </div>
+
+        <div class="widget-section">
+            <div class="section-title">Quote Activity</div>
+            <div class="mini-chart">
+                {% for value in activity_chart | default(value=[40, 65, 45, 80, 55, 70, 90]) %}
+                <div class="chart-bar" style="height: {{ value }}%;"></div>
+                {% endfor %}
+            </div>
+        </div>
+
+        <div class="widget-section">
+            <div class="section-title">🏆 Top Products</div>
+            <ul class="top-list">
+                {% for product in top_products | default(value=[
+                    {name: "Pro Plan", value: "$145K"},
+                    {name: "Enterprise", value: "$98K"},
+                    {name: "SSO Add-on", value: "$42K"}
+                ]) %}
+                <li>
+                    <span class="item-name">{{ product.name }}</span>
+                    <span class="item-value">{{ product.value }}</span>
+                </li>
+                {% endfor %}
+            </ul>
+        </div>
+
+        <div class="widget-section">
+            <div class="section-title">⏳ Approval Queue</div>
+            {% for approver in approval_queue | default(value=[
+                {name: "Sales Manager", pending: 5, max: 10},
+                {name: "VP Sales", pending: 2, max: 8},
+                {name: "Deal Desk", pending: 8, max: 12}
+            ]) %}
+            <div class="progress-row">
+                <div class="progress-label">
+                    <span>{{ approver.name }}</span>
+                    <span>{{ approver.pending }} pending</span>
+                </div>
+                <div class="progress-bar">
+                    <div class="progress-fill {% if approver.pending > approver.max * 0.7 %}danger{% elif approver.pending > approver.max * 0.4 %}warning{% else %}success{% endif %}" 
+                         style="width: {{ (approver.pending / approver.max * 100) | min(100) }}%;"></div>
+                </div>
+            </div>
+            {% endfor %}
+        </div>
+
+        <div class="widget-footer">
+            <p>Data refreshed {{ last_updated | default(value="5 min ago") }}</p>
+            <a href="{{ full_dashboard_url | default(value="/dashboard") }}" class="btn">View Full Dashboard →</a>
+        </div>
+    </div>
+</body>
+</html>

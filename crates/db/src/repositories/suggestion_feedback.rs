@@ -164,8 +164,8 @@ impl SuggestionFeedbackRepository for SqlSuggestionFeedbackRepository {
         let row = sqlx::query(
             "SELECT
                  COUNT(*) AS shown_count,
-                 SUM(was_clicked) AS clicked_count,
-                 SUM(was_added_to_quote) AS added_count
+                 COALESCE(SUM(was_clicked), 0) AS clicked_count,
+                 COALESCE(SUM(was_added_to_quote), 0) AS added_count
              FROM suggestion_feedback
              WHERE product_id = ? AND was_shown = 1",
         )

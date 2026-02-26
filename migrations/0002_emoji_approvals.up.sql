@@ -1,3 +1,9 @@
+-- Migration: 0002_emoji_approvals
+-- Description: Add Slack emoji reaction-based approval workflow
+-- Supports 👍 (approve), 👎 (reject), 💬 (request changes) with undo window
+-- Author: Quotey Team
+-- Date: 2024
+
 CREATE TABLE IF NOT EXISTS emoji_approvals (
     id TEXT PRIMARY KEY,
     quote_id TEXT NOT NULL,

@@ -1,0 +1,2 @@
+116230d4bc80600c17140f5a0230cbfc7909d80ecb93b77566de1e0226c0e053  /tmp/cargo-target/release/quotey
+e4c3227448ae9d9be6c10a15ab44d80272a06198d60f53fbddf2ffecd921f685  /tmp/cargo-target/release/quotey-server

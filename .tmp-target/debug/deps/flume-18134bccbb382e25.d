@@ -1,0 +1,7 @@
+/data/projects/quotey/.tmp-target/debug/deps/flume-18134bccbb382e25.d: /home/ubuntuman/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/flume-0.11.1/src/lib.rs /home/ubuntuman/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/flume-0.11.1/src/async.rs /home/ubuntuman/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/flume-0.11.1/src/signal.rs
+
+/data/projects/quotey/.tmp-target/debug/deps/libflume-18134bccbb382e25.rmeta: /home/ubuntuman/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/flume-0.11.1/src/lib.rs /home/ubuntuman/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/flume-0.11.1/src/async.rs /home/ubuntuman/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/flume-0.11.1/src/signal.rs
+
+/home/ubuntuman/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/flume-0.11.1/src/lib.rs:
+/home/ubuntuman/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/flume-0.11.1/src/async.rs:
+/home/ubuntuman/.cargo/registry/src/index.crates.io-1949cf8c6b5b557f/flume-0.11.1/src/signal.rs:

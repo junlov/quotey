@@ -1,3 +1,9 @@
+-- Migration: 0004_dialogue_state
+-- Description: Add dialogue session management for conversational quote flows
+-- Tracks multi-turn conversations with state and intent history
+-- Author: Quotey Team
+-- Date: 2024
+
 CREATE TABLE IF NOT EXISTS dialogue_sessions (
     id TEXT PRIMARY KEY,
     slack_thread_id TEXT NOT NULL,

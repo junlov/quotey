@@ -207,6 +207,11 @@ mod tests {
         "portal_link",
         "idx_portal_link_token",
         "idx_portal_link_quote_id",
+        // 0024 — portal comment
+        "portal_comment",
+        "idx_portal_comment_quote_id",
+        "idx_portal_comment_line_id",
+        "idx_portal_comment_parent",
     ];
 
     async fn managed_object_count(pool: &sqlx::SqlitePool, object_name: &str) -> TestResult<i64> {

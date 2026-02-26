@@ -14,6 +14,7 @@ quotey-agent = { path = "../agent" }
 quotey-core = { path = "../core" }
 quotey-db = { path = "../db" }
 quotey-slack = { path = "../slack" }
+uuid.workspace = true
 serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
