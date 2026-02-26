@@ -203,6 +203,10 @@ mod tests {
         "idx_suggestion_feedback_request_id",
         "idx_suggestion_feedback_customer_product",
         "idx_suggestion_feedback_product_id",
+        // 0023 — portal link
+        "portal_link",
+        "idx_portal_link_token",
+        "idx_portal_link_quote_id",
     ];
 
     async fn managed_object_count(pool: &sqlx::SqlitePool, object_name: &str) -> TestResult<i64> {

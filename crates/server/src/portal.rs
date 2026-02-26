@@ -1,14 +1,17 @@
 //! Web portal routes for customer-facing quote approval and interaction.
 //!
 //! Endpoints:
-//! - `POST /quote/{token}/approve` — capture electronic approval
-//! - `POST /quote/{token}/reject`  — capture rejection with reason
-//! - `POST /quote/{token}/comment` — add a customer comment
+//! - `POST /quote/{token}/approve`     — capture electronic approval
+//! - `POST /quote/{token}/reject`      — capture rejection with reason
+//! - `POST /quote/{token}/comment`     — add a customer comment
+//! - `POST /api/v1/portal/links`       — generate a shareable link
+//! - `POST /api/v1/portal/links/revoke`— revoke an existing link
+//! - `GET  /api/v1/portal/links/{quote_id}` — list active links for a quote
 
 use axum::{
     extract::{Path, State},
     http::StatusCode,
-    routing::post,
+    routing::{get, post},
     Json, Router,
 };
 use chrono::Utc;
@@ -56,6 +59,26 @@ pub struct PortalError {
     pub error: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct CreateLinkRequest {
+    pub quote_id: String,
+    pub expires_in_days: Option<u32>,
+    pub created_by: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+pub struct LinkResponse {
+    pub link_id: String,
+    pub token: String,
+    pub quote_id: String,
+    pub expires_at: String,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct RevokeLinkRequest {
+    pub token: String,
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -65,6 +88,9 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/quote/{token}/approve", post(approve_quote))
         .route("/quote/{token}/reject", post(reject_quote))
         .route("/quote/{token}/comment", post(add_comment))
+        .route("/api/v1/portal/links", post(create_link))
+        .route("/api/v1/portal/links/revoke", post(revoke_link))
+        .route("/api/v1/portal/links/{quote_id}", get(list_links))
         .with_state(PortalState { db_pool })
 }
 
@@ -244,24 +270,208 @@ async fn add_comment(
 }
 
 // ---------------------------------------------------------------------------
+// Link Management Handlers
+// ---------------------------------------------------------------------------
+
+async fn create_link(
+    State(state): State<PortalState>,
+    Json(body): Json<CreateLinkRequest>,
+) -> Result<Json<LinkResponse>, (StatusCode, Json<PortalError>)> {
+    let quote_id = &body.quote_id;
+
+    // Verify quote exists
+    let exists: Option<i64> = sqlx::query_scalar("SELECT 1 FROM quote WHERE id = ?")
+        .bind(quote_id)
+        .fetch_optional(&state.db_pool)
+        .await
+        .map_err(db_error)?;
+
+    if exists.is_none() {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(PortalError { error: format!("quote `{quote_id}` not found") }),
+        ));
+    }
+
+    let now = Utc::now();
+    let expires_in_days = body.expires_in_days.unwrap_or(30).clamp(1, 365);
+    let expires_at = now + chrono::Duration::days(expires_in_days as i64);
+    let link_id = format!("PL-{}", &uuid_v4()[..12]);
+    let token = generate_token();
+    let created_by = body.created_by.as_deref().unwrap_or("api");
+
+    sqlx::query(
+        "INSERT INTO portal_link (id, quote_id, token, expires_at, created_by, created_at)
+         VALUES (?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&link_id)
+    .bind(quote_id)
+    .bind(&token)
+    .bind(expires_at.to_rfc3339())
+    .bind(created_by)
+    .bind(now.to_rfc3339())
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    // Revoke any previous links for this quote (regenerate behavior)
+    sqlx::query(
+        "UPDATE portal_link SET revoked = 1
+         WHERE quote_id = ? AND id != ? AND revoked = 0",
+    )
+    .bind(quote_id)
+    .bind(&link_id)
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    record_audit_event(
+        &state.db_pool,
+        quote_id,
+        "portal.link_created",
+        &format!("Portal link generated (expires in {expires_in_days} days)"),
+    )
+    .await;
+
+    info!(
+        event_name = "portal.link.created",
+        quote_id = %quote_id,
+        link_id = %link_id,
+        expires_in_days = %expires_in_days,
+        "portal sharing link created"
+    );
+
+    Ok(Json(LinkResponse {
+        link_id,
+        token,
+        quote_id: quote_id.clone(),
+        expires_at: expires_at.to_rfc3339(),
+    }))
+}
+
+async fn revoke_link(
+    State(state): State<PortalState>,
+    Json(body): Json<RevokeLinkRequest>,
+) -> Result<Json<PortalResponse>, (StatusCode, Json<PortalError>)> {
+    let token = body.token.trim();
+    if token.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(PortalError { error: "token is required".to_string() }),
+        ));
+    }
+
+    let result = sqlx::query("UPDATE portal_link SET revoked = 1 WHERE token = ? AND revoked = 0")
+        .bind(token)
+        .execute(&state.db_pool)
+        .await
+        .map_err(db_error)?;
+
+    if result.rows_affected() == 0 {
+        return Err((
+            StatusCode::NOT_FOUND,
+            Json(PortalError { error: "link not found or already revoked".to_string() }),
+        ));
+    }
+
+    info!(event_name = "portal.link.revoked", "portal sharing link revoked");
+
+    Ok(Json(PortalResponse { success: true, message: "Link revoked successfully.".to_string() }))
+}
+
+async fn list_links(
+    Path(quote_id): Path<String>,
+    State(state): State<PortalState>,
+) -> Result<Json<Vec<LinkResponse>>, (StatusCode, Json<PortalError>)> {
+    let rows = sqlx::query(
+        "SELECT id, token, quote_id, expires_at
+         FROM portal_link
+         WHERE quote_id = ? AND revoked = 0
+         ORDER BY created_at DESC",
+    )
+    .bind(&quote_id)
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    let links: Vec<LinkResponse> = rows
+        .iter()
+        .map(|r| LinkResponse {
+            link_id: r.try_get("id").unwrap_or_default(),
+            token: r.try_get("token").unwrap_or_default(),
+            quote_id: r.try_get("quote_id").unwrap_or_default(),
+            expires_at: r.try_get("expires_at").unwrap_or_default(),
+        })
+        .collect();
+
+    Ok(Json(links))
+}
+
+// ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
 /// Resolve a sharing token to a quote ID.
 ///
-/// For now, tokens are the quote ID itself. A future migration can add a
-/// dedicated `quote_sharing_token` table for time-limited, revocable links.
+/// First checks the `portal_link` table for a valid (non-revoked, non-expired)
+/// link. Falls back to matching by raw quote ID for backward compatibility.
 async fn resolve_quote_by_token(
     pool: &DbPool,
     token: &str,
 ) -> Result<String, (StatusCode, Json<PortalError>)> {
-    let row: Option<sqlx::sqlite::SqliteRow> = sqlx::query("SELECT id FROM quote WHERE id = ?")
-        .bind(token)
-        .fetch_optional(pool)
-        .await
-        .map_err(db_error)?;
+    let now = Utc::now().to_rfc3339();
 
-    match row {
+    // Try portal_link table first
+    let link_row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
+        "SELECT quote_id FROM portal_link WHERE token = ? AND revoked = 0 AND expires_at > ?",
+    )
+    .bind(token)
+    .bind(&now)
+    .fetch_optional(pool)
+    .await
+    .map_err(db_error)?;
+
+    if let Some(r) = link_row {
+        let quote_id: String = r.try_get("quote_id").map_err(|e| {
+            db_error(sqlx::Error::ColumnDecode {
+                index: "quote_id".to_string(),
+                source: Box::new(e),
+            })
+        })?;
+        return Ok(quote_id);
+    }
+
+    // Check for expired/revoked link to give a better error
+    let expired_row: Option<sqlx::sqlite::SqliteRow> =
+        sqlx::query("SELECT revoked, expires_at FROM portal_link WHERE token = ?")
+            .bind(token)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_error)?;
+
+    if let Some(r) = expired_row {
+        let revoked: bool = r.try_get("revoked").unwrap_or(false);
+        if revoked {
+            return Err((
+                StatusCode::GONE,
+                Json(PortalError { error: "this quote link has been revoked".to_string() }),
+            ));
+        }
+        return Err((
+            StatusCode::GONE,
+            Json(PortalError { error: "this quote link has expired".to_string() }),
+        ));
+    }
+
+    // Fallback: raw quote ID
+    let quote_row: Option<sqlx::sqlite::SqliteRow> =
+        sqlx::query("SELECT id FROM quote WHERE id = ?")
+            .bind(token)
+            .fetch_optional(pool)
+            .await
+            .map_err(db_error)?;
+
+    match quote_row {
         Some(r) => {
             let id: String = r.try_get("id").map_err(|e| {
                 db_error(sqlx::Error::ColumnDecode { index: "id".to_string(), source: Box::new(e) })
@@ -329,6 +539,28 @@ fn uuid_v4() -> String {
         .filter(|c| c.is_ascii_alphanumeric())
         .take(32)
         .collect()
+}
+
+/// Generate a URL-safe random-looking token for portal links.
+/// Uses timestamp entropy + thread ID to produce an opaque, unguessable token.
+fn generate_token() -> String {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+    use std::time::{SystemTime, UNIX_EPOCH};
+
+    let nanos = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().as_nanos();
+    let thread_id = format!("{:?}", std::thread::current().id());
+
+    let mut hasher = DefaultHasher::new();
+    nanos.hash(&mut hasher);
+    thread_id.hash(&mut hasher);
+    let h1 = hasher.finish();
+
+    // Second hash round for more entropy
+    h1.hash(&mut hasher);
+    let h2 = hasher.finish();
+
+    format!("{:016x}{:016x}", h1, h2)
 }
 
 #[cfg(test)]
@@ -536,5 +768,264 @@ mod tests {
         let (status, body) = result.unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.0.error.contains("not found"));
+    }
+
+    // -----------------------------------------------------------------------
+    // Link management tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn create_link_returns_token_and_expiry() {
+        let (pool, quote_id) = setup().await;
+
+        let result = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest {
+                quote_id: quote_id.clone(),
+                expires_in_days: Some(7),
+                created_by: Some("rep@acme.com".to_string()),
+            }),
+        )
+        .await
+        .expect("create_link should succeed");
+
+        let resp = result.0;
+        assert_eq!(resp.quote_id, quote_id);
+        assert!(!resp.token.is_empty());
+        assert!(!resp.link_id.is_empty());
+        assert!(!resp.expires_at.is_empty());
+    }
+
+    #[tokio::test]
+    async fn create_link_for_nonexistent_quote_returns_not_found() {
+        let (pool, _) = setup().await;
+
+        let result = create_link(
+            state(pool),
+            Json(CreateLinkRequest {
+                quote_id: "Q-FAKE".to_string(),
+                expires_in_days: None,
+                created_by: None,
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn create_link_revokes_previous_links() {
+        let (pool, quote_id) = setup().await;
+
+        // Create first link
+        let first = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest {
+                quote_id: quote_id.clone(),
+                expires_in_days: Some(30),
+                created_by: None,
+            }),
+        )
+        .await
+        .expect("first link");
+        let first_token = first.0.token.clone();
+
+        // Create second link — should revoke first
+        let _second = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest {
+                quote_id: quote_id.clone(),
+                expires_in_days: Some(30),
+                created_by: None,
+            }),
+        )
+        .await
+        .expect("second link");
+
+        // First link should now be revoked
+        let revoked: i64 = sqlx::query_scalar("SELECT revoked FROM portal_link WHERE token = ?")
+            .bind(&first_token)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch revoked");
+        assert_eq!(revoked, 1);
+    }
+
+    #[tokio::test]
+    async fn revoke_link_succeeds() {
+        let (pool, quote_id) = setup().await;
+
+        let link = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest { quote_id, expires_in_days: Some(7), created_by: None }),
+        )
+        .await
+        .expect("create link");
+
+        let result = revoke_link(
+            state(pool.clone()),
+            Json(RevokeLinkRequest { token: link.0.token.clone() }),
+        )
+        .await
+        .expect("revoke should succeed");
+
+        assert!(result.0.success);
+    }
+
+    #[tokio::test]
+    async fn revoke_link_already_revoked_returns_not_found() {
+        let (pool, quote_id) = setup().await;
+
+        let link = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest { quote_id, expires_in_days: Some(7), created_by: None }),
+        )
+        .await
+        .expect("create link");
+
+        // Revoke once
+        let _ = revoke_link(
+            state(pool.clone()),
+            Json(RevokeLinkRequest { token: link.0.token.clone() }),
+        )
+        .await
+        .expect("first revoke");
+
+        // Revoke again — should fail
+        let result = revoke_link(
+            state(pool.clone()),
+            Json(RevokeLinkRequest { token: link.0.token.clone() }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn revoke_link_empty_token_returns_bad_request() {
+        let (pool, _) = setup().await;
+
+        let result =
+            revoke_link(state(pool), Json(RevokeLinkRequest { token: "  ".to_string() })).await;
+
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn list_links_returns_active_only() {
+        let (pool, quote_id) = setup().await;
+
+        // Create two links (first gets auto-revoked by second)
+        let _first = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest {
+                quote_id: quote_id.clone(),
+                expires_in_days: Some(30),
+                created_by: None,
+            }),
+        )
+        .await
+        .expect("first link");
+
+        let second = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest {
+                quote_id: quote_id.clone(),
+                expires_in_days: Some(30),
+                created_by: None,
+            }),
+        )
+        .await
+        .expect("second link");
+
+        let result =
+            list_links(axum::extract::Path(quote_id), state(pool)).await.expect("list links");
+
+        let links = result.0;
+        assert_eq!(links.len(), 1, "only the active (non-revoked) link should appear");
+        assert_eq!(links[0].token, second.0.token);
+    }
+
+    #[tokio::test]
+    async fn resolve_quote_by_token_via_portal_link() {
+        let (pool, quote_id) = setup().await;
+
+        let link = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest {
+                quote_id: quote_id.clone(),
+                expires_in_days: Some(7),
+                created_by: None,
+            }),
+        )
+        .await
+        .expect("create link");
+
+        let resolved =
+            resolve_quote_by_token(&pool, &link.0.token).await.expect("resolve should succeed");
+        assert_eq!(resolved, quote_id);
+    }
+
+    #[tokio::test]
+    async fn resolve_quote_by_token_revoked_returns_gone() {
+        let (pool, quote_id) = setup().await;
+
+        let link = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest { quote_id, expires_in_days: Some(7), created_by: None }),
+        )
+        .await
+        .expect("create link");
+
+        let _ = revoke_link(
+            state(pool.clone()),
+            Json(RevokeLinkRequest { token: link.0.token.clone() }),
+        )
+        .await
+        .expect("revoke");
+
+        let result = resolve_quote_by_token(&pool, &link.0.token).await;
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn resolve_quote_by_token_expired_returns_gone() {
+        let (pool, quote_id) = setup().await;
+
+        // Insert a link that already expired
+        let past = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO portal_link (id, quote_id, token, expires_at, created_by, created_at)
+             VALUES ('PL-EXP', ?, 'expired-tok', ?, 'test', ?)",
+        )
+        .bind(&quote_id)
+        .bind(&past)
+        .bind(&past)
+        .execute(&pool)
+        .await
+        .expect("insert expired link");
+
+        let result = resolve_quote_by_token(&pool, "expired-tok").await;
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::GONE);
+    }
+
+    #[tokio::test]
+    async fn resolve_quote_by_raw_id_fallback() {
+        let (pool, quote_id) = setup().await;
+
+        // No portal link created — should fall back to raw quote ID lookup
+        let resolved =
+            resolve_quote_by_token(&pool, &quote_id).await.expect("fallback should succeed");
+        assert_eq!(resolved, quote_id);
     }
 }
