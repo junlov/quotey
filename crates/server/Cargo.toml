@@ -19,7 +19,10 @@ serde.workspace = true
 serde_json.workspace = true
 sqlx.workspace = true
 tera.workspace = true
+reqwest.workspace = true
 thiserror.workspace = true
+tower-http = { version = "0.6", default-features = false, features = ["fs"] }
+which = "6.0"
 tokio.workspace = true
 tracing.workspace = true
 tracing-subscriber.workspace = true

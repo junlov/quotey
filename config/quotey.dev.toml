@@ -28,3 +28,12 @@ graceful_shutdown_secs = 5
 [logging]
 level = "debug"
 format = "pretty"
+
+[crm]
+enabled = false
+callback_base_url = "http://localhost:8080"
+# salesforce_client_id = "..."
+# salesforce_client_secret = "..."
+# hubspot_client_id = "..."
+# hubspot_client_secret = "..."
+# webhook_secret = "..."

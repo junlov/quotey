@@ -22,3 +22,12 @@ graceful_shutdown_secs = 15
 [logging]
 level = "info"
 format = "compact"
+
+[crm]
+enabled = false
+callback_base_url = "https://crm.example.internal"
+# salesforce_client_id = "..."
+# salesforce_client_secret = "..."
+# hubspot_client_id = "..."
+# hubspot_client_secret = "..."
+# webhook_secret = "..."

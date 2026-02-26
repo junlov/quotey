@@ -27,3 +27,12 @@ graceful_shutdown_secs = 30
 [logging]
 level = "info"
 format = "json"
+
+[crm]
+enabled = false
+callback_base_url = "https://staging.example.com"
+# salesforce_client_id = "${SALESFORCE_CLIENT_ID}"
+# salesforce_client_secret = "${SALESFORCE_CLIENT_SECRET}"
+# hubspot_client_id = "${HUBSPOT_CLIENT_ID}"
+# hubspot_client_secret = "${HUBSPOT_CLIENT_SECRET}"
+# webhook_secret = "${CRM_WEBHOOK_SECRET}"
