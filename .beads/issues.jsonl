@@ -246,12 +246,12 @@
 {
   "id": "quotey-001-4",
   "title": "TASK: Add MCP authentication and rate limiting",
-  "status": "open",
+  "status": "closed",
   "priority": 2,
   "issue_type": "task",
   "created_at": "2026-02-26T11:13:00Z",
   "created_by": "ubuntuman",
-  "updated_at": "2026-02-26T11:13:00Z",
+  "updated_at": "2026-02-26T12:10:00Z",
   "parent": "quotey-001",
   "description": "## Overview\nAdd authentication (API key) and rate limiting to MCP server.\n\n## Why This Matters\nEnterprise requirements. Prevent abuse. Ensure fair usage.\n\n## Authentication\n- API key header validation\n- Configurable in quotey.toml\n- Key rotation support\n\n## Rate Limiting\n- Per-key rate limits\n- Configurable limits (requests/minute)\n- 429 response with retry-after\n\n[Created from: ultrathink - EPIC-V2-MCP subtask]",
   "labels": [
@@ -259,17 +259,20 @@
     "mcp",
     "security",
     "auth"
-  ]
+  ],
+  "assigned_to": "Kimi",
+  "resolution": "completed",
+  "completed_at": "2026-02-26T12:10:00Z"
 }
 {
   "id": "quotey-001-5",
   "title": "TASK: Test MCP server with AI agents",
-  "status": "open",
+  "status": "in_progress",
   "priority": 2,
   "issue_type": "task",
   "created_at": "2026-02-26T11:14:00Z",
   "created_by": "ubuntuman",
-  "updated_at": "2026-02-26T11:14:00Z",
+  "updated_at": "2026-02-26T12:24:41.694Z",
   "parent": "quotey-001",
   "description": "## Overview\nTest MCP server integration with Claude Code and other AI agents.\n\n## Why This Matters\nVerify it works with real agents. Document usage. Fix issues found.\n\n## Test Cases\n1. Claude Code queries product catalog\n2. Claude Code creates and prices a quote\n3. Claude Code checks approval status\n4. Claude Code triggers PDF generation\n5. Verify audit trail completeness\n\n[Created from: ultrathink - EPIC-V2-MCP subtask]",
   "labels": [
