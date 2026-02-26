@@ -1,5 +1,7 @@
 mod bootstrap;
 mod health;
+mod pdf;
+mod crm;
 pub mod portal;
 
 use anyhow::Result;
@@ -41,6 +43,7 @@ pub async fn run() -> Result<()> {
         &app.config.server.bind_address,
         app.config.server.health_check_port,
         app.db_pool.clone(),
+        app.config.crm.clone(),
     )
     .await?;
 

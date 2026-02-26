@@ -15,10 +15,11 @@
 //! - `POST /api/v1/portal/links/revoke`         — revoke an existing link
 //! - `GET  /api/v1/portal/links/{quote_id}`     — list active links for a quote
 
+use crate::pdf::PdfGenerator;
 use axum::{
     extract::{Path, Query, State},
     http::StatusCode,
-    response::Html,
+    response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
@@ -35,6 +36,7 @@ use uuid::Uuid;
 pub struct PortalState {
     db_pool: DbPool,
     templates: Arc<Tera>,
+    pdf_generator: Option<Arc<PdfGenerator>>,
 }
 
 // ---------------------------------------------------------------------------
@@ -120,6 +122,8 @@ fn init_templates() -> Arc<Tera> {
         }
     };
 
+    crate::pdf::register_template_filters(&mut tera);
+
     // Add built-in fallback templates in case filesystem templates are not available
     tera.add_raw_template(
         "quote_viewer.html",
@@ -133,6 +137,18 @@ fn init_templates() -> Arc<Tera> {
 
 pub fn router(db_pool: DbPool) -> Router {
     let templates = init_templates();
+    
+    // Initialize PDF generator with templates
+    let pdf_generator = match PdfGenerator::new("templates/quotes") {
+        Ok(generator) => {
+            info!("PDF generator initialized successfully with filesystem templates");
+            Some(Arc::new(generator))
+        }
+        Err(e) => {
+            warn!(error = %e, "Failed to initialize PDF generator with filesystem templates, using embedded fallback");
+            Some(Arc::new(PdfGenerator::with_embedded_templates()))
+        }
+    };
 
     Router::new()
         // HTML routes
@@ -148,7 +164,7 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/api/v1/portal/links", post(create_link))
         .route("/api/v1/portal/links/revoke", post(revoke_link))
         .route("/api/v1/portal/links/{quote_id}", get(list_links))
-        .with_state(PortalState { db_pool, templates })
+        .with_state(PortalState { db_pool, templates, pdf_generator })
 }
 
 // ---------------------------------------------------------------------------
@@ -173,8 +189,7 @@ async fn view_quote_page(
 
     // Fetch quote details
     let quote_row = sqlx::query(
-        "SELECT id, status, version, currency, term_months, payment_terms, 
-                subtotal, discount_total, tax_total, total, valid_until, 
+        "SELECT id, status, version, currency, term_months, valid_until,
                 created_at, updated_at, created_by
          FROM quote WHERE id = ?",
     )
@@ -193,7 +208,7 @@ async fn view_quote_page(
     // Fetch quote lines
     let line_rows = sqlx::query(
         "SELECT id, product_id, quantity, unit_price, discount_pct, subtotal, notes
-         FROM quote_line WHERE quote_id = ? ORDER BY sort_order",
+         FROM quote_line WHERE quote_id = ? ORDER BY created_at",
     )
     .bind(&quote_id)
     .fetch_all(&state.db_pool)
@@ -201,6 +216,19 @@ async fn view_quote_page(
     .map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
     })?;
+
+    // Compute pricing totals from line items (these columns don't exist on the quote table)
+    let mut computed_subtotal = 0.0_f64;
+    let mut computed_discount = 0.0_f64;
+    for row in &line_rows {
+        let qty: i64 = row.try_get("quantity").unwrap_or(0);
+        let unit_price: f64 = row.try_get("unit_price").unwrap_or(0.0);
+        let discount_pct: f64 = row.try_get("discount_pct").unwrap_or(0.0);
+        let line_total = unit_price * qty as f64;
+        computed_subtotal += line_total;
+        computed_discount += line_total * discount_pct / 100.0;
+    }
+    let computed_total = computed_subtotal - computed_discount;
 
     let lines: Vec<serde_json::Value> = line_rows
         .iter()
@@ -245,11 +273,11 @@ async fn view_quote_page(
         "created_at": quote_row.try_get::<String, _>("created_at").unwrap_or_default(),
         "valid_until": quote_row.try_get::<String, _>("valid_until").unwrap_or_default(),
         "term_months": quote_row.try_get::<i64, _>("term_months").unwrap_or(12),
-        "payment_terms": quote_row.try_get::<String, _>("payment_terms").unwrap_or_else(|_| "Net 30".to_string()),
-        "subtotal": format_price(quote_row.try_get::<f64, _>("subtotal").unwrap_or(0.0)),
-        "discount_total": format_price(quote_row.try_get::<f64, _>("discount_total").unwrap_or(0.0)),
-        "tax_amount": format_price(quote_row.try_get::<f64, _>("tax_total").unwrap_or(0.0)),
-        "total": format_price(quote_row.try_get::<f64, _>("total").unwrap_or(0.0)),
+        "payment_terms": "Net 30",
+        "subtotal": format_price(computed_subtotal),
+        "discount_total": format_price(computed_discount),
+        "tax_amount": format_price(0.0),
+        "total": format_price(computed_total),
         "lines": lines,
         "expires_soon": false, // TODO: calculate from valid_until
     }));
@@ -296,26 +324,144 @@ async fn view_quote_page(
 async fn download_quote_pdf(
     Path(token): Path<String>,
     State(state): State<PortalState>,
-) -> Result<(StatusCode, Json<PortalResponse>), (StatusCode, Json<PortalError>)> {
+) -> Result<impl IntoResponse, (StatusCode, Json<PortalError>)> {
     let quote_id = resolve_quote_by_token(&state.db_pool, &token).await?;
 
-    // TODO: Generate PDF and return as attachment
-    // For now, return a message indicating the feature is coming soon
     info!(
         event_name = "portal.pdf.download_requested",
         quote_id = %quote_id,
+        token = %token,
         "PDF download requested"
     );
 
-    // In the future, this would:
-    // 1. Generate PDF using the templates from templates/quotes/
-    // 2. Store or stream the PDF
-    // 3. Return as application/pdf content type
+    // Check if PDF generator is available
+    let pdf_generator = state.pdf_generator.as_ref().ok_or_else(|| {
+        error!("PDF generator not initialized");
+        (StatusCode::SERVICE_UNAVAILABLE, Json(PortalError { error: "PDF generation not available".to_string() }))
+    })?;
 
-    Err((
-        StatusCode::NOT_IMPLEMENTED,
-        Json(PortalError { error: "PDF generation coming soon".to_string() }),
-    ))
+    // Fetch complete quote data for PDF generation
+    let quote_data = fetch_quote_for_pdf(&state.db_pool, &quote_id).await?;
+
+    // Generate PDF (or HTML if wkhtmltopdf not available)
+    let filename = format!("Quote_{}.pdf", quote_id);
+    match pdf_generator.generate_quote_pdf(&quote_data, "detailed").await {
+        Ok(result) => {
+            info!(
+                event_name = "portal.pdf.generated",
+                quote_id = %quote_id,
+                filename = %filename,
+                "PDF generated successfully"
+            );
+            Ok(result.into_response(&filename))
+        }
+        Err(e) => {
+            error!(error = %e, quote_id = %quote_id, "PDF generation failed");
+            Err((
+                StatusCode::INTERNAL_SERVER_ERROR,
+                Json(PortalError { error: format!("PDF generation failed: {}", e) }),
+            ))
+        }
+    }
+}
+
+/// Fetch complete quote data for PDF generation
+async fn fetch_quote_for_pdf(
+    pool: &DbPool,
+    quote_id: &str,
+) -> Result<serde_json::Value, (StatusCode, Json<PortalError>)> {
+    // Fetch quote basic info with account
+    let quote_row = sqlx::query(
+        r#"SELECT 
+            q.id, q.status, q.created_at, q.valid_until,
+            q.account_id, a.name as account_name, a.industry as account_industry
+         FROM quote q
+         LEFT JOIN account a ON a.id = q.account_id
+         WHERE q.id = ?"#,
+    )
+    .bind(quote_id)
+    .fetch_one(pool)
+    .await
+    .map_err(|e| match e {
+        sqlx::Error::RowNotFound => (
+            StatusCode::NOT_FOUND,
+            Json(PortalError { error: "Quote not found".to_string() }),
+        ),
+        _ => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(PortalError { error: format!("Database error: {}", e) }),
+        ),
+    })?;
+
+    // Fetch quote lines
+    let lines = sqlx::query(
+        r#"SELECT 
+            ql.id, ql.quote_id, ql.product_id, ql.quantity, ql.unit_price,
+            ql.list_price, ql.discount_amount, ql.total_price,
+            p.name as product_name, p.sku as product_sku
+         FROM quote_line ql
+         JOIN product p ON p.id = ql.product_id
+         WHERE ql.quote_id = ?
+         ORDER BY ql.id"#,
+    )
+    .bind(quote_id)
+    .fetch_all(pool)
+    .await
+    .map_err(|e| {
+        error!(error = %e, "Failed to fetch quote lines");
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(PortalError { error: "Failed to fetch quote data".to_string() }),
+        )
+    })?;
+
+    // Calculate pricing summary
+    let subtotal: f64 = lines.iter()
+        .map(|r| r.try_get::<f64, _>("total_price").unwrap_or(0.0))
+        .sum();
+    let total_discount: f64 = lines.iter()
+        .map(|r| r.try_get::<f64, _>("discount_amount").unwrap_or(0.0))
+        .sum();
+    let tax_rate = 0.08; // 8% tax - in real app this would be configurable
+    let tax = subtotal * tax_rate;
+    let total = subtotal + tax;
+
+    // Build the JSON structure expected by the PDF templates
+    let quote_data = serde_json::json!({
+        "id": quote_id,
+        "status": quote_row.try_get::<String, _>("status").unwrap_or_default(),
+        "created_at": quote_row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default(),
+        "valid_until": quote_row.try_get::<chrono::DateTime<chrono::Utc>, _>("valid_until")
+            .map(|d| d.to_rfc3339())
+            .unwrap_or_default(),
+        "account": {
+            "id": quote_row.try_get::<String, _>("account_id").unwrap_or_default(),
+            "name": quote_row.try_get::<String, _>("account_name").unwrap_or_else(|_| "Unknown Account".to_string()),
+            "industry": quote_row.try_get::<String, _>("account_industry").unwrap_or_default(),
+        },
+        "lines": lines.iter().map(|r| serde_json::json!({
+            "id": r.try_get::<String, _>("id").unwrap_or_default(),
+            "product_name": r.try_get::<String, _>("product_name").unwrap_or_default(),
+            "product_sku": r.try_get::<String, _>("product_sku").unwrap_or_default(),
+            "quantity": r.try_get::<i64, _>("quantity").unwrap_or(1),
+            "unit_price": r.try_get::<f64, _>("unit_price").unwrap_or(0.0),
+            "list_price": r.try_get::<f64, _>("list_price").unwrap_or(0.0),
+            "discount_amount": r.try_get::<f64, _>("discount_amount").unwrap_or(0.0),
+            "total_price": r.try_get::<f64, _>("total_price").unwrap_or(0.0),
+        })).collect::<Vec<_>>(),
+        "pricing": {
+            "subtotal": subtotal,
+            "total_discount": total_discount,
+            "tax_rate": tax_rate,
+            "tax": tax,
+            "total": total,
+        },
+        "company_name": "Quotey",
+    });
+
+    Ok(quote_data)
 }
 
 /// Render the portal index page (list of quotes).
@@ -328,15 +474,24 @@ async fn portal_index_page(
 
     let quote_rows = if status_filter == "all" {
         sqlx::query(
-            "SELECT id, status, created_at, valid_until, total
-             FROM quote ORDER BY created_at DESC LIMIT 100",
+            "SELECT q.id, q.status, q.created_at, q.valid_until,
+                    COALESCE(SUM(ql.unit_price * ql.quantity), 0.0) AS computed_total
+             FROM quote q
+             LEFT JOIN quote_line ql ON ql.quote_id = q.id
+             GROUP BY q.id
+             ORDER BY q.created_at DESC LIMIT 100",
         )
         .fetch_all(&state.db_pool)
         .await
     } else {
         sqlx::query(
-            "SELECT id, status, created_at, valid_until, total
-             FROM quote WHERE status = ? ORDER BY created_at DESC LIMIT 100",
+            "SELECT q.id, q.status, q.created_at, q.valid_until,
+                    COALESCE(SUM(ql.unit_price * ql.quantity), 0.0) AS computed_total
+             FROM quote q
+             LEFT JOIN quote_line ql ON ql.quote_id = q.id
+             WHERE q.status = ?
+             GROUP BY q.id
+             ORDER BY q.created_at DESC LIMIT 100",
         )
         .bind(status_filter)
         .fetch_all(&state.db_pool)
@@ -379,7 +534,7 @@ async fn portal_index_page(
                 "created_at": row.try_get::<String, _>("created_at").unwrap_or_default(),
                 "valid_until": row.try_get::<String, _>("valid_until").unwrap_or_default(),
                 "status": status,
-                "total_amount": format_price(row.try_get::<f64, _>("total").unwrap_or(0.0)),
+                "total_amount": format_price(row.try_get::<f64, _>("computed_total").unwrap_or(0.0)),
             })
         })
         .collect();
@@ -1079,7 +1234,7 @@ mod tests {
         .ok();
         tera.add_raw_template("index.html", "<html><body>Portal</body></html>").ok();
 
-        State(PortalState { db_pool: pool, templates: Arc::new(tera) })
+        State(PortalState { db_pool: pool, templates: Arc::new(tera), pdf_generator: None })
     }
 
     #[tokio::test]

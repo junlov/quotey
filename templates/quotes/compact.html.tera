@@ -222,8 +222,8 @@
           <div class="compact-product">{{ line.product_name }}</div>
         </td>
         <td class="numeric compact-qty">{{ line.quantity }}</td>
-        <td class="numeric">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.unit_price | default(value=0)) }}</td>
-        <td class="numeric">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.subtotal | default(value=0)) }}</td>
+        <td class="numeric">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=line.unit_price) }}</td>
+        <td class="numeric">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=line.subtotal) }}</td>
       </tr>
       {% endfor %}
     </tbody>
@@ -234,23 +234,23 @@
     <table>
       <tr>
         <td>Subtotal</td>
-        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.subtotal) }}</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.subtotal) }}</td>
       </tr>
       {% if pricing.discount_total and pricing.discount_total > 0 %}
       <tr>
         <td>Discount</td>
-        <td>-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.discount_total) }}</td>
+        <td>-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.discount_total) }}</td>
       </tr>
       {% endif %}
       {% if pricing.tax_total and pricing.tax_total > 0 %}
       <tr>
         <td>Tax</td>
-        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.tax_total) }}</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.tax_total) }}</td>
       </tr>
       {% endif %}
       <tr class="total-row">
         <td>Total</td>
-        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total) }}</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(value=pricing.total) }}</td>
       </tr>
     </table>
   </section>
