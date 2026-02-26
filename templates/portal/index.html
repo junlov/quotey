@@ -1,0 +1,624 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="description" content="Quotey Customer Portal - View and manage your quotes">
+    <title>Quotey Portal - Your Quotes</title>
+    <style>
+        :root {
+            --primary-color: {{ branding.primary_color | default(value="#2563eb") }};
+            --primary-hover: {{ branding.primary_hover | default(value="#1d4ed8") }};
+            --secondary-color: #64748b;
+            --success-color: #10b981;
+            --danger-color: #ef4444;
+            --warning-color: #f59e0b;
+            --bg-light: #f8fafc;
+            --bg-white: #ffffff;
+            --text-dark: #1e293b;
+            --text-light: #64748b;
+            --border-color: #e2e8f0;
+            --shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            --radius: 8px;
+            --radius-lg: 12px;
+            --transition: all 0.2s ease;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-dark);
+            background: var(--bg-light);
+            min-height: 100vh;
+        }
+
+        *:focus-visible {
+            outline: 2px solid var(--primary-color);
+            outline-offset: 2px;
+        }
+
+        /* Header */
+        .portal-header {
+            background: var(--bg-white);
+            border-bottom: 1px solid var(--border-color);
+            padding: 16px 24px;
+            box-shadow: var(--shadow);
+        }
+
+        .header-content {
+            max-width: 1200px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .company-branding {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .company-logo {
+            height: 32px;
+            width: auto;
+        }
+
+        .company-name {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--primary-color);
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .customer-info {
+            text-align: right;
+        }
+
+        .customer-name {
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .customer-email {
+            font-size: 12px;
+            color: var(--text-light);
+        }
+
+        /* Main Content */
+        .portal-main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 32px 24px;
+        }
+
+        .page-header {
+            margin-bottom: 32px;
+        }
+
+        .page-header h1 {
+            font-size: 28px;
+            font-weight: 700;
+            margin-bottom: 8px;
+        }
+
+        .page-header p {
+            color: var(--text-light);
+            font-size: 16px;
+        }
+
+        /* Filters */
+        .filters-bar {
+            background: var(--bg-white);
+            border-radius: var(--radius);
+            padding: 16px 20px;
+            margin-bottom: 24px;
+            display: flex;
+            gap: 16px;
+            flex-wrap: wrap;
+            align-items: center;
+            box-shadow: var(--shadow);
+        }
+
+        .filter-group {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .filter-label {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-light);
+        }
+
+        .filter-select {
+            padding: 8px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            font-size: 14px;
+            background: var(--bg-white);
+            cursor: pointer;
+        }
+
+        .filter-select:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+
+        .search-box {
+            flex: 1;
+            min-width: 200px;
+            position: relative;
+        }
+
+        .search-input {
+            width: 100%;
+            padding: 8px 12px 8px 36px;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            font-size: 14px;
+        }
+
+        .search-input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+
+        .search-icon {
+            position: absolute;
+            left: 12px;
+            top: 50%;
+            transform: translateY(-50%);
+            color: var(--text-light);
+        }
+
+        /* Stats Cards */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));
+            gap: 16px;
+            margin-bottom: 32px;
+        }
+
+        .stat-card {
+            background: var(--bg-white);
+            border-radius: var(--radius);
+            padding: 20px;
+            box-shadow: var(--shadow);
+            display: flex;
+            align-items: center;
+            gap: 16px;
+        }
+
+        .stat-icon {
+            width: 48px;
+            height: 48px;
+            border-radius: var(--radius);
+            display: flex;
+            align-items: center;
+            justify-content: center;
+        }
+
+        .stat-icon.pending {
+            background: var(--warning-color);
+            color: white;
+        }
+
+        .stat-icon.approved {
+            background: var(--success-color);
+            color: white;
+        }
+
+        .stat-icon.total {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .stat-content h3 {
+            font-size: 24px;
+            font-weight: 700;
+        }
+
+        .stat-content p {
+            font-size: 13px;
+            color: var(--text-light);
+        }
+
+        /* Quotes List */
+        .quotes-section {
+            background: var(--bg-white);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        .section-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .section-header h2 {
+            font-size: 18px;
+            font-weight: 600;
+        }
+
+        .quotes-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        .quotes-table th {
+            text-align: left;
+            padding: 14px 24px;
+            font-weight: 600;
+            color: var(--text-light);
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            border-bottom: 1px solid var(--border-color);
+            background: var(--bg-light);
+        }
+
+        .quotes-table td {
+            padding: 16px 24px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .quotes-table tr:hover {
+            background: var(--bg-light);
+        }
+
+        .quotes-table tr:last-child td {
+            border-bottom: none;
+        }
+
+        .quote-link {
+            color: var(--primary-color);
+            text-decoration: none;
+            font-weight: 600;
+        }
+
+        .quote-link:hover {
+            text-decoration: underline;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-pending {
+            background: #fef3c7;
+            color: #d97706;
+        }
+
+        .status-approved {
+            background: #d1fae5;
+            color: #059669;
+        }
+
+        .status-expired {
+            background: #fee2e2;
+            color: #dc2626;
+        }
+
+        .amount {
+            font-family: 'SF Mono', Monaco, monospace;
+            font-weight: 600;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            padding: 8px 16px;
+            border-radius: var(--radius);
+            font-size: 13px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: var(--transition);
+            text-decoration: none;
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-hover);
+        }
+
+        .btn-secondary {
+            background: var(--bg-light);
+            color: var(--text-dark);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background: var(--border-color);
+        }
+
+        /* Empty State */
+        .empty-state {
+            text-align: center;
+            padding: 64px 24px;
+        }
+
+        .empty-state svg {
+            width: 64px;
+            height: 64px;
+            margin-bottom: 16px;
+            color: var(--text-light);
+        }
+
+        .empty-state h3 {
+            font-size: 18px;
+            font-weight: 600;
+            margin-bottom: 8px;
+        }
+
+        .empty-state p {
+            color: var(--text-light);
+            font-size: 14px;
+        }
+
+        /* Mobile Responsive */
+        @media (max-width: 768px) {
+            .header-content {
+                flex-direction: column;
+                gap: 16px;
+            }
+
+            .customer-info {
+                text-align: center;
+            }
+
+            .portal-main {
+                padding: 20px 16px;
+            }
+
+            .page-header h1 {
+                font-size: 24px;
+            }
+
+            .filters-bar {
+                flex-direction: column;
+                align-items: stretch;
+            }
+
+            .search-box {
+                width: 100%;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .quotes-table {
+                display: block;
+                overflow-x: auto;
+            }
+
+            .quotes-table th,
+            .quotes-table td {
+                padding: 12px 16px;
+                white-space: nowrap;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header class="portal-header">
+        <div class="header-content">
+            <div class="company-branding">
+                {% if branding.logo_url %}
+                <img src="{{ branding.logo_url }}" alt="{{ branding.company_name }}" class="company-logo">
+                {% endif %}
+                <span class="company-name">{{ branding.company_name | default(value="Your Company") }}</span>
+            </div>
+            <div class="header-actions">
+                <div class="customer-info">
+                    <div class="customer-name">{{ customer.name }}</div>
+                    <div class="customer-email">{{ customer.email }}</div>
+                </div>
+            </div>
+        </div>
+    </header>
+
+    <main class="portal-main">
+        <div class="page-header">
+            <h1>Your Quotes</h1>
+            <p>View and manage all your quotes in one place</p>
+        </div>
+
+        <!-- Stats -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-icon pending">
+                    <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                </div>
+                <div class="stat-content">
+                    <h3>{{ stats.pending | default(value=0) }}</h3>
+                    <p>Pending Quotes</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon approved">
+                    <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                </div>
+                <div class="stat-content">
+                    <h3>{{ stats.approved | default(value=0) }}</h3>
+                    <p>Approved</p>
+                </div>
+            </div>
+            <div class="stat-card">
+                <div class="stat-icon total">
+                    <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m0 3.666V14m-3 4h.01M4 16.999V19a2 2 0 002 2h12a2 2 0 002-2v-2.001M4 7v9.001A2 2 0 006 18h12a2 2 0 002-1.999V7M4 7V5a2 2 0 012-2h12a2 2 0 012 2v2"/>
+                    </svg>
+                </div>
+                <div class="stat-content">
+                    <h3>{{ stats.total | default(value=0) }}</h3>
+                    <p>Total Quotes</p>
+                </div>
+            </div>
+        </div>
+
+        <!-- Filters -->
+        <div class="filters-bar">
+            <div class="filter-group">
+                <label class="filter-label">Status:</label>
+                <select class="filter-select" onchange="filterQuotes(this.value)">
+                    <option value="all">All Quotes</option>
+                    <option value="pending">Pending</option>
+                    <option value="approved">Approved</option>
+                    <option value="expired">Expired</option>
+                </select>
+            </div>
+            <div class="filter-group">
+                <label class="filter-label">Sort by:</label>
+                <select class="filter-select" onchange="sortQuotes(this.value)">
+                    <option value="date-desc">Newest First</option>
+                    <option value="date-asc">Oldest First</option>
+                    <option value="amount-desc">Highest Amount</option>
+                    <option value="amount-asc">Lowest Amount</option>
+                </select>
+            </div>
+            <div class="search-box">
+                <svg class="search-icon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                </svg>
+                <input type="text" class="search-input" placeholder="Search quotes..." oninput="searchQuotes(this.value)">
+            </div>
+        </div>
+
+        <!-- Quotes List -->
+        <section class="quotes-section">
+            <div class="section-header">
+                <h2>All Quotes</h2>
+            </div>
+            
+            {% if quotes and quotes | length > 0 %}
+            <table class="quotes-table">
+                <thead>
+                    <tr>
+                        <th>Quote ID</th>
+                        <th>Date</th>
+                        <th>Valid Until</th>
+                        <th>Status</th>
+                        <th class="text-right">Amount</th>
+                        <th>Actions</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for quote in quotes %}
+                    <tr data-status="{{ quote.status }}" data-amount="{{ quote.total_amount }}">
+                        <td>
+                            <a href="/quote/{{ quote.token }}" class="quote-link">{{ quote.quote_id }}</a>
+                        </td>
+                        <td>{{ quote.created_at }}</td>
+                        <td>{{ quote.valid_until }}</td>
+                        <td>
+                            <span class="status-badge status-{{ quote.status }}">{{ quote.status }}</span>
+                        </td>
+                        <td class="amount text-right">{{ quote.total_amount }}</td>
+                        <td>
+                            <a href="/quote/{{ quote.token }}" class="btn btn-secondary">
+                                View
+                            </a>
+                        </td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% else %}
+            <div class="empty-state">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/>
+                </svg>
+                <h3>No quotes found</h3>
+                <p>You don't have any quotes yet. Check back later!</p>
+            </div>
+            {% endif %}
+        </section>
+    </main>
+
+    <script>
+        function filterQuotes(status) {
+            const rows = document.querySelectorAll('.quotes-table tbody tr');
+            rows.forEach(row => {
+                if (status === 'all' || row.dataset.status === status) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+
+        function sortQuotes(sortBy) {
+            const tbody = document.querySelector('.quotes-table tbody');
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            
+            rows.sort((a, b) => {
+                switch(sortBy) {
+                    case 'date-desc':
+                        return new Date(b.cells[1].textContent) - new Date(a.cells[1].textContent);
+                    case 'date-asc':
+                        return new Date(a.cells[1].textContent) - new Date(b.cells[1].textContent);
+                    case 'amount-desc':
+                        return parseFloat(b.dataset.amount) - parseFloat(a.dataset.amount);
+                    case 'amount-asc':
+                        return parseFloat(a.dataset.amount) - parseFloat(b.dataset.amount);
+                    default:
+                        return 0;
+                }
+            });
+            
+            rows.forEach(row => tbody.appendChild(row));
+        }
+
+        function searchQuotes(query) {
+            const rows = document.querySelectorAll('.quotes-table tbody tr');
+            const lowerQuery = query.toLowerCase();
+            
+            rows.forEach(row => {
+                const text = row.textContent.toLowerCase();
+                if (text.includes(lowerQuery)) {
+                    row.style.display = '';
+                } else {
+                    row.style.display = 'none';
+                }
+            });
+        }
+    </script>
+</body>
+</html>
