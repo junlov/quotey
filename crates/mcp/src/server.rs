@@ -3,16 +3,11 @@
 //! Implements the Model Context Protocol server for Quotey.
 
 use rmcp::{
-    ServerHandler,
-    handler::server::{
-        tool::ToolCallContext,
-        router::tool::ToolRouter,
-        wrapper::Parameters,
-    },
+    handler::server::{router::tool::ToolRouter, tool::ToolCallContext, wrapper::Parameters},
     model::*,
     schemars::{self, JsonSchema},
     serde::{Deserialize, Serialize},
-    tool, tool_router,
+    tool, tool_router, ServerHandler,
 };
 use tracing::{debug, info, warn};
 
@@ -49,14 +44,14 @@ impl QuoteyMcpServer {
     pub async fn run_stdio(self) -> anyhow::Result<()> {
         use rmcp::service::serve_server;
         use tokio::io::{stdin, stdout};
-        
+
         info!("Starting MCP server with stdio transport");
-        
+
         let service = serve_server(self, (stdin(), stdout())).await?;
-        
+
         // Wait for shutdown
         let _quit = service.waiting().await?;
-        
+
         info!("MCP server shutdown complete");
         Ok(())
     }
@@ -71,16 +66,21 @@ impl QuoteyMcpServer {
         &self.auth_manager
     }
 
-    /// Validate API key from request metadata (if present)
-    async fn check_auth(&self, _meta: &Option<serde_json::Value>) -> Result<AuthResult, rmcp::ErrorData> {
-        // Extract API key from request metadata if present
-        // For stdio transport, we can use meta field to pass API key
-        let api_key = _meta.as_ref()
-            .and_then(|m| m.get("api_key"))
-            .and_then(|k| k.as_str());
+    /// Validate the current request against the auth manager.
+    ///
+    /// Clients pass their key via the MCP `_meta` field on tool-call requests:
+    /// ```json
+    /// { "method": "tools/call", "params": {
+    ///     "name": "catalog_search",
+    ///     "arguments": { "query": "pro" },
+    ///     "_meta": { "api_key": "your-secret-key" }
+    /// }}
+    /// ```
+    async fn check_auth(&self, meta: &rmcp::model::Meta) -> Result<AuthResult, rmcp::ErrorData> {
+        let api_key = meta.0.get("api_key").and_then(|v| v.as_str());
 
         let result = self.auth_manager.validate_request(api_key).await;
-        
+
         match &result {
             AuthResult::Allowed { key_name, remaining_requests } => {
                 debug!(
@@ -92,11 +92,10 @@ impl QuoteyMcpServer {
             }
             AuthResult::Denied { reason, retry_after } => {
                 warn!(reason = %reason, "Authentication denied");
-                let mut error = rmcp::ErrorData::invalid_params(
+                let mut error = rmcp::ErrorData::invalid_request(
                     format!("Authentication failed: {}", reason),
                     None,
                 );
-                // Add retry_after to error data if rate limited
                 if let Some(retry) = retry_after {
                     error.data = Some(serde_json::json!({
                         "retry_after": retry
@@ -138,16 +137,11 @@ impl ServerHandler for QuoteyMcpServer {
         request: CallToolRequestParam,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
-        // Check authentication before executing tool
-        // Note: In stdio transport, meta is typically None, so we allow by default
-        // For authenticated usage, the client should pass api_key in meta
-        if self.auth_manager.is_auth_required() {
-            // Extract meta from context or request - for now we skip detailed auth
-            // as stdio transport doesn't easily support per-request metadata
-            // In a real HTTP/SSE transport, we'd extract the Authorization header here
-            debug!("Auth is required - checking...");
-        }
-        
+        // Enforce authentication when configured.
+        // Clients pass their API key via `_meta.api_key` on each tool-call request.
+        // When auth is not required the check is a no-op (returns Allowed).
+        self.check_auth(&context.meta).await?;
+
         // Route to tool handler
         let tool_call_context = ToolCallContext::new(self, request, context);
         self.tool_router.call(tool_call_context).await
@@ -158,23 +152,31 @@ impl ServerHandler for QuoteyMcpServer {
         _request: Option<PaginatedRequestParam>,
         _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<ListToolsResult, rmcp::ErrorData> {
-        Ok(ListToolsResult {
-            tools: self.tool_router.list_all(),
-            next_cursor: None,
-            ..Default::default()
-        })
+        Ok(ListToolsResult { tools: self.tool_router.list_all(), next_cursor: None })
     }
 }
 
 // ============================================================================
 // Input/Output Types
 // ============================================================================
+// These structs are deserialized by serde from MCP tool call arguments.
+// Fields appear "unused" to the compiler until tools are wired to real repos.
 
-fn default_true() -> bool { true }
-fn default_20() -> u32 { 20 }
-fn default_1() -> u32 { 1 }
-fn default_currency() -> String { "USD".to_string() }
-fn default_template() -> String { "standard".to_string() }
+fn default_true() -> bool {
+    true
+}
+fn default_20() -> u32 {
+    20
+}
+fn default_1() -> u32 {
+    1
+}
+fn default_currency() -> String {
+    "USD".to_string()
+}
+fn default_template() -> String {
+    "standard".to_string()
+}
 
 // Catalog Types
 #[derive(Debug, Deserialize, JsonSchema)]
@@ -505,12 +507,9 @@ pub struct QuotePdfResult {
 impl QuoteyMcpServer {
     // Catalog Tools
     #[tool(description = "Search products by name, SKU, or description")]
-    async fn catalog_search(
-        &self,
-        Parameters(input): Parameters<CatalogSearchInput>,
-    ) -> String {
+    async fn catalog_search(&self, Parameters(input): Parameters<CatalogSearchInput>) -> String {
         debug!(query = %input.query, "catalog_search called");
-        
+
         let items = vec![
             ProductSummary {
                 id: "prod_pro_v2".to_string(),
@@ -531,21 +530,20 @@ impl QuoteyMcpServer {
                 active: true,
             },
         ];
-        
+
         let filtered_items: Vec<_> = items
             .into_iter()
             .filter(|p| {
                 let matches_query = p.name.to_lowercase().contains(&input.query.to_lowercase())
                     || p.sku.to_lowercase().contains(&input.query.to_lowercase());
-                let matches_category = input.category.as_ref()
-                    .map(|c| p.category.as_ref() == Some(c))
-                    .unwrap_or(true);
+                let matches_category =
+                    input.category.as_ref().map(|c| p.category.as_ref() == Some(c)).unwrap_or(true);
                 let matches_active = !input.active_only || p.active;
                 matches_query && matches_category && matches_active
             })
             .take(input.limit as usize)
             .collect();
-        
+
         let result = CatalogSearchResult {
             items: filtered_items.clone(),
             pagination: PaginationInfo {
@@ -555,17 +553,14 @@ impl QuoteyMcpServer {
                 has_more: false,
             },
         };
-        
+
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 
     #[tool(description = "Get detailed product information by ID")]
-    async fn catalog_get(
-        &self,
-        Parameters(input): Parameters<CatalogGetInput>,
-    ) -> String {
+    async fn catalog_get(&self, Parameters(input): Parameters<CatalogGetInput>) -> String {
         debug!(product_id = %input.product_id, "catalog_get called");
-        
+
         let result = CatalogGetResult {
             id: input.product_id,
             sku: "PLAN-PRO-001".to_string(),
@@ -581,46 +576,43 @@ impl QuoteyMcpServer {
             created_at: "2025-01-15T10:00:00Z".to_string(),
             updated_at: "2025-06-20T14:30:00Z".to_string(),
         };
-        
+
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 
     // Quote Tools
     #[tool(description = "Create a new quote for a customer")]
-    async fn quote_create(
-        &self,
-        Parameters(input): Parameters<QuoteCreateInput>,
-    ) -> String {
+    async fn quote_create(&self, Parameters(input): Parameters<QuoteCreateInput>) -> String {
         debug!(account_id = %input.account_id, "quote_create called");
-        
+
         let result = QuoteCreateResult {
             quote_id: format!("Q-{}", chrono::Utc::now().format("%Y-%m%d%H%M%S")),
             version: 1,
             status: "draft".to_string(),
             account_id: input.account_id,
             currency: input.currency,
-            line_items: input.line_items.iter().enumerate().map(|(i, item)| {
-                LineItemResult {
+            line_items: input
+                .line_items
+                .iter()
+                .enumerate()
+                .map(|(i, item)| LineItemResult {
                     line_id: format!("ql_{:03}", i + 1),
                     product_id: item.product_id.clone(),
                     product_name: "Product Name".to_string(),
                     quantity: item.quantity,
-                }
-            }).collect(),
+                })
+                .collect(),
             created_at: chrono::Utc::now().to_rfc3339(),
             message: "Quote created successfully".to_string(),
         };
-        
+
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 
     #[tool(description = "Get detailed quote information")]
-    async fn quote_get(
-        &self,
-        Parameters(input): Parameters<QuoteGetInput>,
-    ) -> String {
+    async fn quote_get(&self, Parameters(input): Parameters<QuoteGetInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_get called");
-        
+
         let result = QuoteGetResult {
             quote: QuoteInfo {
                 id: input.quote_id.clone(),
@@ -638,18 +630,16 @@ impl QuoteyMcpServer {
                 created_at: chrono::Utc::now().to_rfc3339(),
                 created_by: "agent:mcp".to_string(),
             },
-            line_items: vec![
-                QuoteLineInfo {
-                    line_id: "ql_001".to_string(),
-                    product_id: "prod_pro_v2".to_string(),
-                    product_name: "Pro Plan".to_string(),
-                    quantity: 150,
-                    unit_price: Some(6.00),
-                    discount_pct: 10.0,
-                    discount_amount: Some(1440.00),
-                    subtotal: Some(12960.00),
-                },
-            ],
+            line_items: vec![QuoteLineInfo {
+                line_id: "ql_001".to_string(),
+                product_id: "prod_pro_v2".to_string(),
+                product_name: "Pro Plan".to_string(),
+                quantity: 150,
+                unit_price: Some(6.00),
+                discount_pct: 10.0,
+                discount_amount: Some(1440.00),
+                subtotal: Some(12960.00),
+            }],
             pricing: if input.include_pricing {
                 Some(PricingInfo {
                     subtotal: 14400.00,
@@ -662,17 +652,14 @@ impl QuoteyMcpServer {
                 None
             },
         };
-        
+
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 
     #[tool(description = "Run pricing engine on a quote")]
-    async fn quote_price(
-        &self,
-        Parameters(input): Parameters<QuotePriceInput>,
-    ) -> String {
+    async fn quote_price(&self, Parameters(input): Parameters<QuotePriceInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_price called");
-        
+
         let result = QuotePriceResult {
             quote_id: input.quote_id,
             version: 1,
@@ -684,58 +671,49 @@ impl QuoteyMcpServer {
                 total: 12960.00,
                 priced_at: Some(chrono::Utc::now().to_rfc3339()),
             },
-            line_pricing: vec![
-                LinePricingInfo {
-                    line_id: "ql_001".to_string(),
-                    product_id: "prod_pro_v2".to_string(),
-                    product_name: "Pro Plan".to_string(),
-                    quantity: 150,
-                    base_unit_price: 10.00,
-                    unit_price: 6.00,
-                    subtotal_before_discount: 14400.00,
-                    discount_pct: 10.0,
-                    discount_amount: 1440.00,
-                    line_total: 12960.00,
-                },
-            ],
+            line_pricing: vec![LinePricingInfo {
+                line_id: "ql_001".to_string(),
+                product_id: "prod_pro_v2".to_string(),
+                product_name: "Pro Plan".to_string(),
+                quantity: 150,
+                base_unit_price: 10.00,
+                unit_price: 6.00,
+                subtotal_before_discount: 14400.00,
+                discount_pct: 10.0,
+                discount_amount: 1440.00,
+                line_total: 12960.00,
+            }],
             approval_required: true,
-            policy_violations: vec![
-                PolicyViolation {
-                    policy_id: "pol_discount_cap".to_string(),
-                    policy_name: "Discount Cap".to_string(),
-                    severity: "approval_required".to_string(),
-                    description: "10% discount exceeds auto-approval threshold".to_string(),
-                    threshold: Some(5.0),
-                    actual: Some(10.0),
-                    required_approver_role: Some("sales_manager".to_string()),
-                },
-            ],
+            policy_violations: vec![PolicyViolation {
+                policy_id: "pol_discount_cap".to_string(),
+                policy_name: "Discount Cap".to_string(),
+                severity: "approval_required".to_string(),
+                description: "10% discount exceeds auto-approval threshold".to_string(),
+                threshold: Some(5.0),
+                actual: Some(10.0),
+                required_approver_role: Some("sales_manager".to_string()),
+            }],
         };
-        
+
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 
     #[tool(description = "List quotes with optional filters")]
-    async fn quote_list(
-        &self,
-        Parameters(input): Parameters<QuoteListInput>,
-    ) -> String {
+    async fn quote_list(&self, Parameters(input): Parameters<QuoteListInput>) -> String {
         debug!("quote_list called");
-        
+
         let result = QuoteListResult {
-            items: vec![
-                QuoteListItem {
-                    id: "Q-2026-0042".to_string(),
-                    version: 1,
-                    account_id: "acct_acme_001".to_string(),
-                    account_name: Some("Acme Corp".to_string()),
-                    status: "priced".to_string(),
-                    currency: "USD".to_string(),
-                    total: Some(12960.00),
-                    valid_until: Some("2026-04-01".to_string()),
-                    created_at: chrono::Utc::now().to_rfc3339(),
-                },
-            ],
+            items: vec![QuoteListItem {
+                id: "Q-2026-0042".to_string(),
+                version: 1,
+                account_id: "acct_acme_001".to_string(),
+                account_name: Some("Acme Corp".to_string()),
+                status: "priced".to_string(),
+                currency: "USD".to_string(),
+                total: Some(12960.00),
+                valid_until: Some("2026-04-01".to_string()),
+                created_at: chrono::Utc::now().to_rfc3339(),
+            }],
             pagination: PaginationInfo {
                 total: 1,
                 page: input.page,
@@ -743,7 +721,7 @@ impl QuoteyMcpServer {
                 has_more: false,
             },
         };
-        
+
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 
@@ -754,7 +732,7 @@ impl QuoteyMcpServer {
         Parameters(input): Parameters<ApprovalRequestInput>,
     ) -> String {
         debug!(quote_id = %input.quote_id, "approval_request called");
-        
+
         let result = ApprovalRequestResult {
             approval_id: format!("APR-{}", chrono::Utc::now().format("%Y-%m%d%H%M%S")),
             quote_id: input.quote_id,
@@ -766,32 +744,27 @@ impl QuoteyMcpServer {
             expires_at: (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339(),
             message: "Approval request submitted".to_string(),
         };
-        
+
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 
     #[tool(description = "Check approval status for a quote")]
-    async fn approval_status(
-        &self,
-        Parameters(input): Parameters<ApprovalStatusInput>,
-    ) -> String {
+    async fn approval_status(&self, Parameters(input): Parameters<ApprovalStatusInput>) -> String {
         debug!(quote_id = %input.quote_id, "approval_status called");
-        
+
         let result = ApprovalStatusResult {
             quote_id: input.quote_id,
             current_status: "pending_approval".to_string(),
-            pending_requests: vec![
-                PendingApproval {
-                    approval_id: "APR-2026-0089".to_string(),
-                    status: "pending".to_string(),
-                    approver_role: "sales_manager".to_string(),
-                    requested_at: chrono::Utc::now().to_rfc3339(),
-                    expires_at: (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339(),
-                },
-            ],
+            pending_requests: vec![PendingApproval {
+                approval_id: "APR-2026-0089".to_string(),
+                status: "pending".to_string(),
+                approver_role: "sales_manager".to_string(),
+                requested_at: chrono::Utc::now().to_rfc3339(),
+                expires_at: (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339(),
+            }],
             can_proceed: false,
         };
-        
+
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 
@@ -801,33 +774,28 @@ impl QuoteyMcpServer {
         Parameters(_input): Parameters<ApprovalPendingInput>,
     ) -> String {
         debug!("approval_pending called");
-        
+
         let result = ApprovalPendingResult {
-            items: vec![
-                ApprovalPendingItem {
-                    approval_id: "APR-2026-0089".to_string(),
-                    quote_id: "Q-2026-0042".to_string(),
-                    account_name: "Acme Corp".to_string(),
-                    quote_total: 12960.00,
-                    requested_by: "agent:mcp".to_string(),
-                    justification: "10% discount for loyal customer".to_string(),
-                    requested_at: chrono::Utc::now().to_rfc3339(),
-                },
-            ],
+            items: vec![ApprovalPendingItem {
+                approval_id: "APR-2026-0089".to_string(),
+                quote_id: "Q-2026-0042".to_string(),
+                account_name: "Acme Corp".to_string(),
+                quote_total: 12960.00,
+                requested_by: "agent:mcp".to_string(),
+                justification: "10% discount for loyal customer".to_string(),
+                requested_at: chrono::Utc::now().to_rfc3339(),
+            }],
             total: 1,
         };
-        
+
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 
     // PDF Tools
     #[tool(description = "Generate PDF for a quote")]
-    async fn quote_pdf(
-        &self,
-        Parameters(input): Parameters<QuotePdfInput>,
-    ) -> String {
+    async fn quote_pdf(&self, Parameters(input): Parameters<QuotePdfInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_pdf called");
-        
+
         let result = QuotePdfResult {
             quote_id: input.quote_id.clone(),
             pdf_generated: true,
@@ -837,7 +805,7 @@ impl QuoteyMcpServer {
             template_used: input.template,
             generated_at: chrono::Utc::now().to_rfc3339(),
         };
-        
+
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 }

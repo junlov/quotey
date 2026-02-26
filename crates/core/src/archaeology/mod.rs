@@ -502,10 +502,6 @@ mod tests {
     }
 
     fn product(product_id: &str) -> Product {
-        Product::simple(
-            product_id,
-            format!("SKU-{product_id}"),
-            product_id.replace('_', " "),
-        )
+        Product::simple(product_id, format!("SKU-{product_id}"), product_id.replace('_', " "))
     }
 }

@@ -4,8 +4,8 @@ use std::collections::HashMap;
 
 use chrono::{Datelike, Utc};
 
-use super::types::*;
 use super::scoring::{ScoreCalculator, ScoringWeights};
+use super::types::*;
 use super::SuggestionResult;
 
 /// The main suggestion engine
@@ -60,11 +60,7 @@ impl SuggestionEngine {
         let mut suggestions = Vec::new();
 
         for candidate in candidates {
-            let scores = self.score_product(
-                &customer,
-                &current_products,
-                &candidate,
-            ).await?;
+            let scores = self.score_product(&customer, &current_products, &candidate).await?;
 
             let total_score = self.calculator.calculate_total_score(&scores);
 
@@ -91,10 +87,8 @@ impl SuggestionEngine {
         }
 
         // Filter and diversify
-        let final_suggestions = self.calculator.filter_and_diversify(
-            suggestions,
-            request.max_suggestions,
-        );
+        let final_suggestions =
+            self.calculator.filter_and_diversify(suggestions, request.max_suggestions);
 
         Ok(final_suggestions)
     }
@@ -118,20 +112,14 @@ impl SuggestionEngine {
 
         // Product relationship score
         let relationships = self.get_product_relationships(candidate).await?;
-        let relationship_score = self.calculator.product_relationship_score(
-            current_products,
-            candidate,
-            &relationships,
-        );
+        let relationship_score =
+            self.calculator.product_relationship_score(current_products, candidate, &relationships);
 
         // Time decay score
         let recent_purchases = self.get_recent_purchases(candidate).await?;
         let seasonal_data = self.get_seasonal_pattern(candidate).await?;
-        let time_score = self.calculator.time_decay_score(
-            candidate,
-            &recent_purchases,
-            seasonal_data.as_ref(),
-        );
+        let time_score =
+            self.calculator.time_decay_score(candidate, &recent_purchases, seasonal_data.as_ref());
 
         // Business rule boost
         let rules = self.get_business_rules().await?;
@@ -233,22 +221,28 @@ impl SuggestionEngine {
 
         // Placeholder: return mock similar customers
         let similar = vec![
-            (CustomerProfile {
-                id: "similar_1".to_string(),
-                segment: "enterprise".to_string(),
-                industry: Some("saas".to_string()),
-                employee_count: Some(450),
-                region: "us".to_string(),
-                avg_deal_size: 45000.0,
-            }, 0.85),
-            (CustomerProfile {
-                id: "similar_2".to_string(),
-                segment: "enterprise".to_string(),
-                industry: Some("fintech".to_string()),
-                employee_count: Some(600),
-                region: "us".to_string(),
-                avg_deal_size: 55000.0,
-            }, 0.70),
+            (
+                CustomerProfile {
+                    id: "similar_1".to_string(),
+                    segment: "enterprise".to_string(),
+                    industry: Some("saas".to_string()),
+                    employee_count: Some(450),
+                    region: "us".to_string(),
+                    avg_deal_size: 45000.0,
+                },
+                0.85,
+            ),
+            (
+                CustomerProfile {
+                    id: "similar_2".to_string(),
+                    segment: "enterprise".to_string(),
+                    industry: Some("fintech".to_string()),
+                    employee_count: Some(600),
+                    region: "us".to_string(),
+                    avg_deal_size: 55000.0,
+                },
+                0.70,
+            ),
         ];
 
         Ok(similar)
@@ -265,7 +259,7 @@ impl SuggestionEngine {
     async fn get_purchase_counts(
         &self,
         customers: &[(CustomerProfile, f64)],
-        product: &ProductInfo,
+        _product: &ProductInfo,
     ) -> SuggestionResult<HashMap<String, u32>> {
         // TODO: Connect to quote/line item repository
         // Placeholder: return mock purchase counts
@@ -316,17 +310,13 @@ impl SuggestionEngine {
 
     async fn get_recent_purchases(
         &self,
-        product: &ProductInfo,
+        _product: &ProductInfo,
     ) -> SuggestionResult<Vec<chrono::DateTime<chrono::Utc>>> {
         // TODO: Connect to quote repository
         // Placeholder: return recent dates
         use chrono::Duration;
         let now = chrono::Utc::now();
-        Ok(vec![
-            now - Duration::days(10),
-            now - Duration::days(25),
-            now - Duration::days(45),
-        ])
+        Ok(vec![now - Duration::days(10), now - Duration::days(25), now - Duration::days(45)])
     }
 
     async fn get_seasonal_pattern(
@@ -346,18 +336,16 @@ impl SuggestionEngine {
     async fn get_business_rules(&self) -> SuggestionResult<Vec<BusinessRule>> {
         // TODO: Connect to business rules repository
         // Placeholder: return active rules
-        Ok(vec![
-            BusinessRule {
-                id: "rule_1".to_string(),
-                rule_type: BusinessRuleType::AlwaysSuggestForSegment {
-                    segment: "enterprise".to_string(),
-                    product_id: "prod_enterprise".to_string(),
-                    boost: 0.3,
-                },
-                active: true,
-                priority: 1,
+        Ok(vec![BusinessRule {
+            id: "rule_1".to_string(),
+            rule_type: BusinessRuleType::AlwaysSuggestForSegment {
+                segment: "enterprise".to_string(),
+                product_id: "prod_enterprise".to_string(),
+                boost: 0.3,
             },
-        ])
+            active: true,
+            priority: 1,
+        }])
     }
 
     // -------------------------------------------------------------------------
@@ -394,7 +382,7 @@ mod tests {
     #[tokio::test]
     async fn test_get_suggestions() {
         let engine = SuggestionEngine::new();
-        
+
         let request = SuggestionRequest::new("test_customer")
             .with_current_products(vec!["prod_pro_v2".to_string()])
             .with_max_suggestions(5);
@@ -404,7 +392,7 @@ mod tests {
         // Should return suggestions (mock data should generate enough score)
         // Note: This depends on the mock data in get_candidate_products
         // If no suggestions, the mock scoring isn't generating high enough scores
-        
+
         // All returned suggestions should have scores above threshold
         for suggestion in &suggestions {
             assert!(suggestion.score >= super::super::MIN_SUGGESTION_SCORE);

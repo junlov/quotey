@@ -57,6 +57,13 @@ pub trait QuoteRepository: Send + Sync {
 pub trait ProductRepository: Send + Sync {
     async fn find_by_id(&self, id: &ProductId) -> Result<Option<Product>, RepositoryError>;
     async fn save(&self, product: Product) -> Result<(), RepositoryError>;
+    async fn search(
+        &self,
+        query: &str,
+        active_only: bool,
+        limit: u32,
+    ) -> Result<Vec<Product>, RepositoryError>;
+    async fn list_by_family(&self, family_id: &str) -> Result<Vec<Product>, RepositoryError>;
 }
 
 #[async_trait]

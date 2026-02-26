@@ -38,11 +38,15 @@
 //! }
 //! ```
 
+#[allow(dead_code)]
 mod auth;
+#[allow(dead_code)]
 mod server;
 mod tools;
 
-pub use auth::{AuthConfig, AuthManager, ApiKeyConfig, ApiKeyEntry, ApiKeyInfo, AuthResult, generate_api_key};
+pub use auth::{
+    generate_api_key, ApiKeyConfig, ApiKeyEntry, ApiKeyInfo, AuthConfig, AuthManager, AuthResult,
+};
 pub use server::QuoteyMcpServer;
 pub use tools::*;
 

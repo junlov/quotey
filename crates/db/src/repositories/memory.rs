@@ -57,6 +57,43 @@ impl ProductRepository for InMemoryProductRepository {
         products.insert(product.id.0.clone(), product);
         Ok(())
     }
+
+    async fn search(
+        &self,
+        query: &str,
+        active_only: bool,
+        limit: u32,
+    ) -> Result<Vec<Product>, RepositoryError> {
+        let products = self.products.read().await;
+        let q = query.to_lowercase();
+        let results: Vec<Product> = products
+            .values()
+            .filter(|p| {
+                if active_only && !p.active {
+                    return false;
+                }
+                if q.is_empty() {
+                    return true;
+                }
+                p.name.to_lowercase().contains(&q)
+                    || p.sku.to_lowercase().contains(&q)
+                    || p.description.as_deref().unwrap_or("").to_lowercase().contains(&q)
+            })
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        Ok(results)
+    }
+
+    async fn list_by_family(&self, family_id: &str) -> Result<Vec<Product>, RepositoryError> {
+        let products = self.products.read().await;
+        let results: Vec<Product> = products
+            .values()
+            .filter(|p| p.family_id.as_ref().map(|f| f.0.as_str()) == Some(family_id))
+            .cloned()
+            .collect();
+        Ok(results)
+    }
 }
 
 #[derive(Default)]
@@ -414,12 +451,7 @@ mod tests {
     #[tokio::test]
     async fn in_memory_product_repo_round_trip() -> TestResult<()> {
         let repo = InMemoryProductRepository::default();
-        let product = Product {
-            id: ProductId("plan-pro".to_string()),
-            sku: "PRO-001".to_string(),
-            name: "Pro Plan".to_string(),
-            active: true,
-        };
+        let product = Product::simple("plan-pro", "PRO-001", "Pro Plan");
 
         repo.save(product.clone()).await.map_err(|error| format!("save product: {error}"))?;
         let found =

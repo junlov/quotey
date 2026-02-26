@@ -29,8 +29,8 @@ async fn main() -> Result<()> {
     info!("Starting Quotey MCP Server");
 
     // Get database URL from environment or use default
-    let database_url = std::env::var("DATABASE_URL")
-        .unwrap_or_else(|_| "sqlite://quotey.db".to_string());
+    let database_url =
+        std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://quotey.db".to_string());
 
     info!("Connecting to database: {}", database_url);
 
@@ -75,14 +75,12 @@ async fn main() -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn test_parse_api_keys_json() {
         let json = r#"[
             {"key":"test-key-123","name":"Test Agent","requests_per_minute":30}
         ]"#;
-        
+
         let configs: Vec<quotey_mcp::ApiKeyConfig> = serde_json::from_str(json).unwrap();
         assert_eq!(configs.len(), 1);
         assert_eq!(configs[0].name, "Test Agent");
