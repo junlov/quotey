@@ -1,0 +1,47 @@
+{# Reusable Line Items Component for Quote Templates #}
+{# Usage: {% include "partials/line_items.html.tera" %} #}
+
+<section class="line-items-section">
+  <h2 class="section-title">Line Items</h2>
+  <table class="line-items-table">
+    <thead>
+      <tr>
+        <th style="width: 5%;">#</th>
+        <th style="width: 40%;">Product / Description</th>
+        <th class="numeric" style="width: 10%;">Qty</th>
+        <th class="numeric" style="width: 15%;">Unit Price</th>
+        <th class="numeric" style="width: 15%;">Discount</th>
+        <th class="numeric" style="width: 15%;">Line Total</th>
+      </tr>
+    </thead>
+    <tbody>
+      {% for line in lines %}
+      <tr class="page-break-avoid">
+        <td>{{ loop.index }}</td>
+        <td>
+          <div class="line-item-product">{{ line.product_name }}</div>
+          {% if line.description %}
+          <div class="line-item-description">{{ line.description }}</div>
+          {% endif %}
+          {% if line.attributes_json %}
+          <div class="line-item-attributes">
+            {% for key, value in line.attributes %}{{ key }}: {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
+          </div>
+          {% endif %}
+        </td>
+        <td class="numeric quantity-cell">{{ line.quantity }}</td>
+        <td class="numeric">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.unit_price | default(value=0)) }}</td>
+        <td class="numeric">
+          {% if line.discount_pct and line.discount_pct > 0 %}
+            {{ line.discount_pct }}%<br>
+            <small class="text-muted">-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.discount_amount | default(value=0)) }}</small>
+          {% else %}
+            -
+          {% endif %}
+        </td>
+        <td class="numeric subtotal-cell">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.subtotal | default(value=0)) }}</td>
+      </tr>
+      {% endfor %}
+    </tbody>
+  </table>
+</section>

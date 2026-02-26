@@ -1,0 +1,22 @@
+{# Reusable Header Component for Quote Templates #}
+{# Usage: {% include "partials/header.html.tera" %} #}
+
+<header class="quote-header">
+  <div class="company-branding">
+    {% if company_logo %}
+    <img src="{{ company_logo }}" alt="{{ company_name }}" class="company-logo">
+    {% endif %}
+    <div class="company-info">
+      <h1>{{ company_name | default(value="Quotey") }}</h1>
+      <p>
+        {{ company_address | default(value="") }}<br>
+        {{ company_email | default(value="sales@example.com") }}
+      </p>
+    </div>
+  </div>
+  <div class="quote-meta">
+    <div class="quote-id">{{ quote.id }}</div>
+    <span class="quote-status {{ quote.status | lower }}">{{ quote.status }}</span>
+    <div class="quote-date">{{ quote.created_at | date(format="%B %d, %Y") }}</div>
+  </div>
+</header>
