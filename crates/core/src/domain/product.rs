@@ -34,13 +34,17 @@ impl ProductType {
             Self::Bundle => "bundle",
         }
     }
+}
 
-    pub fn from_str(s: &str) -> Option<Self> {
+impl std::str::FromStr for ProductType {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Self, Self::Err> {
         match s {
-            "simple" => Some(Self::Simple),
-            "configurable" => Some(Self::Configurable),
-            "bundle" => Some(Self::Bundle),
-            _ => None,
+            "simple" => Ok(Self::Simple),
+            "configurable" => Ok(Self::Configurable),
+            "bundle" => Ok(Self::Bundle),
+            other => Err(format!("unknown product type: {other}")),
         }
     }
 }
@@ -126,9 +130,9 @@ mod tests {
     #[test]
     fn product_type_roundtrip() {
         for pt in [ProductType::Simple, ProductType::Configurable, ProductType::Bundle] {
-            assert_eq!(ProductType::from_str(pt.as_str()), Some(pt));
+            assert_eq!(pt.as_str().parse::<ProductType>(), Ok(pt));
         }
-        assert_eq!(ProductType::from_str("unknown"), None);
+        assert!("unknown".parse::<ProductType>().is_err());
     }
 
     #[test]

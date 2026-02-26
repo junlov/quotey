@@ -34,20 +34,17 @@ struct RateLimitEntry {
 
 impl RateLimitEntry {
     fn new() -> Self {
-        Self {
-            requests: Vec::new(),
-            window_start: Instant::now(),
-        }
+        Self { requests: Vec::new(), window_start: Instant::now() }
     }
 
     /// Clean old requests outside the window and add new request
     fn record_request(&mut self, window: Duration) -> usize {
         let now = Instant::now();
         let window_start = now - window;
-        
+
         // Remove requests outside the window
         self.requests.retain(|&t| t > window_start);
-        
+
         // Add new request
         self.requests.push(now);
         self.requests.len()
@@ -93,10 +90,8 @@ impl AuthManager {
 
     /// Create a new auth manager with the given API keys
     pub fn with_keys(api_keys: Vec<ApiKeyEntry>) -> Self {
-        let keys: HashMap<String, ApiKeyEntry> = api_keys
-            .into_iter()
-            .map(|entry| (entry.key.clone(), entry))
-            .collect();
+        let keys: HashMap<String, ApiKeyEntry> =
+            api_keys.into_iter().map(|entry| (entry.key.clone(), entry)).collect();
 
         Self {
             api_keys: Arc::new(RwLock::new(keys)),
@@ -174,10 +169,10 @@ impl AuthManager {
         // Check rate limit
         let mut limits = self.rate_limits.write().await;
         let limit_entry = limits.entry(key.to_string()).or_insert_with(RateLimitEntry::new);
-        
+
         let request_count = limit_entry.record_request(self.rate_limit_window);
         let limit = entry.requests_per_minute as usize;
-        
+
         if request_count > limit {
             // Rate limit exceeded
             let retry_after = self.rate_limit_window.as_secs() as u32;
@@ -196,10 +191,7 @@ impl AuthManager {
         let remaining = (limit - request_count) as u32;
         debug!(key_name = %entry.name, remaining = remaining, "Request allowed");
 
-        AuthResult::Allowed {
-            key_name: entry.name.clone(),
-            remaining_requests: remaining,
-        }
+        AuthResult::Allowed { key_name: entry.name.clone(), remaining_requests: remaining }
     }
 
     /// Add a new API key
@@ -312,11 +304,7 @@ pub struct AuthConfig {
 
 impl Default for AuthConfig {
     fn default() -> Self {
-        Self {
-            enabled: false,
-            rate_limit_window_secs: 60,
-            api_keys: Vec::new(),
-        }
+        Self { enabled: false, rate_limit_window_secs: 60, api_keys: Vec::new() }
     }
 }
 
@@ -345,7 +333,7 @@ pub fn generate_api_key() -> String {
     use rand::Rng;
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     const KEY_LEN: usize = 32;
-    
+
     let mut rng = rand::thread_rng();
     (0..KEY_LEN)
         .map(|_| {
@@ -362,7 +350,7 @@ mod tests {
     #[tokio::test]
     async fn test_no_auth_mode() {
         let auth = AuthManager::no_auth();
-        
+
         let result = auth.validate_request(None).await;
         assert!(result.is_allowed());
         assert_eq!(result.remaining(), Some(u32::MAX));
@@ -377,9 +365,9 @@ mod tests {
             created_at: chrono::Utc::now(),
             active: true,
         };
-        
+
         let auth = AuthManager::with_keys(vec![key]);
-        
+
         let result = auth.validate_request(None).await;
         assert!(!result.is_allowed());
         assert_eq!(result.denial_reason(), Some("API key required"));
@@ -394,9 +382,9 @@ mod tests {
             created_at: chrono::Utc::now(),
             active: true,
         };
-        
+
         let auth = AuthManager::with_keys(vec![key]);
-        
+
         let result = auth.validate_request(Some("wrong_key")).await;
         assert!(!result.is_allowed());
         assert_eq!(result.denial_reason(), Some("Invalid API key"));
@@ -411,16 +399,16 @@ mod tests {
             created_at: chrono::Utc::now(),
             active: true,
         };
-        
+
         let auth = AuthManager::with_keys(vec![key]);
-        
+
         // First 2 requests should succeed
         let result1 = auth.validate_request(Some("test_key_123")).await;
         assert!(result1.is_allowed());
-        
+
         let result2 = auth.validate_request(Some("test_key_123")).await;
         assert!(result2.is_allowed());
-        
+
         // Third request should be rate limited
         let result3 = auth.validate_request(Some("test_key_123")).await;
         assert!(!result3.is_allowed());
@@ -432,7 +420,7 @@ mod tests {
     fn test_generate_api_key() {
         let key1 = generate_api_key();
         let key2 = generate_api_key();
-        
+
         assert_eq!(key1.len(), 32);
         assert_eq!(key2.len(), 32);
         assert_ne!(key1, key2); // Should be random
