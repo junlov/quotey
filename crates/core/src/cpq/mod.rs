@@ -1,3 +1,4 @@
+pub mod anomaly;
 pub mod catalog;
 pub mod constraints;
 pub mod policy;
