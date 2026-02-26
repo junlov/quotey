@@ -28,7 +28,7 @@
 //!
 //! ```no_run
 //! use quotey_mcp::QuoteyMcpServer;
-//! use db::connect;
+//! use quotey_db::connect;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
@@ -38,9 +38,11 @@
 //! }
 //! ```
 
+mod auth;
 mod server;
 mod tools;
 
+pub use auth::{AuthConfig, AuthManager, ApiKeyConfig, ApiKeyEntry, ApiKeyInfo, AuthResult, generate_api_key};
 pub use server::QuoteyMcpServer;
 pub use tools::*;
 

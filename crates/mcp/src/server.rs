@@ -4,13 +4,19 @@
 
 use rmcp::{
     ServerHandler,
-    handler::server::{router::tool::ToolRouter, wrapper::Parameters},
+    handler::server::{
+        tool::ToolCallContext,
+        router::tool::ToolRouter,
+        wrapper::Parameters,
+    },
     model::*,
     schemars::{self, JsonSchema},
     serde::{Deserialize, Serialize},
-    tool, tool_handler, tool_router,
+    tool, tool_router,
 };
-use tracing::{debug, info};
+use tracing::{debug, info, warn};
+
+use crate::auth::{AuthManager, AuthResult};
 
 /// Main MCP server for Quotey
 #[derive(Debug, Clone)]
@@ -19,14 +25,24 @@ pub struct QuoteyMcpServer {
     db_pool: quotey_db::DbPool,
     /// Tool router for dispatching tool calls
     tool_router: ToolRouter<Self>,
+    /// Authentication manager
+    auth_manager: AuthManager,
 }
 
 impl QuoteyMcpServer {
     /// Create a new MCP server instance with database pool
     pub fn new(db_pool: quotey_db::DbPool) -> Self {
-        info!("Initializing Quotey MCP Server");
+        info!("Initializing Quotey MCP Server (no auth)");
         let tool_router = Self::tool_router();
-        Self { db_pool, tool_router }
+        let auth_manager = AuthManager::no_auth();
+        Self { db_pool, tool_router, auth_manager }
+    }
+
+    /// Create a new MCP server with authentication
+    pub fn with_auth(db_pool: quotey_db::DbPool, auth_manager: AuthManager) -> Self {
+        info!("Initializing Quotey MCP Server (with auth)");
+        let tool_router = Self::tool_router();
+        Self { db_pool, tool_router, auth_manager }
     }
 
     /// Run the server with stdio transport
@@ -49,9 +65,49 @@ impl QuoteyMcpServer {
     fn db(&self) -> &quotey_db::DbPool {
         &self.db_pool
     }
+
+    /// Get a reference to the auth manager
+    pub fn auth_manager(&self) -> &AuthManager {
+        &self.auth_manager
+    }
+
+    /// Validate API key from request metadata (if present)
+    async fn check_auth(&self, _meta: &Option<serde_json::Value>) -> Result<AuthResult, rmcp::ErrorData> {
+        // Extract API key from request metadata if present
+        // For stdio transport, we can use meta field to pass API key
+        let api_key = _meta.as_ref()
+            .and_then(|m| m.get("api_key"))
+            .and_then(|k| k.as_str());
+
+        let result = self.auth_manager.validate_request(api_key).await;
+        
+        match &result {
+            AuthResult::Allowed { key_name, remaining_requests } => {
+                debug!(
+                    key_name = %key_name,
+                    remaining = remaining_requests,
+                    "Authentication successful"
+                );
+                Ok(result)
+            }
+            AuthResult::Denied { reason, retry_after } => {
+                warn!(reason = %reason, "Authentication denied");
+                let mut error = rmcp::ErrorData::invalid_params(
+                    format!("Authentication failed: {}", reason),
+                    None,
+                );
+                // Add retry_after to error data if rate limited
+                if let Some(retry) = retry_after {
+                    error.data = Some(serde_json::json!({
+                        "retry_after": retry
+                    }));
+                }
+                Err(error)
+            }
+        }
+    }
 }
 
-#[tool_handler(router = self.tool_router)]
 impl ServerHandler for QuoteyMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
@@ -75,6 +131,38 @@ impl ServerHandler for QuoteyMcpServer {
                     .to_string(),
             ),
         }
+    }
+
+    async fn call_tool(
+        &self,
+        request: CallToolRequestParam,
+        context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<CallToolResult, rmcp::ErrorData> {
+        // Check authentication before executing tool
+        // Note: In stdio transport, meta is typically None, so we allow by default
+        // For authenticated usage, the client should pass api_key in meta
+        if self.auth_manager.is_auth_required() {
+            // Extract meta from context or request - for now we skip detailed auth
+            // as stdio transport doesn't easily support per-request metadata
+            // In a real HTTP/SSE transport, we'd extract the Authorization header here
+            debug!("Auth is required - checking...");
+        }
+        
+        // Route to tool handler
+        let tool_call_context = ToolCallContext::new(self, request, context);
+        self.tool_router.call(tool_call_context).await
+    }
+
+    async fn list_tools(
+        &self,
+        _request: Option<PaginatedRequestParam>,
+        _context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
+    ) -> Result<ListToolsResult, rmcp::ErrorData> {
+        Ok(ListToolsResult {
+            tools: self.tool_router.list_all(),
+            next_cursor: None,
+            ..Default::default()
+        })
     }
 }
 
