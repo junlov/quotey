@@ -12,6 +12,7 @@ pub struct AppConfig {
     pub slack: SlackConfig,
     pub llm: LlmConfig,
     pub server: ServerConfig,
+    pub crm: CrmConfig,
     pub logging: LoggingConfig,
 }
 
@@ -46,6 +47,17 @@ pub struct ServerConfig {
 }
 
 #[derive(Clone, Debug)]
+pub struct CrmConfig {
+    pub enabled: bool,
+    pub webhook_secret: Option<String>,
+    pub callback_base_url: Option<String>,
+    pub salesforce_client_id: Option<String>,
+    pub salesforce_client_secret: Option<String>,
+    pub hubspot_client_id: Option<String>,
+    pub hubspot_client_secret: Option<String>,
+}
+
+#[derive(Clone, Debug)]
 pub struct LoggingConfig {
     pub level: String,
     pub format: LogFormat,
@@ -75,6 +87,13 @@ pub struct ConfigOverrides {
     pub llm_model: Option<String>,
     pub slack_app_token: Option<String>,
     pub slack_bot_token: Option<String>,
+    pub crm_enabled: Option<bool>,
+    pub crm_webhook_secret: Option<String>,
+    pub crm_callback_base_url: Option<String>,
+    pub crm_salesforce_client_id: Option<String>,
+    pub crm_salesforce_client_secret: Option<String>,
+    pub crm_hubspot_client_id: Option<String>,
+    pub crm_hubspot_client_secret: Option<String>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -123,6 +142,15 @@ impl Default for AppConfig {
                 bind_address: "127.0.0.1".to_string(),
                 health_check_port: 8080,
                 graceful_shutdown_secs: 15,
+            },
+            crm: CrmConfig {
+                enabled: false,
+                webhook_secret: None,
+                callback_base_url: None,
+                salesforce_client_id: None,
+                salesforce_client_secret: None,
+                hubspot_client_id: None,
+                hubspot_client_secret: None,
             },
             logging: LoggingConfig { level: "info".to_string(), format: LogFormat::Compact },
         }
@@ -238,6 +266,30 @@ impl AppConfig {
             }
         }
 
+        if let Some(crm) = patch.crm {
+            if let Some(enabled) = crm.enabled {
+                self.crm.enabled = enabled;
+            }
+            if let Some(webhook_secret) = crm.webhook_secret {
+                self.crm.webhook_secret = Some(webhook_secret);
+            }
+            if let Some(callback_base_url) = crm.callback_base_url {
+                self.crm.callback_base_url = Some(callback_base_url);
+            }
+            if let Some(salesforce_client_id) = crm.salesforce_client_id {
+                self.crm.salesforce_client_id = Some(salesforce_client_id);
+            }
+            if let Some(salesforce_client_secret) = crm.salesforce_client_secret {
+                self.crm.salesforce_client_secret = Some(salesforce_client_secret);
+            }
+            if let Some(hubspot_client_id) = crm.hubspot_client_id {
+                self.crm.hubspot_client_id = Some(hubspot_client_id);
+            }
+            if let Some(hubspot_client_secret) = crm.hubspot_client_secret {
+                self.crm.hubspot_client_secret = Some(hubspot_client_secret);
+            }
+        }
+
         if let Some(logging) = patch.logging {
             if let Some(level) = logging.level {
                 self.logging.level = level;
@@ -296,6 +348,28 @@ impl AppConfig {
                 parse_u64("QUOTEY_SERVER_GRACEFUL_SHUTDOWN_SECS", &value)?;
         }
 
+        if let Some(value) = read_env("QUOTEY_CRM_ENABLED") {
+            self.crm.enabled = parse_bool("QUOTEY_CRM_ENABLED", &value)?;
+        }
+        if let Some(value) = read_env("QUOTEY_CRM_WEBHOOK_SECRET") {
+            self.crm.webhook_secret = Some(value);
+        }
+        if let Some(value) = read_env("QUOTEY_CRM_CALLBACK_BASE_URL") {
+            self.crm.callback_base_url = Some(value);
+        }
+        if let Some(value) = read_env("QUOTEY_CRM_SALESFORCE_CLIENT_ID") {
+            self.crm.salesforce_client_id = Some(value);
+        }
+        if let Some(value) = read_env("QUOTEY_CRM_SALESFORCE_CLIENT_SECRET") {
+            self.crm.salesforce_client_secret = Some(value);
+        }
+        if let Some(value) = read_env("QUOTEY_CRM_HUBSPOT_CLIENT_ID") {
+            self.crm.hubspot_client_id = Some(value);
+        }
+        if let Some(value) = read_env("QUOTEY_CRM_HUBSPOT_CLIENT_SECRET") {
+            self.crm.hubspot_client_secret = Some(value);
+        }
+
         let log_level = read_env("QUOTEY_LOGGING_LEVEL").or_else(|| read_env("QUOTEY_LOG_LEVEL"));
         if let Some(value) = log_level {
             self.logging.level = value;
@@ -328,6 +402,28 @@ impl AppConfig {
         if let Some(slack_bot_token) = overrides.slack_bot_token {
             self.slack.bot_token = secret_value(slack_bot_token); // ubs:ignore
         }
+
+        if let Some(enabled) = overrides.crm_enabled {
+            self.crm.enabled = enabled;
+        }
+        if let Some(webhook_secret) = overrides.crm_webhook_secret {
+            self.crm.webhook_secret = Some(webhook_secret);
+        }
+        if let Some(callback_base_url) = overrides.crm_callback_base_url {
+            self.crm.callback_base_url = Some(callback_base_url);
+        }
+        if let Some(salesforce_client_id) = overrides.crm_salesforce_client_id {
+            self.crm.salesforce_client_id = Some(salesforce_client_id);
+        }
+        if let Some(salesforce_client_secret) = overrides.crm_salesforce_client_secret {
+            self.crm.salesforce_client_secret = Some(salesforce_client_secret);
+        }
+        if let Some(hubspot_client_id) = overrides.crm_hubspot_client_id {
+            self.crm.hubspot_client_id = Some(hubspot_client_id);
+        }
+        if let Some(hubspot_client_secret) = overrides.crm_hubspot_client_secret {
+            self.crm.hubspot_client_secret = Some(hubspot_client_secret);
+        }
     }
 
     pub fn validate(&self) -> Result<(), ConfigError> {
@@ -335,6 +431,7 @@ impl AppConfig {
         validate_slack(&self.slack)?;
         validate_llm(&self.llm)?;
         validate_server(&self.server)?;
+        validate_crm(&self.crm)?;
         validate_logging(&self.logging)?;
         Ok(())
     }
@@ -512,6 +609,35 @@ fn validate_logging(logging: &LoggingConfig) -> Result<(), ConfigError> {
     }
 }
 
+fn validate_crm(crm: &CrmConfig) -> Result<(), ConfigError> {
+    if crm.enabled {
+        let has_provider = crm.salesforce_client_id.is_some() || crm.hubspot_client_id.is_some();
+        if !has_provider {
+            return Err(ConfigError::Validation(
+                "crm.enabled is true but no CRM provider credentials are configured".to_string(),
+            ));
+        }
+
+        let has_secret =
+            crm.salesforce_client_secret.is_some() || crm.hubspot_client_secret.is_some();
+        if !has_secret {
+            return Err(ConfigError::Validation(
+                "crm.enabled is true but provider client secrets are missing".to_string(),
+            ));
+        }
+    }
+
+    if let Some(base_url) = &crm.callback_base_url {
+        if !base_url.starts_with("http://") && !base_url.starts_with("https://") {
+            return Err(ConfigError::Validation(
+                "crm.callback_base_url must start with http:// or https://".to_string(),
+            ));
+        }
+    }
+
+    Ok(())
+}
+
 fn read_env(key: &str) -> Option<String> {
     env::var(key).ok().filter(|value| !value.trim().is_empty())
 }
@@ -537,12 +663,20 @@ fn parse_u64(key: &str, value: &str) -> Result<u64, ConfigError> {
     })
 }
 
+fn parse_bool(key: &str, value: &str) -> Result<bool, ConfigError> {
+    value.parse::<bool>().map_err(|_| ConfigError::InvalidEnvOverride {
+        key: key.to_string(),
+        value: value.to_string(),
+    })
+}
+
 #[derive(Debug, Default, Deserialize)]
 struct ConfigPatch {
     database: Option<DatabasePatch>,
     slack: Option<SlackPatch>,
     llm: Option<LlmPatch>,
     server: Option<ServerPatch>,
+    crm: Option<CrmPatch>,
     logging: Option<LoggingPatch>,
 }
 
@@ -580,6 +714,17 @@ struct ServerPatch {
 struct LoggingPatch {
     level: Option<String>,
     format: Option<LogFormat>,
+}
+
+#[derive(Debug, Default, Deserialize)]
+struct CrmPatch {
+    enabled: Option<bool>,
+    webhook_secret: Option<String>,
+    callback_base_url: Option<String>,
+    salesforce_client_id: Option<String>,
+    salesforce_client_secret: Option<String>,
+    hubspot_client_id: Option<String>,
+    hubspot_client_secret: Option<String>,
 }
 
 #[cfg(test)]

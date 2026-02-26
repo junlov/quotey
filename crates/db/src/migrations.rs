@@ -212,6 +212,23 @@ mod tests {
         "idx_portal_comment_quote_id",
         "idx_portal_comment_line_id",
         "idx_portal_comment_parent",
+        // 0025 — crm integration
+        "crm_integration",
+        "idx_crm_integration_provider",
+        "idx_crm_integration_status",
+        "crm_oauth_state",
+        "idx_crm_oauth_state_expires_at",
+        "idx_crm_oauth_state_provider",
+        "crm_field_mapping",
+        "idx_crm_field_mapping_provider_direction",
+        "idx_crm_field_mapping_quotey_field",
+        "idx_crm_field_mapping_crm_field",
+        "crm_sync_event",
+        "idx_crm_sync_event_provider",
+        "idx_crm_sync_event_direction",
+        "idx_crm_sync_event_status",
+        "idx_crm_sync_event_quote_id",
+        "idx_crm_sync_event_created_at",
     ];
 
     async fn managed_object_count(pool: &sqlx::SqlitePool, object_name: &str) -> TestResult<i64> {
