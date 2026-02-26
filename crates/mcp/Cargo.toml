@@ -34,6 +34,7 @@ async-trait = { workspace = true }
 chrono = { workspace = true }
 rand = "0.8"
 rust_decimal = { workspace = true }
+tera = { workspace = true }
 uuid = { workspace = true }
 
 [dev-dependencies]

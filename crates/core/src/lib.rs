@@ -1,6 +1,12 @@
 // Re-export chrono for downstream crates that need DateTime types
 pub use chrono;
 
+pub mod ambiguity;
+pub use ambiguity::{
+    Ambiguity, AmbiguityDetectionEngine, AmbiguityDetectionInput, AmbiguityOption, AmbiguitySet,
+    AmbiguitySeverity, AmbiguityType, DateMention, ProductMention, QuantityMention,
+    render_ambiguity_slack_blocks,
+};
 pub mod approvals;
 pub mod archaeology;
 pub mod audit;

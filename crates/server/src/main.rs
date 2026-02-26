@@ -1,7 +1,7 @@
 mod bootstrap;
+mod crm;
 mod health;
 mod pdf;
-mod crm;
 pub mod portal;
 
 use anyhow::Result;
