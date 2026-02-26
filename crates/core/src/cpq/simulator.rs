@@ -366,15 +366,28 @@ pub fn fork_quote_with_variation(
                 product_id: change.product_id.clone(),
                 quantity: change.quantity_delta as u32,
                 unit_price,
+                discount_pct: 0.0,
+                notes: None,
             },
         );
     }
 
     Ok(Quote {
         id: baseline_quote.id.clone(),
+        version: baseline_quote.version,
         status: baseline_quote.status.clone(),
+        account_id: baseline_quote.account_id.clone(),
+        deal_id: baseline_quote.deal_id.clone(),
+        currency: baseline_quote.currency.clone(),
+        term_months: baseline_quote.term_months,
+        start_date: baseline_quote.start_date.clone(),
+        end_date: baseline_quote.end_date.clone(),
+        valid_until: baseline_quote.valid_until.clone(),
+        notes: baseline_quote.notes.clone(),
+        created_by: baseline_quote.created_by.clone(),
         lines: lines.into_values().collect(),
         created_at: baseline_quote.created_at,
+        updated_at: baseline_quote.updated_at,
     })
 }
 
@@ -929,15 +942,29 @@ mod tests {
     fn simulator_normalizes_whitespace_product_id_for_existing_baseline_line() {
         let runtime = DeterministicCpqRuntime::default();
         let simulator = DealFlightSimulator::new(runtime);
+        let now = Utc::now();
         let quote = Quote {
             id: QuoteId("Q-SIM-WHITESPACE-1".to_string()),
+            version: 1,
             status: QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "test".to_string(),
             lines: vec![QuoteLine {
                 product_id: ProductId(" plan-pro ".to_string()),
                 quantity: 10,
                 unit_price: Decimal::new(9999, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         };
         let policy_input = PolicyInput {
             requested_discount_pct: Decimal::ZERO,
@@ -1103,15 +1130,29 @@ mod tests {
     }
 
     fn quote_fixture() -> Quote {
+        let now = Utc::now();
         Quote {
             id: QuoteId("Q-SIM-CORE-1".to_string()),
+            version: 1,
             status: QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "test".to_string(),
             lines: vec![QuoteLine {
                 product_id: ProductId("plan-pro".to_string()),
                 quantity: 10,
                 unit_price: Decimal::new(9999, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         }
     }
 }

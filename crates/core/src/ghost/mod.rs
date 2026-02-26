@@ -265,11 +265,23 @@ fn build_draft_quote(template_quote: &Quote, quote_id: &str, discount_pct: u8) -
         })
         .collect::<Vec<_>>();
 
+    let now = Utc::now();
     Quote {
         id: QuoteId(quote_id.to_string()),
+        version: 1,
         status: QuoteStatus::Draft,
+        account_id: template_quote.account_id.clone(),
+        deal_id: None,
+        currency: template_quote.currency.clone(),
+        term_months: template_quote.term_months,
+        start_date: None,
+        end_date: None,
+        valid_until: None,
+        notes: Some(format!("Ghost quote derived from {}", template_quote.id.0)),
+        created_by: "ghost-engine".to_string(),
         lines: discounted_lines,
-        created_at: Utc::now(),
+        created_at: now,
+        updated_at: now,
     }
 }
 
@@ -525,15 +537,29 @@ mod tests {
     }
 
     fn quote(quote_id: &str, quantity: u32, unit_price_cents: i64) -> Quote {
+        let now = Utc::now();
         Quote {
             id: QuoteId(quote_id.to_string()),
+            version: 1,
             status: QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "test".to_string(),
             lines: vec![QuoteLine {
                 product_id: ProductId("starter".to_string()),
                 quantity,
                 unit_price: Decimal::new(unit_price_cents, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         }
     }
 }

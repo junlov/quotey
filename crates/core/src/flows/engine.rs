@@ -406,15 +406,29 @@ mod tests {
     fn flow_runtime_can_call_cpq_stubs() {
         let engine = FlowEngine::default();
         let runtime = DeterministicCpqRuntime::default();
+        let now = Utc::now();
         let quote = Quote {
             id: QuoteId("Q-2026-0044".to_owned()),
+            version: 1,
             status: QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "system".to_string(),
             lines: vec![QuoteLine {
                 product_id: ProductId("plan-pro".to_owned()),
                 quantity: 2,
                 unit_price: Decimal::new(4_999, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         };
 
         let result = engine.evaluate_cpq(

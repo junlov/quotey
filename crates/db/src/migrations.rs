@@ -179,6 +179,20 @@ mod tests {
         "idx_genome_query_audit_type_queried",
         "idx_counterfactual_quote",
         "idx_counterfactual_autopsy",
+        // 0019 — product catalog
+        "product_family",
+        "product",
+        "product_fts",
+        "product_attribute",
+        "product_bundle_member",
+        "idx_product_sku",
+        "idx_product_family_id",
+        "idx_product_active",
+        "idx_product_type",
+        "idx_product_attribute_product",
+        // 0020 — quote enrich (indexes only; columns added to existing tables)
+        "idx_quote_account_id",
+        "idx_quote_deal_id",
     ];
 
     async fn managed_object_count(pool: &sqlx::SqlitePool, object_name: &str) -> TestResult<i64> {

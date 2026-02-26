@@ -738,7 +738,8 @@ pub fn help_message() -> MessageTemplate {
 • `/quote add-line <quote_id> <sku>:<delta>` · apply deterministic line adjustments\n\
 • `/quote discount <quote_id> ...` → request discount exceptions with reasoning\n\
 • `/quote clone <quote_id>` · duplicate a quote version\n\
-• `/quote simulate <quote_id> ...` → run controlled what-if scenarios"
+• `/quote simulate <quote_id> ...` → run controlled what-if scenarios\n\
+• `/quote suggest [<quote_id>] [for <customer>]` → get smart product suggestions"
             );
         })
         .actions("quote.help.quickstart-actions.v1", |actions| {
@@ -1198,6 +1199,184 @@ fn sanitize_simulation_slug(value: &str) -> String {
     } else {
         slug
     }
+}
+
+// -------------------------------------------------------------------------
+// Product Suggestion UI
+// -------------------------------------------------------------------------
+
+/// Maximum suggestions to display in a single Slack message
+pub const SUGGESTION_MAX_DISPLAY: usize = 5;
+
+/// View model for a single product suggestion in Slack
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestionItemView {
+    /// Product ID (used in action values)
+    pub product_id: String,
+    /// Product name
+    pub product_name: String,
+    /// Product SKU
+    pub product_sku: String,
+    /// Overall score (0.0 - 1.0)
+    pub score: f64,
+    /// Confidence label ("High", "Medium", "Low")
+    pub confidence: String,
+    /// Category description (e.g. "Similar customers purchased this")
+    pub category_description: String,
+    /// Human-readable reasoning lines
+    pub reasoning: Vec<String>,
+    /// Unit price for display
+    pub unit_price: Option<f64>,
+}
+
+/// View model for the suggestion card
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestionCardView {
+    /// Quote ID context (if suggestions are for a specific quote)
+    pub quote_id: Option<String>,
+    /// Customer name or hint
+    pub customer_hint: String,
+    /// Suggestions to display
+    pub suggestions: Vec<SuggestionItemView>,
+    /// Request ID for correlation
+    pub request_id: String,
+}
+
+/// Encode a suggestion action value for button payloads
+pub fn suggestion_action_value(
+    quote_id: Option<&str>,
+    product_id: &str,
+    product_sku: &str,
+) -> String {
+    let quote_part = quote_id
+        .map(|q| format!("quote={};", encode_action_value_component(q)))
+        .unwrap_or_default();
+    format!(
+        "action=add_suggested;{}product={};sku={}",
+        quote_part,
+        encode_action_value_component(product_id),
+        encode_action_value_component(product_sku),
+    )
+}
+
+fn confidence_emoji(confidence: &str) -> &'static str {
+    match confidence.to_ascii_lowercase().as_str() {
+        "high" => "🟢",
+        "medium" => "🟡",
+        _ => "🟠",
+    }
+}
+
+fn score_bar(score: f64) -> String {
+    let pct = (score * 100.0).round() as u32;
+    let filled = (score * 5.0).round() as usize;
+    let empty = 5usize.saturating_sub(filled);
+    format!("{}{} {pct}%", "█".repeat(filled), "░".repeat(empty))
+}
+
+/// Build the product suggestions Slack message
+pub fn suggestion_message(view: &SuggestionCardView) -> MessageTemplate {
+    let visible: Vec<&SuggestionItemView> =
+        view.suggestions.iter().take(SUGGESTION_MAX_DISPLAY).collect();
+    let total = view.suggestions.len();
+    let shown = visible.len();
+
+    let quote_label = view.quote_id.as_deref().map(|q| format!(" for `{q}`")).unwrap_or_default();
+
+    if visible.is_empty() {
+        return MessageBuilder::new(format!("Product suggestions for {}", view.customer_hint))
+            .section("suggest.header.v1", |section| {
+                section.mrkdwn(format!(
+                    "💡 *Product Suggestions*{quote_label}\nCustomer: {}",
+                    view.customer_hint
+                ));
+            })
+            .section("suggest.empty.v1", |section| {
+                section.plain(
+                    "No suggestions available. Add products to the quote or check customer profile data.",
+                );
+            })
+            .context("suggest.context.v1", |context| {
+                context.plain(format!("Request ID: {}", view.request_id));
+            })
+            .build();
+    }
+
+    let mut builder = MessageBuilder::new(format!(
+        "{shown} product suggestion{} for {}",
+        if shown == 1 { "" } else { "s" },
+        view.customer_hint
+    ))
+    .section("suggest.header.v1", |section| {
+        section.mrkdwn(format!(
+            "💡 *Product Suggestions*{quote_label}\n*Customer:* {}",
+            view.customer_hint
+        ));
+    });
+
+    for (index, item) in visible.iter().enumerate() {
+        let conf_icon = confidence_emoji(&item.confidence);
+        let bar = score_bar(item.score);
+        let price_str =
+            item.unit_price.map(|p| format!(" • {}", format_currency(p))).unwrap_or_default();
+
+        let top_reason = item.reasoning.first().map(|r| r.as_str()).unwrap_or("—");
+
+        let section_id = format!("suggest.item.{index}.v1");
+        let actions_id = format!("suggest.item.actions.{index}.v1");
+
+        builder = builder
+            .section(section_id, |section| {
+                section.mrkdwn(format!(
+                    "*#{rank} {name}* (`{sku}`){price}\n\
+                     {conf_icon} {confidence} confidence • {bar}\n\
+                     _{category}_\n\
+                     {reason}",
+                    rank = index + 1,
+                    name = item.product_name,
+                    sku = item.product_sku,
+                    price = price_str,
+                    confidence = item.confidence,
+                    category = item.category_description,
+                    reason = top_reason,
+                ));
+            })
+            .actions(actions_id, |actions| {
+                actions
+                    .button(
+                        ButtonElement::new(format!("suggest.add.{index}.v1"), "Add to Quote")
+                            .style(ButtonStyle::Primary)
+                            .value(suggestion_action_value(
+                                view.quote_id.as_deref(),
+                                &item.product_id,
+                                &item.product_sku,
+                            )),
+                    )
+                    .button(
+                        ButtonElement::new(format!("suggest.details.{index}.v1"), "View Details")
+                            .value(format!(
+                                "action=view_product;product={}",
+                                encode_action_value_component(&item.product_id)
+                            )),
+                    );
+            });
+    }
+
+    if total > shown {
+        builder = builder.section("suggest.overflow.v1", |section| {
+            section.mrkdwn(format!(
+                "_Showing {shown} of {total} suggestions. Use `/quote suggest --all` for the full list._"
+            ));
+        });
+    }
+
+    builder
+        .context("suggest.context.v1", |context| {
+            context
+                .plain(format!("Request ID: {}", view.request_id))
+                .plain("Suggestions are scored by customer similarity, product relationships, recency, and business rules.");
+        })
+        .build()
 }
 
 #[cfg(test)]
@@ -1994,5 +2173,123 @@ mod tests {
                 "Rollback to v41 with signed apply rollback within 15m if drift exceeds threshold."
                     .to_string(),
         }
+    }
+
+    #[test]
+    fn suggestion_message_renders_items_with_add_buttons() {
+        use super::{SuggestionCardView, SuggestionItemView};
+
+        let view = SuggestionCardView {
+            quote_id: Some("Q-2026-0042".to_string()),
+            customer_hint: "Acme Corp".to_string(),
+            suggestions: vec![
+                SuggestionItemView {
+                    product_id: "prod_sso".to_string(),
+                    product_name: "SSO Add-on".to_string(),
+                    product_sku: "ADDON-SSO-001".to_string(),
+                    score: 0.85,
+                    confidence: "High".to_string(),
+                    category_description: "Complements your current selection".to_string(),
+                    reasoning: vec!["85% of similar customers added SSO".to_string()],
+                    unit_price: Some(2.0),
+                },
+                SuggestionItemView {
+                    product_id: "prod_support".to_string(),
+                    product_name: "Premium Support".to_string(),
+                    product_sku: "ADDON-SUP-001".to_string(),
+                    score: 0.62,
+                    confidence: "Medium".to_string(),
+                    category_description: "Frequently purchased together".to_string(),
+                    reasoning: vec!["Enterprise customers typically add support".to_string()],
+                    unit_price: Some(500.0),
+                },
+            ],
+            request_id: "req-suggest-1".to_string(),
+        };
+
+        let message = super::suggestion_message(&view);
+
+        // Fallback should mention suggestions
+        assert!(message.fallback_text.contains("suggestion"));
+        assert!(message.fallback_text.contains("Acme Corp"));
+
+        // Should have header
+        let header = message.blocks.iter().find(|block| {
+            matches!(block, Block::Section { block_id, .. } if block_id == "suggest.header.v1")
+        });
+        assert!(header.is_some(), "expected header section");
+
+        // Should have item sections for each suggestion
+        let item_0 = message.blocks.iter().find(|block| {
+            matches!(block, Block::Section { block_id, .. } if block_id == "suggest.item.0.v1")
+        });
+        assert!(item_0.is_some(), "expected first suggestion section");
+
+        let item_1 = message.blocks.iter().find(|block| {
+            matches!(block, Block::Section { block_id, .. } if block_id == "suggest.item.1.v1")
+        });
+        assert!(item_1.is_some(), "expected second suggestion section");
+
+        // Should have action buttons for each suggestion
+        let actions_0 = message.blocks.iter().find_map(|block| match block {
+            Block::Actions { block_id, elements } if block_id == "suggest.item.actions.0.v1" => {
+                Some(elements)
+            }
+            _ => None,
+        });
+        assert!(actions_0.is_some(), "expected actions for first suggestion");
+        let actions = actions_0.expect("actions asserted above");
+        assert_eq!(actions.len(), 2);
+        assert!(actions[0].action_id.starts_with("suggest.add."));
+        assert!(actions[1].action_id.starts_with("suggest.details."));
+
+        // Context block should exist
+        let context = message.blocks.iter().find(|block| {
+            matches!(block, Block::Context { block_id, .. } if block_id == "suggest.context.v1")
+        });
+        assert!(context.is_some(), "expected context block");
+    }
+
+    #[test]
+    fn suggestion_message_empty_shows_empty_state() {
+        use super::SuggestionCardView;
+
+        let view = SuggestionCardView {
+            quote_id: None,
+            customer_hint: "New Customer".to_string(),
+            suggestions: vec![],
+            request_id: "req-empty-1".to_string(),
+        };
+
+        let message = super::suggestion_message(&view);
+
+        let empty = message.blocks.iter().find(|block| {
+            matches!(block, Block::Section { block_id, .. } if block_id == "suggest.empty.v1")
+        });
+        assert!(empty.is_some(), "expected empty state section");
+    }
+
+    #[test]
+    fn suggestion_action_value_encodes_correctly() {
+        let value = super::suggestion_action_value(Some("Q-2026-001"), "prod_sso", "ADDON-SSO-001");
+        assert!(value.contains("action=add_suggested"));
+        assert!(value.contains("product=prod_sso"));
+        assert!(value.contains("sku=ADDON-SSO-001"));
+        assert!(value.contains("quote=Q-2026-001"));
+    }
+
+    #[test]
+    fn suggestion_action_value_without_quote() {
+        let value = super::suggestion_action_value(None, "prod_sso", "ADDON-SSO-001");
+        assert!(value.contains("action=add_suggested"));
+        assert!(value.contains("product=prod_sso"));
+        assert!(!value.contains("quote="));
+    }
+
+    #[test]
+    fn score_bar_renders_proportionally() {
+        assert!(super::score_bar(1.0).starts_with("█████"));
+        assert!(super::score_bar(0.0).starts_with("░░░░░"));
+        assert!(super::score_bar(0.5).contains("50%"));
     }
 }

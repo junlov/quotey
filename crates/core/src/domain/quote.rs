@@ -31,14 +31,29 @@ pub struct QuoteLine {
     pub product_id: ProductId,
     pub quantity: u32,
     pub unit_price: Decimal,
+    #[serde(default)]
+    pub discount_pct: f64,
+    #[serde(default)]
+    pub notes: Option<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Quote {
     pub id: QuoteId,
+    pub version: u32,
     pub status: QuoteStatus,
+    pub account_id: Option<String>,
+    pub deal_id: Option<String>,
+    pub currency: String,
+    pub term_months: Option<u32>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub valid_until: Option<String>,
+    pub notes: Option<String>,
+    pub created_by: String,
     pub lines: Vec<QuoteLine>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
 
 impl Quote {
@@ -80,15 +95,29 @@ mod tests {
     use super::{Quote, QuoteId, QuoteLine, QuoteStatus};
 
     fn quote(status: QuoteStatus) -> Quote {
+        let now = Utc::now();
         Quote {
             id: QuoteId("Q-1".to_string()),
+            version: 1,
             status,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "test".to_string(),
             lines: vec![QuoteLine {
                 product_id: ProductId("plan-pro".to_string()),
                 quantity: 1,
                 unit_price: Decimal::new(1000, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         }
     }
 

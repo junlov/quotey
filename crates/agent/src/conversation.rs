@@ -231,6 +231,8 @@ impl MappedLine {
             product_id: self.catalog_item.product_id.clone(),
             quantity: self.quantity,
             unit_price,
+            discount_pct: 0.0,
+            notes: None,
         }
     }
 }

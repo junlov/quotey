@@ -510,74 +510,83 @@ impl QuoteyMcpServer {
     async fn catalog_search(&self, Parameters(input): Parameters<CatalogSearchInput>) -> String {
         debug!(query = %input.query, "catalog_search called");
 
-        let items = vec![
-            ProductSummary {
-                id: "prod_pro_v2".to_string(),
-                sku: "PLAN-PRO-001".to_string(),
-                name: "Pro Plan".to_string(),
-                description: Some("Professional tier with advanced features".to_string()),
-                product_type: "configurable".to_string(),
-                category: Some("saas".to_string()),
-                active: true,
-            },
-            ProductSummary {
-                id: "prod_enterprise".to_string(),
-                sku: "PLAN-ENT-001".to_string(),
-                name: "Enterprise Plan".to_string(),
-                description: Some("Enterprise tier with SSO and premium support".to_string()),
-                product_type: "configurable".to_string(),
-                category: Some("saas".to_string()),
-                active: true,
-            },
-        ];
+        let repo = quotey_db::repositories::SqlProductRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::ProductRepository;
 
-        let filtered_items: Vec<_> = items
-            .into_iter()
-            .filter(|p| {
-                let matches_query = p.name.to_lowercase().contains(&input.query.to_lowercase())
-                    || p.sku.to_lowercase().contains(&input.query.to_lowercase());
-                let matches_category =
-                    input.category.as_ref().map(|c| p.category.as_ref() == Some(c)).unwrap_or(true);
-                let matches_active = !input.active_only || p.active;
-                matches_query && matches_category && matches_active
-            })
-            .take(input.limit as usize)
-            .collect();
+        match repo.search(&input.query, input.active_only, input.limit).await {
+            Ok(products) => {
+                let items: Vec<ProductSummary> = products
+                    .into_iter()
+                    .map(|p| ProductSummary {
+                        id: p.id.0,
+                        sku: p.sku,
+                        name: p.name,
+                        description: p.description,
+                        product_type: p.product_type.as_str().to_string(),
+                        category: p.family_id.map(|f| f.0),
+                        active: p.active,
+                    })
+                    .collect();
 
-        let result = CatalogSearchResult {
-            items: filtered_items.clone(),
-            pagination: PaginationInfo {
-                total: filtered_items.len() as u32,
-                page: input.page,
-                per_page: input.limit,
-                has_more: false,
-            },
-        };
+                let result = CatalogSearchResult {
+                    pagination: PaginationInfo {
+                        total: items.len() as u32,
+                        page: input.page,
+                        per_page: input.limit,
+                        has_more: false,
+                    },
+                    items,
+                };
 
-        serde_json::to_string_pretty(&result).unwrap_or_default()
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => {
+                warn!(error = %e, "catalog_search failed");
+                serde_json::json!({"error": e.to_string()}).to_string()
+            }
+        }
     }
 
     #[tool(description = "Get detailed product information by ID")]
     async fn catalog_get(&self, Parameters(input): Parameters<CatalogGetInput>) -> String {
         debug!(product_id = %input.product_id, "catalog_get called");
 
-        let result = CatalogGetResult {
-            id: input.product_id,
-            sku: "PLAN-PRO-001".to_string(),
-            name: "Pro Plan".to_string(),
-            description: Some("Professional tier with advanced features".to_string()),
-            product_type: "configurable".to_string(),
-            category: Some("saas".to_string()),
-            attributes: Some(serde_json::json!({
-                "seats": { "type": "integer", "min": 1, "max": 1000 },
-                "billing": { "type": "enum", "values": ["monthly", "annual"] }
-            })),
-            active: true,
-            created_at: "2025-01-15T10:00:00Z".to_string(),
-            updated_at: "2025-06-20T14:30:00Z".to_string(),
-        };
+        let repo = quotey_db::repositories::SqlProductRepository::new(self.db_pool.clone());
+        use quotey_core::domain::product::ProductId;
+        use quotey_db::repositories::ProductRepository;
 
-        serde_json::to_string_pretty(&result).unwrap_or_default()
+        match repo.find_by_id(&ProductId(input.product_id.clone())).await {
+            Ok(Some(p)) => {
+                let attrs_json = if p.attributes.is_empty() {
+                    None
+                } else {
+                    serde_json::to_value(&p.attributes).ok()
+                };
+
+                let result = CatalogGetResult {
+                    id: p.id.0,
+                    sku: p.sku,
+                    name: p.name,
+                    description: p.description,
+                    product_type: p.product_type.as_str().to_string(),
+                    category: p.family_id.map(|f| f.0),
+                    attributes: attrs_json,
+                    active: p.active,
+                    created_at: p.created_at.to_rfc3339(),
+                    updated_at: p.updated_at.to_rfc3339(),
+                };
+
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Ok(None) => {
+                serde_json::json!({"error": format!("Product '{}' not found", input.product_id)})
+                    .to_string()
+            }
+            Err(e) => {
+                warn!(error = %e, "catalog_get failed");
+                serde_json::json!({"error": e.to_string()}).to_string()
+            }
+        }
     }
 
     // Quote Tools
@@ -585,75 +594,182 @@ impl QuoteyMcpServer {
     async fn quote_create(&self, Parameters(input): Parameters<QuoteCreateInput>) -> String {
         debug!(account_id = %input.account_id, "quote_create called");
 
-        let result = QuoteCreateResult {
-            quote_id: format!("Q-{}", chrono::Utc::now().format("%Y-%m%d%H%M%S")),
+        use quotey_core::domain::product::ProductId;
+        use quotey_core::domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
+        use quotey_db::repositories::QuoteRepository;
+        use rust_decimal::Decimal;
+
+        let now = chrono::Utc::now();
+        let quote_id =
+            format!("Q-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000"));
+
+        // Look up product names from catalog
+        let product_repo = quotey_db::repositories::SqlProductRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::ProductRepository;
+
+        let mut line_items_result = Vec::new();
+        let mut quote_lines = Vec::new();
+
+        for (i, item) in input.line_items.iter().enumerate() {
+            let product_name =
+                match product_repo.find_by_id(&ProductId(item.product_id.clone())).await {
+                    Ok(Some(p)) => p.name,
+                    _ => format!("Product {}", item.product_id),
+                };
+
+            line_items_result.push(LineItemResult {
+                line_id: format!("{}-ql-{}", quote_id, i + 1),
+                product_id: item.product_id.clone(),
+                product_name: product_name.clone(),
+                quantity: item.quantity,
+            });
+
+            quote_lines.push(QuoteLine {
+                product_id: ProductId(item.product_id.clone()),
+                quantity: item.quantity,
+                unit_price: Decimal::ZERO, // Will be set by pricing engine
+                discount_pct: item.discount_pct,
+                notes: item.notes.clone(),
+            });
+        }
+
+        let quote = Quote {
+            id: QuoteId(quote_id.clone()),
             version: 1,
-            status: "draft".to_string(),
-            account_id: input.account_id,
-            currency: input.currency,
-            line_items: input
-                .line_items
-                .iter()
-                .enumerate()
-                .map(|(i, item)| LineItemResult {
-                    line_id: format!("ql_{:03}", i + 1),
-                    product_id: item.product_id.clone(),
-                    product_name: "Product Name".to_string(),
-                    quantity: item.quantity,
-                })
-                .collect(),
-            created_at: chrono::Utc::now().to_rfc3339(),
-            message: "Quote created successfully".to_string(),
+            status: QuoteStatus::Draft,
+            account_id: Some(input.account_id.clone()),
+            deal_id: input.deal_id,
+            currency: input.currency.clone(),
+            term_months: input.term_months,
+            start_date: input.start_date,
+            end_date: None,
+            valid_until: None,
+            notes: input.notes,
+            created_by: "agent:mcp".to_string(),
+            lines: quote_lines,
+            created_at: now,
+            updated_at: now,
         };
 
-        serde_json::to_string_pretty(&result).unwrap_or_default()
+        let repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
+        match repo.save(quote).await {
+            Ok(()) => {
+                let result = QuoteCreateResult {
+                    quote_id,
+                    version: 1,
+                    status: "draft".to_string(),
+                    account_id: input.account_id,
+                    currency: input.currency,
+                    line_items: line_items_result,
+                    created_at: now.to_rfc3339(),
+                    message: "Quote created successfully".to_string(),
+                };
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => {
+                warn!(error = %e, "quote_create failed");
+                serde_json::json!({"error": e.to_string()}).to_string()
+            }
+        }
     }
 
     #[tool(description = "Get detailed quote information")]
     async fn quote_get(&self, Parameters(input): Parameters<QuoteGetInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_get called");
 
-        let result = QuoteGetResult {
-            quote: QuoteInfo {
-                id: input.quote_id.clone(),
-                version: 1,
-                account_id: "acct_acme_001".to_string(),
-                account_name: Some("Acme Corp".to_string()),
-                deal_id: Some("deal_123".to_string()),
-                status: "priced".to_string(),
-                currency: "USD".to_string(),
-                term_months: Some(12),
-                start_date: Some("2026-03-01".to_string()),
-                end_date: Some("2027-02-28".to_string()),
-                valid_until: Some("2026-04-01".to_string()),
-                notes: Some("Initial quote for Q1".to_string()),
-                created_at: chrono::Utc::now().to_rfc3339(),
-                created_by: "agent:mcp".to_string(),
-            },
-            line_items: vec![QuoteLineInfo {
-                line_id: "ql_001".to_string(),
-                product_id: "prod_pro_v2".to_string(),
-                product_name: "Pro Plan".to_string(),
-                quantity: 150,
-                unit_price: Some(6.00),
-                discount_pct: 10.0,
-                discount_amount: Some(1440.00),
-                subtotal: Some(12960.00),
-            }],
-            pricing: if input.include_pricing {
-                Some(PricingInfo {
-                    subtotal: 14400.00,
-                    discount_total: 1440.00,
-                    tax_total: 0.00,
-                    total: 12960.00,
-                    priced_at: Some(chrono::Utc::now().to_rfc3339()),
-                })
-            } else {
-                None
-            },
-        };
+        use quotey_core::domain::quote::QuoteId;
+        use quotey_db::repositories::QuoteRepository;
 
-        serde_json::to_string_pretty(&result).unwrap_or_default()
+        let repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
+
+        match repo.find_by_id(&QuoteId(input.quote_id.clone())).await {
+            Ok(Some(q)) => {
+                use quotey_db::repositories::quote::quote_status_as_str;
+                let status = quote_status_as_str(&q.status).to_string();
+
+                // Look up product names for line items
+                let product_repo =
+                    quotey_db::repositories::SqlProductRepository::new(self.db_pool.clone());
+                use quotey_db::repositories::ProductRepository;
+
+                let mut line_items = Vec::new();
+                let mut subtotal_sum = 0.0f64;
+                let mut discount_sum = 0.0f64;
+
+                for (i, line) in q.lines.iter().enumerate() {
+                    let product_name = match product_repo.find_by_id(&line.product_id).await {
+                        Ok(Some(p)) => p.name,
+                        _ => format!("Product {}", line.product_id.0),
+                    };
+
+                    let unit_price_f64: f64 = line.unit_price.to_string().parse().unwrap_or(0.0);
+                    let line_subtotal = unit_price_f64 * line.quantity as f64;
+                    let line_discount = line_subtotal * line.discount_pct / 100.0;
+                    let line_net = line_subtotal - line_discount;
+
+                    subtotal_sum += line_subtotal;
+                    discount_sum += line_discount;
+
+                    line_items.push(QuoteLineInfo {
+                        line_id: format!("{}-ql-{}", q.id.0, i + 1),
+                        product_id: line.product_id.0.clone(),
+                        product_name,
+                        quantity: line.quantity,
+                        unit_price: Some(unit_price_f64),
+                        discount_pct: line.discount_pct,
+                        discount_amount: if line_discount > 0.0 {
+                            Some(line_discount)
+                        } else {
+                            None
+                        },
+                        subtotal: Some(line_net),
+                    });
+                }
+
+                let pricing = if input.include_pricing {
+                    Some(PricingInfo {
+                        subtotal: subtotal_sum,
+                        discount_total: discount_sum,
+                        tax_total: 0.0,
+                        total: subtotal_sum - discount_sum,
+                        priced_at: None,
+                    })
+                } else {
+                    None
+                };
+
+                let result = QuoteGetResult {
+                    quote: QuoteInfo {
+                        id: q.id.0,
+                        version: q.version,
+                        account_id: q.account_id.unwrap_or_default(),
+                        account_name: None, // TODO: look up from customer repo
+                        deal_id: q.deal_id,
+                        status,
+                        currency: q.currency,
+                        term_months: q.term_months,
+                        start_date: q.start_date,
+                        end_date: q.end_date,
+                        valid_until: q.valid_until,
+                        notes: q.notes,
+                        created_at: q.created_at.to_rfc3339(),
+                        created_by: q.created_by,
+                    },
+                    line_items,
+                    pricing,
+                };
+
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Ok(None) => {
+                serde_json::json!({"error": format!("Quote '{}' not found", input.quote_id)})
+                    .to_string()
+            }
+            Err(e) => {
+                warn!(error = %e, "quote_get failed");
+                serde_json::json!({"error": e.to_string()}).to_string()
+            }
+        }
     }
 
     #[tool(description = "Run pricing engine on a quote")]
@@ -702,27 +818,64 @@ impl QuoteyMcpServer {
     async fn quote_list(&self, Parameters(input): Parameters<QuoteListInput>) -> String {
         debug!("quote_list called");
 
-        let result = QuoteListResult {
-            items: vec![QuoteListItem {
-                id: "Q-2026-0042".to_string(),
-                version: 1,
-                account_id: "acct_acme_001".to_string(),
-                account_name: Some("Acme Corp".to_string()),
-                status: "priced".to_string(),
-                currency: "USD".to_string(),
-                total: Some(12960.00),
-                valid_until: Some("2026-04-01".to_string()),
-                created_at: chrono::Utc::now().to_rfc3339(),
-            }],
-            pagination: PaginationInfo {
-                total: 1,
-                page: input.page,
-                per_page: input.limit,
-                has_more: false,
-            },
-        };
+        use quotey_db::repositories::QuoteRepository;
 
-        serde_json::to_string_pretty(&result).unwrap_or_default()
+        let repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
+        let offset = (input.page.saturating_sub(1)) * input.limit;
+
+        match repo
+            .list(input.account_id.as_deref(), input.status.as_deref(), input.limit, offset)
+            .await
+        {
+            Ok(quotes) => {
+                use quotey_db::repositories::quote::quote_status_as_str;
+
+                let items: Vec<QuoteListItem> = quotes
+                    .iter()
+                    .map(|q| {
+                        let status = quote_status_as_str(&q.status).to_string();
+                        let total: f64 = q
+                            .lines
+                            .iter()
+                            .map(|l| {
+                                let unit: f64 = l.unit_price.to_string().parse().unwrap_or(0.0);
+                                let line_subtotal = unit * l.quantity as f64;
+                                let discount = line_subtotal * l.discount_pct / 100.0;
+                                line_subtotal - discount
+                            })
+                            .sum();
+
+                        QuoteListItem {
+                            id: q.id.0.clone(),
+                            version: q.version,
+                            account_id: q.account_id.clone().unwrap_or_default(),
+                            account_name: None,
+                            status,
+                            currency: q.currency.clone(),
+                            total: if total > 0.0 { Some(total) } else { None },
+                            valid_until: q.valid_until.clone(),
+                            created_at: q.created_at.to_rfc3339(),
+                        }
+                    })
+                    .collect();
+
+                let result = QuoteListResult {
+                    pagination: PaginationInfo {
+                        total: items.len() as u32,
+                        page: input.page,
+                        per_page: input.limit,
+                        has_more: items.len() as u32 >= input.limit,
+                    },
+                    items,
+                };
+
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => {
+                warn!(error = %e, "quote_list failed");
+                serde_json::json!({"error": e.to_string()}).to_string()
+            }
+        }
     }
 
     // Approval Tools

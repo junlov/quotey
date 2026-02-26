@@ -1502,6 +1502,7 @@ dependencies = [
  "quotey-db",
  "rand",
  "rmcp",
+ "rust_decimal",
  "serde",
  "serde_json",
  "thiserror",
@@ -1509,6 +1510,7 @@ dependencies = [
  "tokio-test",
  "tracing",
  "tracing-subscriber",
+ "uuid",
 ]
 
 [[package]]
