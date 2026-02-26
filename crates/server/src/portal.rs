@@ -83,9 +83,74 @@ pub struct PortalResponse {
     pub message: String,
 }
 
+/// Error category for user-facing portal errors
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PortalErrorCategory {
+    NotFound,
+    ValidationError,
+    PermissionDenied,
+    RateLimited,
+    ServiceUnavailable,
+    InternalError,
+}
+
 #[derive(Debug, Serialize)]
 pub struct PortalError {
     pub error: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub category: Option<PortalErrorCategory>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub recovery_hint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub retry_after_seconds: Option<u32>,
+}
+
+impl PortalError {
+    fn not_found(resource: &str) -> Self {
+        Self {
+            error: format!("{resource} not found"),
+            category: Some(PortalErrorCategory::NotFound),
+            recovery_hint: Some("Check the link or contact the sender for a new link.".to_string()),
+            retry_after_seconds: None,
+        }
+    }
+
+    fn validation(field: &str, reason: &str) -> Self {
+        Self {
+            error: format!("Invalid {field}: {reason}"),
+            category: Some(PortalErrorCategory::ValidationError),
+            recovery_hint: Some(format!("Correct the {field} and try again.")),
+            retry_after_seconds: None,
+        }
+    }
+
+    fn expired() -> Self {
+        Self {
+            error: "This link has expired".to_string(),
+            category: Some(PortalErrorCategory::NotFound),
+            recovery_hint: Some("Contact the sender for a new link.".to_string()),
+            retry_after_seconds: None,
+        }
+    }
+
+    fn rate_limited(retry_after: u32) -> Self {
+        Self {
+            error: "Too many requests".to_string(),
+            category: Some(PortalErrorCategory::RateLimited),
+            recovery_hint: Some("Please wait before trying again.".to_string()),
+            retry_after_seconds: Some(retry_after),
+        }
+    }
+
+    fn service_unavailable(service: &str) -> Self {
+        Self {
+            error: format!("{service} temporarily unavailable"),
+            category: Some(PortalErrorCategory::ServiceUnavailable),
+            recovery_hint: Some("Wait a moment and try again.".to_string()),
+            retry_after_seconds: Some(5),
+        }
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -549,7 +614,7 @@ async fn download_quote_pdf(
         error!("PDF generator not initialized");
         (
             StatusCode::SERVICE_UNAVAILABLE,
-            Json(PortalError { error: "PDF generation not available".to_string() }),
+            Json(PortalError::service_unavailable("PDF generator")),
         )
     })?;
 
@@ -572,7 +637,7 @@ async fn download_quote_pdf(
             error!(error = %e, quote_id = %quote_id, "PDF generation failed");
             Err((
                 StatusCode::INTERNAL_SERVER_ERROR,
-                Json(PortalError { error: format!("PDF generation failed: {}", e) }),
+                Json(PortalError::service_unavailable("PDF generator")),
             ))
         }
     }
@@ -596,11 +661,11 @@ async fn fetch_quote_for_pdf(
     .await
     .map_err(|e| match e {
         sqlx::Error::RowNotFound => {
-            (StatusCode::NOT_FOUND, Json(PortalError { error: "Quote not found".to_string() }))
+            (StatusCode::NOT_FOUND, Json(PortalError::not_found("quote")))
         }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(PortalError { error: format!("Database error: {}", e) }),
+            Json(PortalError::service_unavailable("database")),
         ),
     })?;
 
@@ -625,7 +690,7 @@ async fn fetch_quote_for_pdf(
         error!(error = %e, "Failed to fetch quote lines");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Json(PortalError { error: "Failed to fetch quote data".to_string() }),
+            Json(PortalError::service_unavailable("database")),
         )
     })?;
 
@@ -884,7 +949,7 @@ async fn approve_quote(
     if approver_name.is_empty() || approver_email.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(PortalError { error: "approver name and email are required".to_string() }),
+            Json(PortalError::validation("approver info", "name and email are required")),
         ));
     }
 
@@ -953,7 +1018,7 @@ async fn reject_quote(
     if reason.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(PortalError { error: "rejection reason is required".to_string() }),
+            Json(PortalError::validation("reason", "rejection reason is required")),
         ));
     }
 
@@ -1017,7 +1082,7 @@ async fn add_comment(
     if text.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(PortalError { error: "comment text is required".to_string() }),
+            Json(PortalError::validation("comment text", "comment text is required")),
         ));
     }
 
@@ -1036,7 +1101,7 @@ async fn add_comment(
         if parent_quote_id.is_none() {
             return Err((
                 StatusCode::NOT_FOUND,
-                Json(PortalError { error: "parent comment not found for this quote".to_string() }),
+                Json(PortalError::not_found("parent comment")),
             ));
         }
     }
@@ -1098,10 +1163,10 @@ async fn list_comments(
     let comments: Vec<CommentResponse> = rows
         .into_iter()
         .map(|row| {
-            let map_err = |err| {
+            let map_err = |_err| {
                 (
                     StatusCode::INTERNAL_SERVER_ERROR,
-                    Json(PortalError { error: format!("failed to load comments: {err}") }),
+                    Json(PortalError::service_unavailable("comment loader")),
                 )
             };
 
@@ -1144,7 +1209,7 @@ async fn add_line_comment(
     if text.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(PortalError { error: "comment text is required".to_string() }),
+            Json(PortalError::validation("comment text", "comment text is required")),
         ));
     }
 
@@ -1158,7 +1223,7 @@ async fn add_line_comment(
     if line_exists.is_none() {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(PortalError { error: format!("quote line `{line_id}` not found") }),
+            Json(PortalError::not_found("quote line")),
         ));
     }
 
@@ -1174,7 +1239,7 @@ async fn add_line_comment(
         if parent_quote_id.is_none() {
             return Err((
                 StatusCode::NOT_FOUND,
-                Json(PortalError { error: "parent comment not found for this quote".to_string() }),
+                Json(PortalError::not_found("parent comment")),
             ));
         }
     }
@@ -1232,7 +1297,7 @@ async fn create_link(
     if exists.is_none() {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(PortalError { error: format!("quote `{quote_id}` not found") }),
+            Json(PortalError::not_found("quote")),
         ));
     }
 
@@ -1300,7 +1365,7 @@ async fn revoke_link(
     if token.is_empty() {
         return Err((
             StatusCode::BAD_REQUEST,
-            Json(PortalError { error: "token is required".to_string() }),
+            Json(PortalError::validation("token", "token is required")),
         ));
     }
 
@@ -1313,7 +1378,7 @@ async fn revoke_link(
     if result.rows_affected() == 0 {
         return Err((
             StatusCode::NOT_FOUND,
-            Json(PortalError { error: "link not found or already revoked".to_string() }),
+            Json(PortalError::not_found("portal link")),
         ));
     }
 
@@ -1400,19 +1465,19 @@ async fn resolve_quote_by_token(
         if revoked {
             return Err((
                 StatusCode::GONE,
-                Json(PortalError { error: "this quote link has been revoked".to_string() }),
+                Json(PortalError { error: "this quote link has been revoked".to_string(), category: Some(PortalErrorCategory::NotFound), recovery_hint: Some("Contact the sender for a new link.".to_string()), retry_after_seconds: None }),
             ));
         }
         return Err((
             StatusCode::GONE,
-            Json(PortalError { error: "this quote link has expired".to_string() }),
+            Json(PortalError::expired()),
         ));
     }
 
     warn!(token = %token, "portal: invalid or expired quote token");
     Err((
         StatusCode::NOT_FOUND,
-        Json(PortalError { error: "quote not found or link has expired".to_string() }),
+        Json(PortalError::not_found("quote")),
     ))
 }
 
@@ -1453,7 +1518,7 @@ fn db_error(error: sqlx::Error) -> (StatusCode, Json<PortalError>) {
     error!(error = %error, "portal database error");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(PortalError { error: "an internal error occurred".to_string() }),
+        Json(PortalError::service_unavailable("database")),
     )
 }
 

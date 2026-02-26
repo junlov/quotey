@@ -81,6 +81,7 @@ This document captures the current state of Quotey UX before any UI-facing chang
 **Location**: Slack handlers, Portal async operations
 **Description**: No standardized loading, empty, or error states with recovery actions.
 **Impact**: Users see spinners or generic errors with no clear path forward.
+**Status**: ✅ **RESOLVED** - Added `LoadingState` and `ErrorCategory` enums to Slack blocks, enhanced `PortalError` with categories and recovery hints, updated portal handlers to use new constructors, and updated templates to show recovery hints.
 **Evidence**: Task `quotey-ux-001-13` addresses this.
 
 ### F-005: No Explicit Assumption Cards

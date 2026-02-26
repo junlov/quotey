@@ -1547,11 +1547,14 @@
                     // Reload after a short delay to show success state
                     setTimeout(() => window.location.reload(), 1500);
                 } else {
-                    showToast(data.message || 'Failed to approve quote. Please try again.', 'error');
+                    const errorMsg = data.recovery_hint 
+                        ? `${data.message || 'Error'} ${data.recovery_hint}` 
+                        : (data.message || 'Failed to approve quote. Please try again.');
+                    showToast(errorMsg, 'error');
                 }
             } catch (error) {
                 console.error('Error:', error);
-                showToast('An error occurred. Please try again.', 'error');
+                showToast('Connection error. Please check your network and try again.', 'error');
             } finally {
                 setLoading(submitBtn, false);
             }
@@ -1583,11 +1586,14 @@
                     closeModal('rejectModal');
                     setTimeout(() => window.location.reload(), 1500);
                 } else {
-                    showToast(data.message || 'Failed to submit response. Please try again.', 'error');
+                    const errorMsg = data.recovery_hint 
+                        ? `${data.message || 'Error'} ${data.recovery_hint}` 
+                        : (data.message || 'Failed to submit response. Please try again.');
+                    showToast(errorMsg, 'error');
                 }
             } catch (error) {
                 console.error('Error:', error);
-                showToast('An error occurred. Please try again.', 'error');
+                showToast('Connection error. Please check your network and try again.', 'error');
             } finally {
                 setLoading(submitBtn, false);
             }
@@ -1643,11 +1649,14 @@
                     
                     showToast('Comment posted successfully!', 'success');
                 } else {
-                    showToast(data.message || 'Failed to post comment. Please try again.', 'error');
+                    const errorMsg = data.recovery_hint 
+                        ? `${data.message || 'Error'} ${data.recovery_hint}` 
+                        : (data.message || 'Failed to post comment. Please try again.');
+                    showToast(errorMsg, 'error');
                 }
             } catch (error) {
                 console.error('Error:', error);
-                showToast('An error occurred. Please try again.', 'error');
+                showToast('Connection error. Please check your network and try again.', 'error');
             } finally {
                 setLoading(submitBtn, false);
             }
