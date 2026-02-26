@@ -8,7 +8,7 @@ mod scoring;
 mod types;
 
 pub use engine::SuggestionEngine;
-pub use scoring::{ScoringWeights, ScoreCalculator};
+pub use scoring::{ScoreCalculator, ScoringWeights};
 pub use types::*;
 
 use crate::errors::DomainError;

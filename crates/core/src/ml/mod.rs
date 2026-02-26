@@ -442,15 +442,29 @@ mod tests {
     use rust_decimal::Decimal;
 
     fn create_test_quote(product_id: &str, quantity: u32, unit_price: i64) -> Quote {
+        let now = Utc::now();
         Quote {
             id: crate::domain::quote::QuoteId("Q-TEST-001".to_string()),
+            version: 1,
             status: crate::domain::quote::QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "system".to_string(),
             lines: vec![QuoteLine {
                 product_id: ProductId(product_id.to_string()),
                 quantity,
                 unit_price: Decimal::new(unit_price, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         }
     }
 
@@ -570,22 +584,38 @@ mod tests {
 
     #[test]
     fn mixed_tiers_detection_works() {
+        let now = Utc::now();
         let quote = Quote {
             id: crate::domain::quote::QuoteId("Q-MIXED".to_string()),
+            version: 1,
             status: crate::domain::quote::QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "system".to_string(),
             lines: vec![
                 QuoteLine {
                     product_id: ProductId("enterprise".to_string()),
                     quantity: 1,
                     unit_price: Decimal::new(100000, 2),
+                    discount_pct: 0.0,
+                    notes: None,
                 },
                 QuoteLine {
                     product_id: ProductId("starter".to_string()),
                     quantity: 1,
                     unit_price: Decimal::new(10000, 2),
+                    discount_pct: 0.0,
+                    notes: None,
                 },
             ],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         };
         
         let features = QuoteFeatures::from_quote(&quote);

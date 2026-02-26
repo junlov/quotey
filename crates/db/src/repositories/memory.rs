@@ -38,6 +38,36 @@ impl QuoteRepository for InMemoryQuoteRepository {
         quotes.insert(quote.id.0.clone(), quote);
         Ok(())
     }
+
+    async fn list(
+        &self,
+        account_id: Option<&str>,
+        status: Option<&str>,
+        limit: u32,
+        _offset: u32,
+    ) -> Result<Vec<Quote>, RepositoryError> {
+        let quotes = self.quotes.read().await;
+        let results: Vec<Quote> = quotes
+            .values()
+            .filter(|q| {
+                if let Some(aid) = account_id {
+                    if q.account_id.as_deref() != Some(aid) {
+                        return false;
+                    }
+                }
+                if let Some(s) = status {
+                    let status_str = crate::repositories::quote::quote_status_as_str(&q.status);
+                    if status_str != s {
+                        return false;
+                    }
+                }
+                true
+            })
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        Ok(results)
+    }
 }
 
 #[derive(Default)]
@@ -425,15 +455,29 @@ mod tests {
     #[tokio::test]
     async fn in_memory_quote_repo_round_trip() -> TestResult<()> {
         let repo = InMemoryQuoteRepository::default();
+        let now = Utc::now();
         let quote = Quote {
             id: QuoteId("Q-1".to_string()),
+            version: 1,
             status: QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "test".to_string(),
             lines: vec![QuoteLine {
                 product_id: ProductId("plan-pro".to_string()),
                 quantity: 3,
                 unit_price: Decimal::new(1000, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         };
 
         repo.save(quote.clone()).await.map_err(|error| format!("save quote: {error}"))?;

@@ -5,9 +5,9 @@ use thiserror::Error;
 
 use crate::blocks::{self, MessageTemplate};
 
-const SUPPORTED_QUOTE_VERBS: [&str; 11] = [
+const SUPPORTED_QUOTE_VERBS: [&str; 12] = [
     "help", "new", "status", "list", "audit", "edit", "add-line", "discount", "send", "clone",
-    "simulate",
+    "simulate", "suggest",
 ];
 
 fn suggest_supported_verb(input: &str) -> Option<&'static str> {
@@ -80,6 +80,7 @@ pub enum QuoteCommand {
     Send { quote_id: Option<String>, freeform_args: String },
     Clone { quote_id: Option<String>, freeform_args: String },
     Simulate { request: SimulationRequest },
+    Suggest { quote_id: Option<String>, customer_hint: Option<String>, freeform_args: String },
     Help,
     Unknown { verb: String, freeform_args: String },
 }
@@ -259,6 +260,13 @@ pub fn infer_thread_quote_command(input: &str) -> Option<String> {
         return Some(format!("clone {quote_id}"));
     }
 
+    if is_suggest_request(&normalized) {
+        if quote_id.is_empty() {
+            return Some("suggest".to_owned());
+        }
+        return Some(format!("suggest {quote_id}"));
+    }
+
     None
 }
 
@@ -406,6 +414,15 @@ fn is_clone_request(normalized: &str) -> bool {
         || normalized.contains("copy quote")
 }
 
+fn is_suggest_request(normalized: &str) -> bool {
+    normalized.starts_with("suggest")
+        || normalized.starts_with("recommend")
+        || normalized.contains("suggestions")
+        || normalized.contains("what should i add")
+        || normalized.contains("product recommendation")
+        || (token_matches(normalized, "similar") && token_matches(normalized, "products"))
+}
+
 fn is_new_quote_request(normalized: &str) -> bool {
     normalized.starts_with("new")
         || normalized.starts_with("start")
@@ -513,6 +530,9 @@ where
                 self.service.clone_quote(quote_id, freeform_args, &envelope)
             }
             QuoteCommand::Simulate { request } => self.service.simulate_quote(request, &envelope),
+            QuoteCommand::Suggest { quote_id, customer_hint, freeform_args } => {
+                self.service.suggest_products(quote_id, customer_hint, freeform_args, &envelope)
+            }
             QuoteCommand::Help => Ok(blocks::help_message()),
             QuoteCommand::Unknown { verb, .. } => {
                 let suggestion = suggest_supported_verb(&verb)
@@ -597,6 +617,14 @@ pub trait QuoteCommandService: Send + Sync {
     fn simulate_quote(
         &self,
         request: SimulationRequest,
+        envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError>;
+
+    fn suggest_products(
+        &self,
+        quote_id: Option<String>,
+        customer_hint: Option<String>,
+        freeform_args: String,
         envelope: &CommandEnvelope,
     ) -> Result<MessageTemplate, CommandRouteError>;
 }
@@ -769,6 +797,27 @@ impl QuoteCommandService for NoopQuoteCommandService {
             &_envelope.request_id,
         ))
     }
+
+    fn suggest_products(
+        &self,
+        quote_id: Option<String>,
+        customer_hint: Option<String>,
+        freeform_args: String,
+        _envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError> {
+        let target = quote_id.as_deref().or(customer_hint.as_deref()).unwrap_or("unspecified");
+        let detail = if freeform_args.is_empty() {
+            "suggestion request captured".to_owned()
+        } else {
+            freeform_args
+        };
+        Ok(blocks::preview_mode_message(
+            "/quote suggest",
+            Some(target),
+            &format!("product suggestions requested · {detail}"),
+            &_envelope.request_id,
+        ))
+    }
 }
 
 fn classify_quote_command(verb: &str, freeform_args: String) -> QuoteCommand {
@@ -809,6 +858,11 @@ fn classify_quote_command(verb: &str, freeform_args: String) -> QuoteCommand {
             freeform_args,
         },
         "simulate" => QuoteCommand::Simulate { request: parse_simulation_request(freeform_args) },
+        "suggest" | "recommend" | "suggestions" => {
+            let quote_id = freeform_args.split_whitespace().find_map(parse_quote_id_token);
+            let customer_hint = extract_account_hint("new", &freeform_args);
+            QuoteCommand::Suggest { quote_id, customer_hint, freeform_args }
+        }
         "what" if freeform_args.to_ascii_lowercase().contains("if") => {
             QuoteCommand::Simulate { request: parse_simulation_request(freeform_args) }
         }
@@ -1082,6 +1136,38 @@ pub fn handle_block_action(
             Ok(blocks::quote_status_message(
                 &quote_id,
                 "opening Deal DNA detail card. Full detail view is queued through structured decision context.",
+            ))
+        }
+        value if value.starts_with("suggest.add.") => {
+            let product_id = value_pairs
+                .as_ref()
+                .and_then(|pairs| pairs.get("product"))
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_owned());
+            let sku = value_pairs
+                .as_ref()
+                .and_then(|pairs| pairs.get("sku"))
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_owned());
+            Ok(blocks::quote_status_message(
+                &quote_id,
+                &format!(
+                    "suggestion accepted: product `{product_id}` (SKU `{sku}`) queued for addition. \
+                     Use `/quote add-line {quote_id} {sku}:+1` to confirm the line item."
+                ),
+            ))
+        }
+        value if value.starts_with("suggest.details.") => {
+            let product_id = value_pairs
+                .as_ref()
+                .and_then(|pairs| pairs.get("product"))
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_owned());
+            Ok(blocks::quote_status_message(
+                &quote_id,
+                &format!(
+                    "loading product detail for `{product_id}`. Catalog data is being retrieved."
+                ),
             ))
         }
         _ => Ok(blocks::error_message(
@@ -1828,6 +1914,17 @@ mod tests {
                 self.calls.lock().expect("lock").push("clone");
                 Ok(crate::blocks::help_message())
             }
+
+            fn suggest_products(
+                &self,
+                _quote_id: Option<String>,
+                _customer_hint: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("suggest");
+                Ok(crate::blocks::help_message())
+            }
         }
 
         let router = CommandRouter::new(RecordingService::default());
@@ -1842,6 +1939,7 @@ mod tests {
             ("discount", "Q-2026-1111 25"),
             ("send", "Q-2026-1111"),
             ("clone", "Q-2026-1111"),
+            ("suggest", "Q-2026-1111"),
         ] {
             router
                 .route(CommandEnvelope {
@@ -1863,7 +1961,7 @@ mod tests {
             &*calls,
             &[
                 "new", "status", "list", "simulate", "audit", "edit", "add-line", "discount",
-                "send", "clone"
+                "send", "clone", "suggest"
             ]
         );
     }

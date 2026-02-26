@@ -51,6 +51,13 @@ pub enum RepositoryError {
 pub trait QuoteRepository: Send + Sync {
     async fn find_by_id(&self, id: &QuoteId) -> Result<Option<Quote>, RepositoryError>;
     async fn save(&self, quote: Quote) -> Result<(), RepositoryError>;
+    async fn list(
+        &self,
+        account_id: Option<&str>,
+        status: Option<&str>,
+        limit: u32,
+        offset: u32,
+    ) -> Result<Vec<Quote>, RepositoryError>;
 }
 
 #[async_trait]

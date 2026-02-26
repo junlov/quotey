@@ -192,15 +192,29 @@ mod tests {
     }
 
     fn quote_fixture() -> Quote {
+        let now = Utc::now();
         Quote {
             id: QuoteId("Q-INT-0001".to_string()),
+            version: 1,
             status: QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "system".to_string(),
             lines: vec![QuoteLine {
                 product_id: ProductId("plan-pro".to_string()),
                 quantity: 2,
                 unit_price: Decimal::new(25_000, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         }
     }
 }

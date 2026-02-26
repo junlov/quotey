@@ -377,17 +377,35 @@ mod tests {
     }
 
     fn quote_with_lines(lines: Vec<QuoteLine>) -> Quote {
+        let now = Utc::now();
         Quote {
             id: QuoteId("Q-collab-1".to_string()),
+            version: 1,
             status: QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "test".to_string(),
             lines,
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         }
     }
 
     fn line(product_id: &str, quantity: u32, unit_price_cents: i64) -> QuoteLine {
         let unit_price = cents_to_decimal(unit_price_cents);
-        QuoteLine { product_id: ProductId(product_id.to_string()), quantity, unit_price }
+        QuoteLine {
+            product_id: ProductId(product_id.to_string()),
+            quantity,
+            unit_price,
+            discount_pct: 0.0,
+            notes: None,
+        }
     }
 
     fn cents_to_decimal(cents: i64) -> Decimal {

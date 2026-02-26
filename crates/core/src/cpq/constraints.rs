@@ -120,16 +120,22 @@ mod tests {
                     product_id: ProductId("plan-pro".to_owned()),
                     quantity: 0,
                     unit_price: Decimal::ZERO,
+                    discount_pct: 0.0,
+                    notes: None,
                 },
                 QuoteLine {
                     product_id: ProductId("plan-pro".to_owned()),
                     quantity: 1,
                     unit_price: Decimal::NEGATIVE_ONE,
+                    discount_pct: 0.0,
+                    notes: None,
                 },
                 QuoteLine {
                     product_id: ProductId(" ".to_owned()),
                     quantity: 1,
                     unit_price: Decimal::new(1000, 2),
+                    discount_pct: 0.0,
+                    notes: None,
                 },
             ],
         };

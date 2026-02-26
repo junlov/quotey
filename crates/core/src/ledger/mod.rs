@@ -318,15 +318,29 @@ mod tests {
     }
 
     fn sample_quote(quote_id: &str, quantity: u32) -> Quote {
+        let now = Utc::now();
         Quote {
             id: QuoteId(quote_id.to_string()),
+            version: 1,
             status: QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "test".to_string(),
             lines: vec![QuoteLine {
                 product_id: ProductId("starter".to_string()),
                 quantity,
                 unit_price: Decimal::new(9_999, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         }
     }
 }

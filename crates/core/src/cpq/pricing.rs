@@ -108,22 +108,38 @@ mod tests {
 
     #[test]
     fn pricing_trace_includes_stepwise_calculation() {
+        let now = Utc::now();
         let quote = Quote {
             id: QuoteId("Q-2026-4000".to_owned()),
+            version: 1,
             status: QuoteStatus::Draft,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "system".to_string(),
             lines: vec![
                 QuoteLine {
                     product_id: ProductId("plan-pro".to_owned()),
                     quantity: 2,
                     unit_price: Decimal::new(1000, 2),
+                    discount_pct: 0.0,
+                    notes: None,
                 },
                 QuoteLine {
                     product_id: ProductId("addon".to_owned()),
                     quantity: 1,
                     unit_price: Decimal::new(2500, 2),
+                    discount_pct: 0.0,
+                    notes: None,
                 },
             ],
-            created_at: Utc::now(),
+            created_at: now,
+            updated_at: now,
         };
 
         let result = price_quote_with_trace(&quote, "USD");

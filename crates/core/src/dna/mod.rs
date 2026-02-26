@@ -472,11 +472,15 @@ mod tests {
                 product_id: ProductId("plan-enterprise".to_owned()),
                 quantity: 100,
                 unit_price: Decimal::new(15_000, 2),
+                discount_pct: 0.0,
+                notes: None,
             },
             QuoteLine {
                 product_id: ProductId("support-premium".to_owned()),
                 quantity: 1,
                 unit_price: Decimal::new(2_500, 2),
+                discount_pct: 0.0,
+                notes: None,
             },
         ]);
         let quote_b = quote_fixture(vec![
@@ -484,11 +488,15 @@ mod tests {
                 product_id: ProductId("support-premium".to_owned()),
                 quantity: 1,
                 unit_price: Decimal::new(2_500, 2),
+                discount_pct: 0.0,
+                notes: None,
             },
             QuoteLine {
                 product_id: ProductId("plan-enterprise".to_owned()),
                 quantity: 100,
                 unit_price: Decimal::new(15_000, 2),
+                discount_pct: 0.0,
+                notes: None,
             },
         ]);
 
@@ -545,11 +553,15 @@ mod tests {
                 product_id: ProductId("support-premium".to_owned()),
                 quantity: 1,
                 unit_price: Decimal::new(2_500, 2),
+                discount_pct: 0.0,
+                notes: None,
             },
             QuoteLine {
                 product_id: ProductId("plan-enterprise".to_owned()),
                 quantity: 100,
                 unit_price: Decimal::new(15_000, 2),
+                discount_pct: 0.0,
+                notes: None,
             },
         ];
         let configuration = configuration_from_lines(&lines);
@@ -700,6 +712,8 @@ mod tests {
                 product_id: ProductId("plan-enterprise".to_owned()),
                 quantity: 10,
                 unit_price: Decimal::new(15_000, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
         );
         let transition = flow_engine
@@ -730,6 +744,8 @@ mod tests {
                 product_id: ProductId("plan-pro".to_owned()),
                 quantity: 5,
                 unit_price: Decimal::new(12_000, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
         );
         let updated = quote_with_status(
@@ -739,6 +755,8 @@ mod tests {
                 product_id: ProductId("plan-pro".to_owned()),
                 quantity: 7,
                 unit_price: Decimal::new(12_000, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
         );
 
@@ -766,6 +784,8 @@ mod tests {
                 product_id: ProductId("plan-growth".to_owned()),
                 quantity: 3,
                 unit_price: Decimal::new(8_500, 2),
+                discount_pct: 0.0,
+                notes: None,
             }],
         );
 
@@ -805,6 +825,8 @@ mod tests {
                     product_id: ProductId("plan-pro".to_owned()),
                     quantity: 2,
                     unit_price: Decimal::new(5_000, 2),
+                    discount_pct: 0.0,
+                    notes: None,
                 }],
             ),
             quote_with_status(
@@ -814,6 +836,8 @@ mod tests {
                     product_id: ProductId("plan-pro".to_owned()),
                     quantity: 2,
                     unit_price: Decimal::new(5_000, 2),
+                    discount_pct: 0.0,
+                    notes: None,
                 }],
             ),
             quote_with_status(
@@ -823,6 +847,8 @@ mod tests {
                     product_id: ProductId("plan-enterprise".to_owned()),
                     quantity: 1,
                     unit_price: Decimal::new(25_000, 2),
+                    discount_pct: 0.0,
+                    notes: None,
                 }],
             ),
         ];
@@ -841,7 +867,24 @@ mod tests {
     }
 
     fn quote_with_status(id: &str, status: QuoteStatus, lines: Vec<QuoteLine>) -> Quote {
-        Quote { id: QuoteId(id.to_owned()), status, lines, created_at: Utc::now() }
+        let now = Utc::now();
+        Quote {
+            id: QuoteId(id.to_owned()),
+            version: 1,
+            status,
+            account_id: None,
+            deal_id: None,
+            currency: "USD".to_string(),
+            term_months: None,
+            start_date: None,
+            end_date: None,
+            valid_until: None,
+            notes: None,
+            created_by: "system".to_string(),
+            lines,
+            created_at: now,
+            updated_at: now,
+        }
     }
 
     fn outcome(
