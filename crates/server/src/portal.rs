@@ -226,10 +226,12 @@ async fn view_quote_page(
         .await
         .map_err(|(status, err)| (status, Html(format!("<h1>Error</h1><p>{}</p>", err.0.error))))?;
 
-    // Fetch quote details
+    // Fetch quote details with assumption tracking
     let quote_row = sqlx::query(
         "SELECT id, status, version, currency, term_months, valid_until,
-                created_at, updated_at, created_by, account_id
+                created_at, updated_at, created_by, account_id,
+                currency_explicit, tax_rate_explicit, tax_rate_value,
+                payment_terms, payment_terms_explicit, billing_country, billing_country_explicit
          FROM quote WHERE id = ?",
     )
     .bind(&quote_id)
@@ -386,6 +388,60 @@ async fn view_quote_page(
         .map(|expires_at| (expires_at - Utc::now()).num_days() <= 3)
         .unwrap_or(false);
 
+    // Extract assumption flags from database
+    let currency_explicit: bool = quote_row.try_get::<i64, _>("currency_explicit").unwrap_or(0) == 1;
+    let tax_rate_explicit: bool = quote_row.try_get::<i64, _>("tax_rate_explicit").unwrap_or(0) == 1;
+    let tax_rate_value: f64 = quote_row.try_get::<f64, _>("tax_rate_value").unwrap_or(0.0);
+    let payment_terms: String = quote_row.try_get::<String, _>("payment_terms").unwrap_or_else(|_| "net_30".to_string());
+    let payment_terms_explicit: bool = quote_row.try_get::<i64, _>("payment_terms_explicit").unwrap_or(0) == 1;
+    let billing_country: Option<String> = quote_row.try_get::<Option<String>, _>("billing_country").unwrap_or(None);
+    let billing_country_explicit: bool = quote_row.try_get::<i64, _>("billing_country_explicit").unwrap_or(0) == 1;
+    let currency: String = quote_row.try_get::<String, _>("currency").unwrap_or_else(|_| "USD".to_string());
+
+    // Build assumptions list for display
+    let mut assumptions: Vec<serde_json::Value> = Vec::new();
+    if !currency_explicit {
+        assumptions.push(serde_json::json!({
+            "field": "currency",
+            "value": &currency,
+            "label": "Currency",
+            "description": format!("Using default currency: {}", currency)
+        }));
+    }
+    if !tax_rate_explicit {
+        assumptions.push(serde_json::json!({
+            "field": "tax_rate",
+            "value": format!("{:.0}%", tax_rate_value * 100.0),
+            "label": "Tax Rate",
+            "description": "Tax not applicable or not configured"
+        }));
+    }
+    if !payment_terms_explicit {
+        let payment_terms_display = match payment_terms.as_str() {
+            "net_30" => "Net 30",
+            "net_60" => "Net 60",
+            "net_90" => "Net 90",
+            "upfront" => "Upfront",
+            _ => "Net 30",
+        };
+        assumptions.push(serde_json::json!({
+            "field": "payment_terms",
+            "value": payment_terms_display,
+            "label": "Payment Terms",
+            "description": format!("Using default payment terms: {}", payment_terms_display)
+        }));
+    }
+    if billing_country.is_none() || !billing_country_explicit {
+        assumptions.push(serde_json::json!({
+            "field": "billing_country",
+            "value": billing_country.as_deref().unwrap_or("Not specified"),
+            "label": "Billing Country",
+            "description": "Billing country not specified - may affect tax calculation"
+        }));
+    }
+
+    let has_assumptions = !assumptions.is_empty();
+
     context.insert("quote", &serde_json::json!({
         "quote_id": quote_id,
         "token": token,
@@ -394,14 +450,30 @@ async fn view_quote_page(
         "created_at": quote_row.try_get::<String, _>("created_at").unwrap_or_default(),
         "valid_until": valid_until,
         "term_months": quote_row.try_get::<i64, _>("term_months").unwrap_or(12),
-        "payment_terms": "Net 30",
+        "currency": currency,
+        "payment_terms": match payment_terms.as_str() {
+            "net_30" => "Net 30",
+            "net_60" => "Net 60",
+            "net_90" => "Net 90",
+            "upfront" => "Upfront",
+            _ => "Net 30",
+        },
+        "payment_terms_raw": payment_terms,
         "subtotal": format_price(final_subtotal),
         "discount_total": if final_discount > 0.0 { format_price(final_discount) } else { "".to_string() },
-        "tax_rate": format!("{:.0}%", 0.0),
+        "tax_rate": format!("{:.0}%", tax_rate_value * 100.0),
+        "tax_rate_raw": tax_rate_value,
         "tax_amount": if final_tax > 0.0 { format_price(final_tax) } else { "".to_string() },
         "total": format_price(final_total),
         "lines": lines,
         "expires_soon": expires_soon,
+        "billing_country": billing_country,
+        "assumptions": assumptions,
+        "has_assumptions": has_assumptions,
+        "currency_explicit": currency_explicit,
+        "tax_rate_explicit": tax_rate_explicit,
+        "payment_terms_explicit": payment_terms_explicit,
+        "billing_country_explicit": billing_country_explicit,
     }));
 
     context.insert(

@@ -141,6 +141,7 @@
 
         .status-draft { background: var(--warning-light); color: #d97706; }
         .status-sent { background: var(--info-light); color: var(--info-color); }
+        .status-pending { background: #fef3c7; color: #d97706; }
         .status-approved { background: var(--success-light); color: var(--success-color); }
         .status-declined { background: var(--danger-light); color: var(--danger-color); }
         .status-expired { background: #f3f4f6; color: var(--text-light); }
@@ -424,6 +425,101 @@
 
         .font-mono {
             font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
+        }
+
+        /* Assumptions Card */
+        .assumptions-card {
+            margin: 24px;
+            padding: 20px;
+            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
+            border: 1px solid #f59e0b;
+            border-radius: var(--radius);
+            border-left: 4px solid #f59e0b;
+        }
+
+        .assumptions-card.assumptions-resolved {
+            background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
+            border-color: #10b981;
+            border-left-color: #10b981;
+        }
+
+        .assumptions-header {
+            display: flex;
+            align-items: center;
+            gap: 10px;
+            margin-bottom: 12px;
+            font-weight: 600;
+            color: #92400e;
+        }
+
+        .assumptions-card.assumptions-resolved .assumptions-header {
+            color: #065f46;
+        }
+
+        .assumptions-list {
+            list-style: none;
+            margin: 0;
+            padding: 0;
+        }
+
+        .assumption-item {
+            display: flex;
+            align-items: flex-start;
+            gap: 10px;
+            padding: 8px 0;
+            border-bottom: 1px solid rgba(245, 158, 11, 0.2);
+        }
+
+        .assumptions-card.assumptions-resolved .assumption-item {
+            border-bottom-color: rgba(16, 185, 129, 0.2);
+        }
+
+        .assumption-item:last-child {
+            border-bottom: none;
+        }
+
+        .assumption-icon {
+            flex-shrink: 0;
+            width: 20px;
+            height: 20px;
+            color: #f59e0b;
+        }
+
+        .assumptions-card.assumptions-resolved .assumption-icon {
+            color: #10b981;
+        }
+
+        .assumption-content {
+            flex: 1;
+        }
+
+        .assumption-label {
+            font-weight: 600;
+            font-size: 14px;
+            color: var(--text-dark);
+        }
+
+        .assumption-description {
+            font-size: 13px;
+            color: var(--text-light);
+            margin-top: 2px;
+        }
+
+        .assumption-badge {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            background: rgba(245, 158, 11, 0.2);
+            color: #92400e;
+            font-size: 12px;
+            font-weight: 600;
+            border-radius: var(--radius-sm);
+            margin-left: 8px;
+        }
+
+        .assumptions-card.assumptions-resolved .assumption-badge {
+            background: rgba(16, 185, 129, 0.2);
+            color: #065f46;
         }
 
         /* Totals */
@@ -977,6 +1073,21 @@
                 <p>This quote has been approved. Thank you for your business!</p>
             </div>
         </div>
+        {% elif quote.status == "declined" or quote.status == "expired" %}
+        <div class="alert alert-warning" role="alert">
+            <svg class="alert-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+            </svg>
+            <div class="alert-content">
+                <p>
+                    {% if quote.status == "declined" %}
+                        This quote has been declined.
+                    {% else %}
+                        This quote has expired and can no longer be approved online.
+                    {% endif %}
+                </p>
+            </div>
+        </div>
         {% endif %}
 
         <article class="quote-card">
@@ -1011,6 +1122,24 @@
                 </div>
 
                 <a href="/quote/{{ quote.token }}/download" class="btn btn-primary btn-large">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                    </svg>
+                    Download PDF
+                </a>
+            </div>
+            {% elif quote.status == "declined" or quote.status == "expired" %}
+            <div class="success-state">
+                <h2>
+                    {% if quote.status == "declined" %}
+                        Quote Declined
+                    {% else %}
+                        Quote Expired
+                    {% endif %}
+                </h2>
+                <p>Download the PDF for a complete record of this quote.</p>
+
+                <a href="/quote/{{ quote.token }}/download" class="btn btn-secondary">
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
                     </svg>
@@ -1087,6 +1216,41 @@
                 </table>
             </div>
 
+            {% if quote.has_assumptions %}
+            <div class="assumptions-card">
+                <div class="assumptions-header">
+                    <svg class="assumption-icon" width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                    </svg>
+                    <span>Assumptions Made</span>
+                </div>
+                <ul class="assumptions-list">
+                    {% for assumption in quote.assumptions %}
+                    <li class="assumption-item">
+                        <svg class="assumption-icon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <div class="assumption-content">
+                            <span class="assumption-label">{{ assumption.label }}: {{ assumption.value }}<span class="assumption-badge">Assumed</span></span>
+                            <p class="assumption-description">{{ assumption.description }}</p>
+                        </div>
+                    </li>
+                    {% endfor %}
+                </ul>
+            </div>
+            {% else %}
+            <div class="assumptions-card assumptions-resolved">
+                <div class="assumptions-header">
+                    <svg class="assumption-icon" width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                    </svg>
+                    <span>All Values Confirmed</span>
+                    <span class="assumption-badge">No Assumptions</span>
+                </div>
+                <p class="assumption-description" style="margin-left: 30px;">Currency, tax rate, payment terms, and billing country have all been explicitly set.</p>
+            </div>
+            {% endif %}
+
             <div class="totals-section">
                 <div class="totals-row">
                     <span>Subtotal</span>
@@ -1111,7 +1275,7 @@
             </div>
 
             <div class="actions-section">
-                <button class="btn btn-success btn-large" onclick="openApproveModal()" {% if quote.status == "expired" %}disabled{% endif %}>
+                <button class="btn btn-success btn-large" onclick="openApproveModal()">
                     <span class="spinner" aria-hidden="true"></span>
                     <span class="btn-text">
                         <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
@@ -1120,7 +1284,7 @@
                         Approve Quote
                     </span>
                 </button>
-                <button class="btn btn-danger" onclick="openRejectModal()" {% if quote.status == "expired" %}disabled{% endif %}>
+                <button class="btn btn-danger" onclick="openRejectModal()">
                     <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
                     </svg>
@@ -1136,8 +1300,8 @@
             {% endif %}
         </article>
 
-        <!-- Comments Section (hide if approved) -->
-        {% if quote.status != "approved" %}
+        <!-- Comments Section -->
+        {% if quote.status != "approved" and quote.status != "declined" and quote.status != "expired" %}
         <section class="comments-section" aria-labelledby="comments-heading">
             <h2 class="section-title" id="comments-heading">Questions or Comments</h2>
             <p style="color: var(--text-light); margin-bottom: 16px; font-size: 14px;">Have questions about this quote? Add a comment and your sales rep will be notified.</p>
