@@ -17,6 +17,7 @@ pub mod flows;
 pub mod ghost;
 pub mod ledger;
 pub mod policy;
+pub mod suggestions;
 
 pub use approvals::{
     ApprovalValidationFailure, ApprovalValidationInput, ApprovalValidationResult,
@@ -79,3 +80,9 @@ pub use policy::optimizer::{
     ReplayImpactRequest, ReplayQuoteSnapshot,
 };
 pub use policy::{ExplanationGenerator, ExplanationTemplate, GeneratedExplanation};
+pub use suggestions::{
+    BusinessRule, BusinessRuleType, ComponentScores, ConfidenceLevel, CustomerProfile,
+    CustomerSimilarity, ProductInfo, ProductRelationship, ProductSuggestion, QuoteContext,
+    RelationshipType, ScoreCalculator, ScoringWeights, SeasonalPattern, SuggestionCategory,
+    SuggestionEngine, SuggestionFeedback, SuggestionRequest,
+};
