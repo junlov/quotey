@@ -1,0 +1,315 @@
+{# Renewal Template - Current vs proposed side-by-side #}
+{% extends "quotes/base.html.tera" %}
+
+{% block extra_css %}
+<style>
+    .renewal-header {
+        background: linear-gradient(135deg, var(--primary-color) 0%, #1e40af 100%);
+        color: white;
+        padding: 24px;
+        border-radius: 8px;
+        margin-bottom: 32px;
+        text-align: center;
+    }
+    
+    .renewal-header h3 {
+        font-size: 16pt;
+        font-weight: 600;
+        margin-bottom: 8px;
+    }
+    
+    .renewal-header p {
+        opacity: 0.9;
+        font-size: 11pt;
+    }
+    
+    .contract-info {
+        display: grid;
+        grid-template-columns: repeat(3, 1fr);
+        gap: 16px;
+        margin-bottom: 32px;
+        padding: 20px;
+        background: var(--bg-light);
+        border-radius: 8px;
+    }
+    
+    .contract-info-item {
+        text-align: center;
+    }
+    
+    .contract-info-label {
+        font-size: 9pt;
+        color: var(--text-light);
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+        margin-bottom: 4px;
+    }
+    
+    .contract-info-value {
+        font-size: 12pt;
+        font-weight: 600;
+        color: var(--text-dark);
+    }
+    
+    .comparison-table {
+        width: 100%;
+        border-collapse: collapse;
+        margin: 24px 0;
+        font-size: 10pt;
+    }
+    
+    .comparison-table th {
+        background: var(--bg-light);
+        padding: 12px;
+        text-align: left;
+        font-weight: 600;
+        color: var(--text-dark);
+        border-bottom: 2px solid var(--border-color);
+    }
+    
+    .comparison-table th.current-col {
+        background: rgba(100, 116, 139, 0.1);
+    }
+    
+    .comparison-table th.proposed-col {
+        background: rgba(37, 99, 235, 0.1);
+    }
+    
+    .comparison-table td {
+        padding: 12px;
+        border-bottom: 1px solid var(--border-color);
+        vertical-align: middle;
+    }
+    
+    .comparison-table tr:hover {
+        background: var(--bg-light);
+    }
+    
+    .change-indicator {
+        display: inline-flex;
+        align-items: center;
+        gap: 4px;
+        font-size: 9pt;
+        font-weight: 600;
+        padding: 2px 8px;
+        border-radius: 4px;
+        white-space: nowrap;
+    }
+    
+    .change-increase {
+        background: rgba(239, 68, 68, 0.1);
+        color: #dc2626;
+    }
+    
+    .change-decrease {
+        background: rgba(16, 185, 129, 0.1);
+        color: #059669;
+    }
+    
+    .change-neutral {
+        background: var(--bg-light);
+        color: var(--text-light);
+    }
+    
+    .change-arrow {
+        font-size: 10pt;
+    }
+    
+    .summary-section {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 24px;
+        margin-top: 32px;
+    }
+    
+    .summary-card {
+        padding: 20px;
+        border-radius: 8px;
+        border: 2px solid var(--border-color);
+    }
+    
+    .summary-card.current {
+        border-color: var(--secondary-color);
+        background: rgba(100, 116, 139, 0.05);
+    }
+    
+    .summary-card.proposed {
+        border-color: var(--primary-color);
+        background: rgba(37, 99, 235, 0.05);
+    }
+    
+    .summary-card h4 {
+        font-size: 11pt;
+        margin-bottom: 16px;
+        color: var(--text-dark);
+    }
+    
+    .summary-row {
+        display: flex;
+        justify-content: space-between;
+        padding: 8px 0;
+        border-bottom: 1px solid var(--border-color);
+    }
+    
+    .summary-row:last-child {
+        border-bottom: none;
+        font-weight: 700;
+        font-size: 12pt;
+        color: var(--primary-color);
+        margin-top: 8px;
+        padding-top: 12px;
+        border-top: 2px solid var(--border-color);
+    }
+    
+    .loyalty-badge {
+        display: inline-flex;
+        align-items: center;
+        gap: 6px;
+        background: linear-gradient(135deg, #f59e0b 0%, #d97706 100%);
+        color: white;
+        padding: 8px 16px;
+        border-radius: 20px;
+        font-size: 9pt;
+        font-weight: 600;
+        margin-bottom: 16px;
+    }
+    
+    .impact-highlight {
+        background: var(--bg-light);
+        border-left: 4px solid var(--success-color);
+        padding: 16px 20px;
+        margin: 24px 0;
+    }
+    
+    .impact-highlight h4 {
+        font-size: 11pt;
+        color: var(--text-dark);
+        margin-bottom: 8px;
+    }
+    
+    .impact-highlight p {
+        font-size: 10pt;
+        color: var(--text-light);
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="renewal-header">
+    <h3>🔄 Contract Renewal</h3>
+    <p>Your current contract expires on {{ renewal.expiry_date | default(value="[Date]") }}. Here's what we're proposing for the next term.</p>
+</div>
+
+<div class="contract-info">
+    <div class="contract-info-item">
+        <div class="contract-info-label">Current Contract</div>
+        <div class="contract-info-value">{{ renewal.current_contract_id | default(value="—") }}</div>
+    </div>
+    <div class="contract-info-item">
+        <div class="contract-info-label">Customer Since</div>
+        <div class="contract-info-value">{{ renewal.customer_since | default(value="—") }}</div>
+    </div>
+    <div class="contract-info-item">
+        <div class="contract-info-label">Tenure</div>
+        <div class="contract-info-value">{{ renewal.tenure_months | default(value="—") }} months</div>
+    </div>
+</div>
+
+<section class="comparison-section">
+    <h3 class="section-title">What’s Changing</h3>
+    
+    <table class="comparison-table">
+        <thead>
+            <tr>
+                <th style="width: 28%;">Item</th>
+                <th class="current-col" style="width: 24%;">Current</th>
+                <th class="proposed-col" style="width: 24%;">Proposed</th>
+                <th style="width: 24%;">Change</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for item in renewal.comparison_items | default(value=[]) %}
+            <tr>
+                <td>
+                    <strong>{{ item.name }}</strong>
+                    {% if item.description %}
+                    <br><span style="font-size: 9pt; color: var(--text-light);">{{ item.description }}</span>
+                    {% endif %}
+                </td>
+                <td>{{ item.current_value }}</td>
+                <td>{{ item.proposed_value }}</td>
+                <td>
+                    {% if item.change_type == "increase" %}
+                    <span class="change-indicator change-increase">
+                        <span class="change-arrow">↑</span> {{ item.change_value }}
+                    </span>
+                    {% elif item.change_type == "decrease" %}
+                    <span class="change-indicator change-decrease">
+                        <span class="change-arrow">↓</span> {{ item.change_value }}
+                    </span>
+                    {% else %}
+                    <span class="change-indicator change-neutral">No change</span>
+                    {% endif %}
+                </td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<div class="summary-section">
+    <div class="summary-card current">
+        <h4>Current Contract</h4>
+        <div class="summary-row">
+            <span>Annual Value</span>
+            <span>{{ renewal.current_annual | default(value="$0.00") }}</span>
+        </div>
+        <div class="summary-row">
+            <span>Seats</span>
+            <span>{{ renewal.current_seats | default(value=0) }}</span>
+        </div>
+        <div class="summary-row">
+            <span>Total</span>
+            <span>{{ renewal.current_total | default(value="$0.00") }}</span>
+        </div>
+    </div>
+    
+    <div class="summary-card proposed">
+        {% if renewal.loyalty_discount %}
+        <div class="loyalty-badge">🎁 Loyalty Discount: {{ renewal.loyalty_discount }}</div>
+        {% endif %}
+        <h4>Proposed Contract</h4>
+        <div class="summary-row">
+            <span>Annual Value</span>
+            <span>{{ renewal.proposed_annual | default(value="$0.00") }}</span>
+        </div>
+        <div class="summary-row">
+            <span>Seats</span>
+            <span>{{ renewal.proposed_seats | default(value=0) }}</span>
+        </div>
+        <div class="summary-row">
+            <span>Total</span>
+            <span>{{ renewal.proposed_total | default(value="$0.00") }}</span>
+        </div>
+    </div>
+</div>
+
+{% if renewal.impact_summary %}
+<div class="impact-highlight">
+    <h4>📊 Impact Summary</h4>
+    <p>{{ renewal.impact_summary }}</p>
+</div>
+{% endif %}
+
+<section class="terms-section" style="margin-top: 32px;">
+    <h3 class="section-title">Renewal Terms</h3>
+    <ul style="padding-left: 20px; color: var(--text-dark);">
+        <li>New contract term: {{ renewal.new_term | default(value="12 months") }} from renewal date</li>
+        <li>Seamless transition - no service interruption</li>
+        <li>All historical data and configurations preserved</li>
+        {% if renewal.price_lock %}
+        <li>Price locked for {{ renewal.price_lock }}</li>
+        {% endif %}
+    </ul>
+</section>
+{% endblock %}

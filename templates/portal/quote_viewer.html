@@ -1,0 +1,877 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Quote {{ quote.quote_id }} - {{ customer.name }}</title>
+    <style>
+        :root {
+            --primary-color: #2563eb;
+            --primary-hover: #1d4ed8;
+            --secondary-color: #64748b;
+            --success-color: #10b981;
+            --success-hover: #059669;
+            --danger-color: #ef4444;
+            --danger-hover: #dc2626;
+            --warning-color: #f59e0b;
+            --bg-light: #f8fafc;
+            --bg-white: #ffffff;
+            --text-dark: #1e293b;
+            --text-light: #64748b;
+            --border-color: #e2e8f0;
+            --shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            line-height: 1.6;
+            color: var(--text-dark);
+            background: var(--bg-light);
+            min-height: 100vh;
+        }
+
+        /* Header */
+        .portal-header {
+            background: var(--bg-white);
+            border-bottom: 1px solid var(--border-color);
+            padding: 16px 24px;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+        }
+
+        .header-content {
+            max-width: 1000px;
+            margin: 0 auto;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .company-branding {
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .company-logo {
+            height: 32px;
+            width: auto;
+        }
+
+        .company-name {
+            font-size: 18px;
+            font-weight: 700;
+            color: var(--primary-color);
+        }
+
+        .quote-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 8px;
+            padding: 6px 12px;
+            background: var(--bg-light);
+            border-radius: 20px;
+            font-size: 13px;
+            font-weight: 500;
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            padding: 4px 10px;
+            border-radius: 12px;
+            font-size: 12px;
+            font-weight: 600;
+            text-transform: uppercase;
+        }
+
+        .status-draft { background: #fef3c7; color: #d97706; }
+        .status-sent { background: #dbeafe; color: #2563eb; }
+        .status-approved { background: #d1fae5; color: #059669; }
+        .status-expired { background: #fee2e2; color: #dc2626; }
+
+        /* Main Content */
+        .portal-main {
+            max-width: 1000px;
+            margin: 0 auto;
+            padding: 24px;
+        }
+
+        /* Quote Card */
+        .quote-card {
+            background: var(--bg-white);
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+            overflow: hidden;
+            margin-bottom: 24px;
+        }
+
+        .quote-card-header {
+            padding: 24px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .quote-title-section {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            flex-wrap: wrap;
+            gap: 16px;
+        }
+
+        .quote-title-section h1 {
+            font-size: 24px;
+            font-weight: 700;
+            color: var(--text-dark);
+        }
+
+        .quote-meta {
+            display: flex;
+            gap: 24px;
+            margin-top: 16px;
+            flex-wrap: wrap;
+        }
+
+        .meta-item {
+            display: flex;
+            flex-direction: column;
+            gap: 2px;
+        }
+
+        .meta-label {
+            font-size: 11px;
+            color: var(--text-light);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .meta-value {
+            font-size: 14px;
+            font-weight: 600;
+            color: var(--text-dark);
+        }
+
+        /* Customer Section */
+        .customer-section {
+            display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+            gap: 24px;
+            padding: 24px;
+            background: var(--bg-light);
+        }
+
+        .info-block h3 {
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            color: var(--text-light);
+            margin-bottom: 8px;
+        }
+
+        .info-block p {
+            font-size: 14px;
+            color: var(--text-dark);
+            margin-bottom: 4px;
+        }
+
+        /* Line Items */
+        .line-items-section {
+            padding: 24px;
+        }
+
+        .section-title {
+            font-size: 16px;
+            font-weight: 600;
+            margin-bottom: 16px;
+            color: var(--text-dark);
+        }
+
+        .line-items-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+        }
+
+        .line-items-table th {
+            text-align: left;
+            padding: 12px;
+            font-weight: 600;
+            color: var(--text-light);
+            border-bottom: 2px solid var(--border-color);
+            font-size: 12px;
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .line-items-table td {
+            padding: 16px 12px;
+            border-bottom: 1px solid var(--border-color);
+            vertical-align: top;
+        }
+
+        .product-info h4 {
+            font-weight: 600;
+            margin-bottom: 4px;
+        }
+
+        .product-description {
+            font-size: 13px;
+            color: var(--text-light);
+        }
+
+        .text-right {
+            text-align: right;
+        }
+
+        .text-center {
+            text-align: center;
+        }
+
+        /* Totals */
+        .totals-section {
+            padding: 24px;
+            border-top: 1px solid var(--border-color);
+            background: var(--bg-light);
+        }
+
+        .totals-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 8px 0;
+            font-size: 14px;
+        }
+
+        .totals-row.discount {
+            color: var(--success-color);
+        }
+
+        .totals-row.total {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--primary-color);
+            border-top: 2px solid var(--primary-color);
+            margin-top: 8px;
+            padding-top: 16px;
+        }
+
+        /* Action Buttons */
+        .actions-section {
+            padding: 24px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 12px;
+            flex-wrap: wrap;
+        }
+
+        .btn {
+            display: inline-flex;
+            align-items: center;
+            justify-content: center;
+            gap: 8px;
+            padding: 12px 24px;
+            border-radius: 8px;
+            font-size: 14px;
+            font-weight: 600;
+            cursor: pointer;
+            border: none;
+            transition: all 0.2s;
+            text-decoration: none;
+        }
+
+        .btn-primary {
+            background: var(--primary-color);
+            color: white;
+        }
+
+        .btn-primary:hover {
+            background: var(--primary-hover);
+        }
+
+        .btn-success {
+            background: var(--success-color);
+            color: white;
+        }
+
+        .btn-success:hover {
+            background: var(--success-hover);
+        }
+
+        .btn-danger {
+            background: var(--danger-color);
+            color: white;
+        }
+
+        .btn-danger:hover {
+            background: var(--danger-hover);
+        }
+
+        .btn-secondary {
+            background: var(--bg-light);
+            color: var(--text-dark);
+            border: 1px solid var(--border-color);
+        }
+
+        .btn-secondary:hover {
+            background: var(--border-color);
+        }
+
+        .btn-large {
+            padding: 16px 32px;
+            font-size: 16px;
+        }
+
+        /* Comments Section */
+        .comments-section {
+            background: var(--bg-white);
+            border-radius: 12px;
+            box-shadow: var(--shadow);
+            padding: 24px;
+            margin-bottom: 24px;
+        }
+
+        .comment-form {
+            margin-top: 16px;
+        }
+
+        .comment-input {
+            width: 100%;
+            padding: 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            font-size: 14px;
+            resize: vertical;
+            min-height: 80px;
+            font-family: inherit;
+        }
+
+        .comment-input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+
+        .comment-list {
+            margin-top: 16px;
+        }
+
+        .comment-item {
+            padding: 16px;
+            background: var(--bg-light);
+            border-radius: 8px;
+            margin-bottom: 12px;
+        }
+
+        .comment-header {
+            display: flex;
+            justify-content: space-between;
+            margin-bottom: 8px;
+        }
+
+        .comment-author {
+            font-weight: 600;
+            font-size: 14px;
+        }
+
+        .comment-time {
+            font-size: 12px;
+            color: var(--text-light);
+        }
+
+        .comment-text {
+            font-size: 14px;
+            color: var(--text-dark);
+        }
+
+        /* Expiry Warning */
+        .expiry-warning {
+            background: #fef3c7;
+            border: 1px solid #fbbf24;
+            border-radius: 8px;
+            padding: 16px;
+            margin-bottom: 24px;
+            display: flex;
+            align-items: center;
+            gap: 12px;
+        }
+
+        .expiry-warning svg {
+            flex-shrink: 0;
+            color: #d97706;
+        }
+
+        .expiry-warning p {
+            font-size: 14px;
+            color: #92400e;
+        }
+
+        /* Approval Modal */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(0, 0, 0, 0.5);
+            z-index: 200;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--bg-white);
+            border-radius: 12px;
+            max-width: 500px;
+            width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: var(--shadow-lg);
+        }
+
+        .modal-header {
+            padding: 24px;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .modal-header h2 {
+            font-size: 20px;
+            font-weight: 700;
+        }
+
+        .modal-body {
+            padding: 24px;
+        }
+
+        .modal-footer {
+            padding: 24px;
+            border-top: 1px solid var(--border-color);
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+
+        .form-group {
+            margin-bottom: 16px;
+        }
+
+        .form-label {
+            display: block;
+            font-size: 14px;
+            font-weight: 500;
+            margin-bottom: 6px;
+            color: var(--text-dark);
+        }
+
+        .form-input {
+            width: 100%;
+            padding: 10px 12px;
+            border: 1px solid var(--border-color);
+            border-radius: 6px;
+            font-size: 14px;
+        }
+
+        .form-input:focus {
+            outline: none;
+            border-color: var(--primary-color);
+        }
+
+        /* Mobile Responsive */
+        @media (max-width: 768px) {
+            .portal-header {
+                padding: 12px 16px;
+            }
+
+            .portal-main {
+                padding: 16px;
+            }
+
+            .quote-card-header {
+                padding: 16px;
+            }
+
+            .quote-title-section h1 {
+                font-size: 20px;
+            }
+
+            .quote-meta {
+                gap: 16px;
+            }
+
+            .line-items-section {
+                padding: 16px;
+                overflow-x: auto;
+            }
+
+            .line-items-table {
+                min-width: 500px;
+            }
+
+            .actions-section {
+                flex-direction: column;
+            }
+
+            .btn {
+                width: 100%;
+            }
+        }
+
+        /* Print Styles */
+        @media print {
+            .portal-header, .actions-section, .comments-section, .modal-overlay {
+                display: none;
+            }
+
+            .quote-card {
+                box-shadow: none;
+            }
+
+            body {
+                background: white;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header class="portal-header">
+        <div class="header-content">
+            <div class="company-branding">
+                {% if branding.logo_url %}
+                <img src="{{ branding.logo_url }}" alt="{{ branding.company_name }}" class="company-logo">
+                {% endif %}
+                <span class="company-name">{{ branding.company_name | default(value="Your Company") }}</span>
+            </div>
+            <div class="quote-badge">
+                <span>Quote {{ quote.quote_id | default(value="Q-0000") }}</span>
+                <span class="status-badge status-{{ quote.status | default(value="sent") }}">{{ quote.status | default(value="Sent") }}</span>
+            </div>
+        </div>
+    </header>
+
+    <main class="portal-main">
+        {% if quote.expires_soon %}
+        <div class="expiry-warning">
+            <svg width="24" height="24" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+            </svg>
+            <p>This quote expires on <strong>{{ quote.valid_until }}</strong>. Please respond before the expiration date.</p>
+        </div>
+        {% endif %}
+
+        <article class="quote-card">
+            <div class="quote-card-header">
+                <div class="quote-title-section">
+                    <h1>Quote for {{ customer.name | default(value="Customer") }}</h1>
+                </div>
+                <div class="quote-meta">
+                    <div class="meta-item">
+                        <span class="meta-label">Quote Date</span>
+                        <span class="meta-value">{{ quote.created_at | default(value="—") }}</span>
+                    </div>
+                    <div class="meta-item">
+                        <span class="meta-label">Valid Until</span>
+                        <span class="meta-value">{{ quote.valid_until | default(value="—") }}</span>
+                    </div>
+                    <div class="meta-item">
+                        <span class="meta-label">Term</span>
+                        <span class="meta-value">{{ quote.term_months | default(value=12) }} months</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="customer-section">
+                <div class="info-block">
+                    <h3>Prepared For</h3>
+                    <p><strong>{{ customer.name | default(value="Customer Name") }}</strong></p>
+                    <p>{{ customer.contact_name | default(value="") }}</p>
+                    <p>{{ customer.email | default(value="") }}</p>
+                    <p>{{ customer.phone | default(value="") }}</p>
+                </div>
+                <div class="info-block">
+                    <h3>Quote Details</h3>
+                    <p><strong>Sales Rep:</strong> {{ rep.name | default(value="—") }}</p>
+                    <p><strong>Email:</strong> {{ rep.email | default(value="—") }}</p>
+                    <p><strong>Payment Terms:</strong> {{ quote.payment_terms | default(value="Net 30") }}</p>
+                </div>
+            </div>
+
+            <div class="line-items-section">
+                <h2 class="section-title">Line Items</h2>
+                <table class="line-items-table">
+                    <thead>
+                        <tr>
+                            <th>Product/Service</th>
+                            <th class="text-center">Qty</th>
+                            <th class="text-right">Unit Price</th>
+                            <th class="text-right">Total</th>
+                        </tr>
+                    </thead>
+                    <tbody>
+                        {% for line in quote.lines | default(value=[]) %}
+                        <tr>
+                            <td>
+                                <div class="product-info">
+                                    <h4>{{ line.product_name }}</h4>
+                                    <p class="product-description">{{ line.description | default(value="") }}</p>
+                                </div>
+                            </td>
+                            <td class="text-center">{{ line.quantity }}</td>
+                            <td class="text-right">{{ line.unit_price }}</td>
+                            <td class="text-right"><strong>{{ line.total }}</strong></td>
+                        </tr>
+                        {% endfor %}
+                    </tbody>
+                </table>
+            </div>
+
+            <div class="totals-section">
+                <div class="totals-row">
+                    <span>Subtotal</span>
+                    <span>{{ quote.subtotal | default(value="$0.00") }}</span>
+                </div>
+                {% if quote.discount_total %}
+                <div class="totals-row discount">
+                    <span>Discount</span>
+                    <span>-{{ quote.discount_total }}</span>
+                </div>
+                {% endif %}
+                {% if quote.tax_amount %}
+                <div class="totals-row">
+                    <span>Tax ({{ quote.tax_rate | default(value="0%") }})</span>
+                    <span>{{ quote.tax_amount }}</span>
+                </div>
+                {% endif %}
+                <div class="totals-row total">
+                    <span>Total</span>
+                    <span>{{ quote.total | default(value="$0.00") }}</span>
+                </div>
+            </div>
+
+            <div class="actions-section">
+                <button class="btn btn-success btn-large" onclick="openApproveModal()">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                    </svg>
+                    Approve Quote
+                </button>
+                <button class="btn btn-danger" onclick="openRejectModal()">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                    </svg>
+                    Decline
+                </button>
+                <a href="/quote/{{ quote.token }}/download" class="btn btn-secondary">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                    </svg>
+                    Download PDF
+                </a>
+            </div>
+        </article>
+
+        <section class="comments-section">
+            <h2 class="section-title">Questions or Comments</h2>
+            <p style="color: var(--text-light); margin-bottom: 16px;">Have questions about this quote? Add a comment and your sales rep will be notified.</p>
+            
+            <form class="comment-form" onsubmit="submitComment(event)">
+                <textarea class="comment-input" placeholder="Type your question or comment here..." required></textarea>
+                <div style="margin-top: 12px; display: flex; justify-content: flex-end;">
+                    <button type="submit" class="btn btn-primary">Post Comment</button>
+                </div>
+            </form>
+
+            <div class="comment-list" id="commentList">
+                {% for comment in comments | default(value=[]) %}
+                <div class="comment-item">
+                    <div class="comment-header">
+                        <span class="comment-author">{{ comment.author }}</span>
+                        <span class="comment-time">{{ comment.timestamp }}</span>
+                    </div>
+                    <p class="comment-text">{{ comment.text }}</p>
+                </div>
+                {% endfor %}
+            </div>
+        </section>
+    </main>
+
+    <!-- Approval Modal -->
+    <div class="modal-overlay" id="approveModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>Approve Quote</h2>
+            </div>
+            <div class="modal-body">
+                <p style="margin-bottom: 16px;">You are about to approve quote <strong>{{ quote.quote_id }}</strong> for <strong>{{ quote.total | default(value="$0.00") }}</strong>.</p>
+                <form id="approveForm" onsubmit="submitApproval(event)">
+                    <div class="form-group">
+                        <label class="form-label">Your Name *</label>
+                        <input type="text" class="form-input" name="approverName" required placeholder="Enter your full name">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Your Email *</label>
+                        <input type="email" class="form-input" name="approverEmail" required placeholder="Enter your email address">
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label">Comments (optional)</label>
+                        <textarea class="comment-input" name="approvalComments" placeholder="Any additional comments..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('approveModal')">Cancel</button>
+                <button type="submit" form="approveForm" class="btn btn-success">Confirm Approval</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reject Modal -->
+    <div class="modal-overlay" id="rejectModal">
+        <div class="modal">
+            <div class="modal-header">
+                <h2>Decline Quote</h2>
+            </div>
+            <div class="modal-body">
+                <p style="margin-bottom: 16px;">Please let us know why you're declining this quote. Your feedback helps us serve you better.</p>
+                <form id="rejectForm" onsubmit="submitRejection(event)">
+                    <div class="form-group">
+                        <label class="form-label">Reason for declining *</label>
+                        <textarea class="comment-input" name="rejectionReason" required placeholder="Please explain your decision..."></textarea>
+                    </div>
+                </form>
+            </div>
+            <div class="modal-footer">
+                <button class="btn btn-secondary" onclick="closeModal('rejectModal')">Cancel</button>
+                <button type="submit" form="rejectForm" class="btn btn-danger">Confirm Decline</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        function openApproveModal() {
+            document.getElementById('approveModal').classList.add('active');
+        }
+
+        function openRejectModal() {
+            document.getElementById('rejectModal').classList.add('active');
+        }
+
+        function closeModal(modalId) {
+            document.getElementById(modalId).classList.remove('active');
+        }
+
+        function submitApproval(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            
+            fetch(`/quote/{{ quote.token }}/approve`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    approverName: formData.get('approverName'),
+                    approverEmail: formData.get('approverEmail'),
+                    comments: formData.get('approvalComments')
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Quote approved successfully!');
+                    window.location.reload();
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('An error occurred. Please try again.');
+            });
+        }
+
+        function submitRejection(event) {
+            event.preventDefault();
+            const formData = new FormData(event.target);
+            
+            fetch(`/quote/{{ quote.token }}/reject`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    reason: formData.get('rejectionReason')
+                })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    alert('Response submitted. Thank you for your feedback.');
+                    window.location.reload();
+                } else {
+                    alert('Error: ' + data.message);
+                }
+            })
+            .catch(error => {
+                console.error('Error:', error);
+                alert('An error occurred. Please try again.');
+            });
+        }
+
+        function submitComment(event) {
+            event.preventDefault();
+            const textarea = event.target.querySelector('textarea');
+            const text = textarea.value.trim();
+            
+            if (!text) return;
+            
+            fetch(`/quote/{{ quote.token }}/comment`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ text })
+            })
+            .then(response => response.json())
+            .then(data => {
+                if (data.success) {
+                    textarea.value = '';
+                    // Add comment to list
+                    const commentList = document.getElementById('commentList');
+                    const newComment = document.createElement('div');
+                    newComment.className = 'comment-item';
+                    newComment.innerHTML = `
+                        <div class="comment-header">
+                            <span class="comment-author">You</span>
+                            <span class="comment-time">Just now</span>
+                        </div>
+                        <p class="comment-text">${escapeHtml(text)}</p>
+                    `;
+                    commentList.insertBefore(newComment, commentList.firstChild);
+                }
+            })
+            .catch(error => console.error('Error:', error));
+        }
+
+        function escapeHtml(text) {
+            const div = document.createElement('div');
+            div.textContent = text;
+            return div.innerHTML;
+        }
+
+        // Close modals on overlay click
+        document.querySelectorAll('.modal-overlay').forEach(overlay => {
+            overlay.addEventListener('click', (e) => {
+                if (e.target === overlay) {
+                    overlay.classList.remove('active');
+                }
+            });
+        });
+    </script>
+</body>
+</html>

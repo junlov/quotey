@@ -1,0 +1,332 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Quote {{ quote.id }} - Detailed</title>
+  <style>
+    {% include "styles/quote-base.css" %}
+    
+    /* Detailed template specific styles */
+    .detailed-quote {
+      /* Standard page margins for multi-page documents */
+    }
+    
+    .pricing-trace-section {
+      margin-top: 24px;
+      padding: 16px;
+      background: var(--bg-light);
+      border-radius: 8px;
+      font-size: 9pt;
+    }
+    
+    .pricing-trace-section h3 {
+      font-size: 10pt;
+      font-weight: 600;
+      margin-bottom: 12px;
+      color: var(--text-secondary);
+    }
+    
+    .price-breakdown {
+      margin-top: 8px;
+    }
+    
+    .breakdown-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 4px 0;
+      font-size: 9pt;
+    }
+    
+    .breakdown-row.tier-applied {
+      color: var(--success-color);
+    }
+    
+    .breakdown-row.discount-applied {
+      color: var(--success-color);
+    }
+    
+    .notes-section {
+      margin-top: 24px;
+      padding: 16px;
+      background: #fefce8;
+      border-radius: 8px;
+      border-left: 4px solid #eab308;
+    }
+    
+    .notes-section h3 {
+      font-size: 10pt;
+      font-weight: 600;
+      color: #854d0e;
+      margin-bottom: 8px;
+    }
+    
+    .notes-section p {
+      font-size: 10pt;
+      color: #854d0e;
+    }
+    
+    /* Multi-page table handling */
+    .line-items-table {
+      page-break-inside: auto;
+    }
+    
+    .line-items-table tr {
+      page-break-inside: avoid;
+    }
+    
+    /* Subtotal row styling */
+    .subtotal-cell {
+      font-weight: 600;
+      color: var(--text-primary);
+    }
+    
+    /* Quantity column */
+    .quantity-cell {
+      white-space: nowrap;
+    }
+  </style>
+</head>
+<body class="detailed-quote">
+  <!-- Header -->
+  <header class="quote-header">
+    <div class="company-branding">
+      {% if company_logo %}
+      <img src="{{ company_logo }}" alt="{{ company_name }}" class="company-logo">
+      {% endif %}
+      <div class="company-info">
+        <h1>{{ company_name | default(value="Quotey") }}</h1>
+        <p>
+          {{ company_address | default(value="") }}<br>
+          {{ company_email | default(value="sales@example.com") }}
+        </p>
+      </div>
+    </div>
+    <div class="quote-meta">
+      <div class="quote-id">{{ quote.id }}</div>
+      <span class="quote-status {{ quote.status | lower }}">{{ quote.status }}</span>
+      <div class="quote-date">{{ quote.created_at | date(format="%B %d, %Y") }}</div>
+    </div>
+  </header>
+
+  <!-- Customer Info -->
+  <section class="customer-section">
+    <div class="customer-info">
+      <h2>Bill To</h2>
+      <div class="customer-name">{{ account.name }}</div>
+      <div class="customer-contact">
+        {% if account.domain %}{{ account.domain }}<br>{% endif %}
+        {% if account.industry %}{{ account.industry }}<br>{% endif %}
+        {% if account.region %}{{ account.region }}{% endif %}
+      </div>
+    </div>
+    <div class="quote-details">
+      <h2>Quote Information</h2>
+      <div class="detail-row">
+        <span class="detail-label">Quote ID</span>
+        <span class="detail-value">{{ quote.id }}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Version</span>
+        <span class="detail-value">{{ quote.version | default(value=1) }}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Valid Until</span>
+        <span class="detail-value">{{ quote.valid_until | date(format="%B %d, %Y") }}</span>
+      </div>
+      <div class="detail-row">
+        <span class="detail-label">Payment Terms</span>
+        <span class="detail-value">{{ quote.payment_terms | default(value="Net 30") }}</span>
+      </div>
+    </div>
+  </section>
+
+  <!-- Deal Context -->
+  {% if deal %}
+  <section class="customer-section" style="margin-top: 16px;">
+    <div class="customer-info">
+      <h2>Deal Information</h2>
+      <div class="customer-name">{{ deal.name }}</div>
+      <div class="customer-contact">
+        Type: {{ deal.deal_type | default(value="Net New") }}<br>
+        {% if deal.competitor %}Competitor: {{ deal.competitor }}<br>{% endif %}
+        Owner: {{ deal.owner | default(value="Sales Team") }}
+      </div>
+    </div>
+    <div class="quote-details">
+      <h2>Contract Details</h2>
+      <div class="detail-row">
+        <span class="detail-label">Term</span>
+        <span class="detail-value">{{ quote.term_months | default(value=12) }} months</span>
+      </div>
+      {% if quote.start_date %}
+      <div class="detail-row">
+        <span class="detail-label">Start Date</span>
+        <span class="detail-value">{{ quote.start_date | date(format="%B %d, %Y") }}</span>
+      </div>
+      {% endif %}
+      {% if quote.end_date %}
+      <div class="detail-row">
+        <span class="detail-label">End Date</span>
+        <span class="detail-value">{{ quote.end_date | date(format="%B %d, %Y") }}</span>
+      </div>
+      {% endif %}
+      <div class="detail-row">
+        <span class="detail-label">Billing</span>
+        <span class="detail-value">{{ quote.billing_frequency | default(value="Annual") }}</span>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
+  <!-- Line Items -->
+  <section class="line-items-section">
+    <h2 class="section-title">Line Items</h2>
+    <table class="line-items-table">
+      <thead>
+        <tr>
+          <th style="width: 5%;">#</th>
+          <th style="width: 40%;">Product / Description</th>
+          <th class="numeric" style="width: 10%;">Qty</th>
+          <th class="numeric" style="width: 15%;">Unit Price</th>
+          <th class="numeric" style="width: 15%;">Discount</th>
+          <th class="numeric" style="width: 15%;">Line Total</th>
+        </tr>
+      </thead>
+      <tbody>
+        {% for line in lines %}
+        <tr class="page-break-avoid">
+          <td>{{ loop.index }}</td>
+          <td>
+            <div class="line-item-product">{{ line.product_name }}</div>
+            {% if line.description %}
+            <div class="line-item-description">{{ line.description }}</div>
+            {% endif %}
+            {% if line.attributes_json %}
+            <div class="line-item-attributes">
+              {% for key, value in line.attributes %}{{ key }}: {{ value }}{% if not loop.last %}, {% endif %}{% endfor %}
+            </div>
+            {% endif %}
+          </td>
+          <td class="numeric quantity-cell">{{ line.quantity }}</td>
+          <td class="numeric">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.unit_price | default(value=0)) }}</td>
+          <td class="numeric">
+            {% if line.discount_pct and line.discount_pct > 0 %}
+              {{ line.discount_pct }}%<br>
+              <small class="text-muted">-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.discount_amount | default(value=0)) }}</small>
+            {% else %}
+              -
+            {% endif %}
+          </td>
+          <td class="numeric subtotal-cell">{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line.subtotal | default(value=0)) }}</td>
+        </tr>
+        {% endfor %}
+      </tbody>
+    </table>
+  </section>
+
+  <!-- Totals -->
+  <section class="totals-section">
+    <table class="totals-table">
+      <tr>
+        <td>Subtotal</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.subtotal) }}</td>
+      </tr>
+      {% if pricing.discount_total and pricing.discount_total > 0 %}
+      <tr>
+        <td>Discount</td>
+        <td class="discount-positive">-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.discount_total) }}</td>
+      </tr>
+      {% endif %}
+      {% if pricing.tax_total and pricing.tax_total > 0 %}
+      <tr>
+        <td>Tax ({{ pricing.tax_rate | default(value=0) }}%)</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.tax_total) }}</td>
+      </tr>
+      {% endif %}
+      <tr class="total-row">
+        <td>Total</td>
+        <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.total) }}</td>
+      </tr>
+    </table>
+  </section>
+
+  <!-- Pricing Trace (if available) -->
+  {% if pricing_trace %}
+  <section class="pricing-trace-section">
+    <h3>Pricing Details</h3>
+    <div class="price-breakdown">
+      {% if pricing_trace.price_book_selection_reason %}
+      <div class="breakdown-row">
+        <span>Price Book</span>
+        <span>{{ pricing_trace.price_book_id }} ({{ pricing_trace.price_book_selection_reason }})</span>
+      </div>
+      {% endif %}
+      {% for line_trace in pricing_trace.lines | slice(end=3) %}
+        {% if line_trace.volume_tier_applied %}
+        <div class="breakdown-row tier-applied">
+          <span>• {{ line_trace.product_name }}: Volume tier "{{ line_trace.volume_tier_applied.tier }}" applied</span>
+          <span>-{{ quote.currency | default(value="$") }}{{ "%.2f" | format(line_trace.volume_tier_applied.discount_from_base) }}/unit</span>
+        </div>
+        {% endif %}
+      {% endfor %}
+    </div>
+  </section>
+  {% endif %}
+
+  <!-- Notes -->
+  {% if quote.notes %}
+  <section class="notes-section">
+    <h3>Notes</h3>
+    <p>{{ quote.notes }}</p>
+  </section>
+  {% endif %}
+
+  <!-- Terms & Conditions -->
+  <section class="terms-section">
+    <h3>Terms & Conditions</h3>
+    <p>This quote is subject to the following terms and conditions:</p>
+    <ul style="margin-top: 8px;">
+      <li>Quote valid for {{ quote.valid_days | default(value=30) }} days from issue date unless otherwise specified.</li>
+      <li>Payment terms: {{ quote.payment_terms | default(value="Net 30") }} from invoice date.</li>
+      <li>Prices are in {{ quote.currency | default(value="USD") }} and {% if quote.billing_country %}exclude applicable taxes for {{ quote.billing_country }}{% else %}exclude applicable taxes{% endif %}.</li>
+      <li>Service commencement is subject to signed agreement and initial payment.</li>
+      <li>Any changes to this quote may result in price adjustments.</li>
+    </ul>
+  </section>
+
+  <!-- Approval Section (if approved) -->
+  {% if approval %}
+  <section class="approval-section">
+    <h3>Approval</h3>
+    <p>This quote has been reviewed and approved according to our internal policies.</p>
+    <div class="approval-meta">
+      <div class="approval-meta-item">
+        <div class="approval-meta-label">Approved By</div>
+        <div class="approval-meta-value">{{ approval.approver_name }}</div>
+      </div>
+      <div class="approval-meta-item">
+        <div class="approval-meta-label">Date</div>
+        <div class="approval-meta-value">{{ approval.decided_at | date(format="%b %d, %Y") }}</div>
+      </div>
+      <div class="approval-meta-item">
+        <div class="approval-meta-label">Reference</div>
+        <div class="approval-meta-value">{{ approval.id }}</div>
+      </div>
+    </div>
+  </section>
+  {% endif %}
+
+  <!-- Footer -->
+  <footer class="quote-footer">
+    <p class="footer-text">
+      Thank you for your business. If you have any questions about this quote, 
+      please contact {{ sales_rep.name | default(value="your sales representative") }} 
+      at {{ sales_rep.email | default(value="sales@example.com") }}.
+    </p>
+    {% if not white_label %}
+    <p class="footer-text mt-1">Generated by Quotey</p>
+    {% endif %}
+  </footer>
+</body>
+</html>

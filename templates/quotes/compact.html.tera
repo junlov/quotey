@@ -1,0 +1,234 @@
+{# Compact Template - Minimal format, single page if possible #}
+{% extends "quotes/base.html.tera" %}
+
+{% block extra_css %}
+<style>
+    body {
+        font-size: 9pt;
+    }
+    
+    .quote-container {
+        padding: 24px;
+        max-width: 600px;
+    }
+    
+    .quote-header {
+        padding-bottom: 12px;
+        margin-bottom: 16px;
+        border-bottom-width: 2px;
+    }
+    
+    .company-branding {
+        gap: 12px;
+    }
+    
+    .company-logo {
+        max-height: 40px;
+        max-width: 120px;
+    }
+    
+    .company-name {
+        font-size: 14pt;
+    }
+    
+    .company-tagline {
+        font-size: 8pt;
+    }
+    
+    .quote-title {
+        font-size: 16pt;
+        letter-spacing: 1px;
+    }
+    
+    .quote-number {
+        font-size: 9pt;
+    }
+    
+    .customer-section {
+        grid-template-columns: 1fr 1fr;
+        gap: 16px;
+        margin-bottom: 16px;
+        padding: 12px;
+    }
+    
+    .customer-section h3 {
+        font-size: 8pt;
+        margin-bottom: 6px;
+    }
+    
+    .customer-name {
+        font-size: 11pt;
+    }
+    
+    .customer-contact, .customer-email, .quote-details p {
+        font-size: 8pt;
+    }
+    
+    .line-items-table {
+        margin: 12px 0;
+        font-size: 9pt;
+    }
+    
+    .line-items-table th,
+    .line-items-table td {
+        padding: 8px;
+    }
+    
+    .product-name {
+        font-size: 9pt;
+    }
+    
+    .product-description {
+        font-size: 8pt;
+    }
+    
+    .totals-section {
+        margin-top: 16px;
+        padding-top: 12px;
+    }
+    
+    .totals-table {
+        width: 60%;
+        font-size: 9pt;
+    }
+    
+    .totals-table td {
+        padding: 4px 8px;
+    }
+    
+    .totals-table .total-row {
+        font-size: 12pt;
+    }
+    
+    .totals-table .total-row td {
+        padding-top: 8px;
+    }
+    
+    .quick-info {
+        display: flex;
+        gap: 16px;
+        margin: 16px 0;
+        padding: 12px;
+        background: var(--bg-light);
+        border-radius: 6px;
+        font-size: 8pt;
+    }
+    
+    .quick-info-item {
+        flex: 1;
+        text-align: center;
+    }
+    
+    .quick-info-label {
+        color: var(--text-light);
+        font-size: 7pt;
+        text-transform: uppercase;
+        letter-spacing: 0.5px;
+    }
+    
+    .quick-info-value {
+        font-weight: 600;
+        color: var(--text-dark);
+        margin-top: 2px;
+    }
+    
+    .quote-footer {
+        margin-top: 24px;
+        padding-top: 12px;
+    }
+    
+    .quote-footer p {
+        font-size: 8pt;
+    }
+    
+    @media print {
+        .quote-container {
+            padding: 16px;
+        }
+    }
+</style>
+{% endblock %}
+
+{% block content %}
+<div class="quick-info">
+    <div class="quick-info-item">
+        <div class="quick-info-label">Quote Date</div>
+        <div class="quick-info-value">{{ quote.created_at | default(value="—") }}</div>
+    </div>
+    <div class="quick-info-item">
+        <div class="quick-info-label">Valid Until</div>
+        <div class="quick-info-value">{{ quote.valid_until | default(value="—") }}</div>
+    </div>
+    <div class="quick-info-item">
+        <div class="quick-info-label">Term</div>
+        <div class="quick-info-value">{{ quote.term_months | default(value=12) }} mo</div>
+    </div>
+</div>
+
+<section class="line-items-section">
+    <table class="line-items-table">
+        <thead>
+            <tr>
+                <th style="width: 50%;">Item</th>
+                <th class="text-center" style="width: 15%;">Qty</th>
+                <th class="text-right" style="width: 35%;">Price</th>
+            </tr>
+        </thead>
+        <tbody>
+            {% for line in quote.lines %}
+            <tr>
+                <td>
+                    <div class="product-name">{{ line.product_name }}</div>
+                </td>
+                <td class="text-center">{{ line.quantity }}</td>
+                <td class="text-right">{{ line.total | default(value=line.unit_price) }}</td>
+            </tr>
+            {% endfor %}
+        </tbody>
+    </table>
+</section>
+
+<section class="totals-section">
+    <table class="totals-table">
+        <tr>
+            <td class="label">Subtotal:</td>
+            <td class="value">{{ quote.subtotal | default(value="$0.00") }}</td>
+        </tr>
+        {% if quote.discount_total and quote.discount_total != "$0.00" %}
+        <tr>
+            <td class="label">Discount:</td>
+            <td class="value text-success">-{{ quote.discount_total }}</td>
+        </tr>
+        {% endif %}
+        {% if quote.tax_amount and quote.tax_amount != "$0.00" %}
+        <tr>
+            <td class="label">Tax:</td>
+            <td class="value">{{ quote.tax_amount }}</td>
+        </tr>
+        {% endif %}
+        <tr class="total-row">
+            <td class="label">Total:</td>
+            <td class="value">{{ quote.total | default(value="$0.00") }}</td>
+        </tr>
+    </table>
+</section>
+
+{% if quote.notes %}
+<section class="notes-section" style="margin-top: 16px;">
+    <p style="font-size: 8pt; color: var(--text-light);"><strong>Notes:</strong> {{ quote.notes }}</p>
+</section>
+{% endif %}
+
+<section class="terms-summary" style="margin-top: 16px; font-size: 7pt; color: var(--text-light);">
+    <p>Valid for {{ quote.valid_days | default(value=30) }} days. Payment terms: {{ quote.payment_terms | default(value="Net 30") }}.</p>
+</section>
+{% endblock %}
+
+{% block footer %}
+<footer class="quote-footer">
+    <p class="footer-note">Valid {{ quote.valid_days | default(value=30) }} days | {{ branding.contact_email | default(value="sales@company.com") }}</p>
+    {% if not branding.white_label %}
+    <p class="generated-by" style="margin-top: 4px;">Generated by Quotey</p>
+    {% endif %}
+</footer>
+{% endblock %}
