@@ -16,9 +16,11 @@ use quotey_core::domain::optimizer::{
 use quotey_core::domain::product::{Product, ProductId};
 use quotey_core::domain::quote::{Quote, QuoteId};
 
+use quotey_core::suggestions::{ProductAcceptanceRate, SuggestionFeedback};
+
 use super::{
     ApprovalRepository, ExecutionQueueRepository, IdempotencyRepository, PolicyOptimizerRepository,
-    ProductRepository, QuoteRepository, RepositoryError,
+    ProductRepository, QuoteRepository, RepositoryError, SuggestionFeedbackRepository,
 };
 
 #[derive(Default)]
@@ -145,6 +147,36 @@ impl ApprovalRepository for InMemoryApprovalRepository {
         let mut approvals = self.approvals.write().await;
         approvals.insert(approval.id.0.clone(), approval);
         Ok(())
+    }
+
+    async fn find_by_quote_id(
+        &self,
+        quote_id: &QuoteId,
+    ) -> Result<Vec<ApprovalRequest>, RepositoryError> {
+        let approvals = self.approvals.read().await;
+        let mut results: Vec<ApprovalRequest> =
+            approvals.values().filter(|a| a.quote_id == *quote_id).cloned().collect();
+        results.sort_by(|a, b| b.created_at.cmp(&a.created_at));
+        Ok(results)
+    }
+
+    async fn list_pending(
+        &self,
+        approver_role: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ApprovalRequest>, RepositoryError> {
+        use quotey_core::domain::approval::ApprovalStatus;
+        let approvals = self.approvals.read().await;
+        let results: Vec<ApprovalRequest> = approvals
+            .values()
+            .filter(|a| {
+                a.status == ApprovalStatus::Pending
+                    && approver_role.map_or(true, |role| a.approver_role == role)
+            })
+            .take(limit as usize)
+            .cloned()
+            .collect();
+        Ok(results)
     }
 }
 
@@ -422,6 +454,92 @@ impl PolicyOptimizerRepository for InMemoryPolicyOptimizerRepository {
     }
 }
 
+#[derive(Default)]
+pub struct InMemorySuggestionFeedbackRepository {
+    feedbacks: RwLock<HashMap<String, SuggestionFeedback>>,
+}
+
+#[async_trait::async_trait]
+impl SuggestionFeedbackRepository for InMemorySuggestionFeedbackRepository {
+    async fn record_shown(
+        &self,
+        feedbacks: Vec<SuggestionFeedback>,
+    ) -> Result<(), RepositoryError> {
+        let mut store = self.feedbacks.write().await;
+        for fb in feedbacks {
+            store.insert(fb.id.clone(), fb);
+        }
+        Ok(())
+    }
+
+    async fn record_clicked(
+        &self,
+        request_id: &str,
+        product_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut store = self.feedbacks.write().await;
+        for fb in store.values_mut() {
+            if fb.request_id == request_id && fb.product_id == product_id {
+                fb.was_clicked = true;
+            }
+        }
+        Ok(())
+    }
+
+    async fn record_added(
+        &self,
+        request_id: &str,
+        product_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut store = self.feedbacks.write().await;
+        for fb in store.values_mut() {
+            if fb.request_id == request_id && fb.product_id == product_id {
+                fb.was_clicked = true;
+                fb.was_added_to_quote = true;
+            }
+        }
+        Ok(())
+    }
+
+    async fn find_by_product(
+        &self,
+        product_id: &str,
+        limit: u32,
+    ) -> Result<Vec<SuggestionFeedback>, RepositoryError> {
+        let store = self.feedbacks.read().await;
+        let mut results: Vec<SuggestionFeedback> =
+            store.values().filter(|fb| fb.product_id == product_id).cloned().collect();
+        results.sort_by(|a, b| b.suggested_at.cmp(&a.suggested_at));
+        results.truncate(limit as usize);
+        Ok(results)
+    }
+
+    async fn acceptance_rate(
+        &self,
+        product_id: &str,
+    ) -> Result<Option<ProductAcceptanceRate>, RepositoryError> {
+        let store = self.feedbacks.read().await;
+        let shown: Vec<&SuggestionFeedback> =
+            store.values().filter(|fb| fb.product_id == product_id && fb.was_shown).collect();
+
+        if shown.is_empty() {
+            return Ok(None);
+        }
+
+        let shown_count = shown.len() as u32;
+        let clicked_count = shown.iter().filter(|fb| fb.was_clicked).count() as u32;
+        let added_count = shown.iter().filter(|fb| fb.was_added_to_quote).count() as u32;
+
+        Ok(Some(ProductAcceptanceRate {
+            shown_count,
+            clicked_count,
+            added_count,
+            click_rate: clicked_count as f64 / shown_count as f64,
+            add_rate: added_count as f64 / shown_count as f64,
+        }))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use chrono::Utc;
@@ -512,13 +630,18 @@ mod tests {
     #[tokio::test]
     async fn in_memory_approval_repo_round_trip() -> TestResult<()> {
         let repo = InMemoryApprovalRepository::default();
+        let now = Utc::now();
         let approval = ApprovalRequest {
             id: ApprovalId("APR-1".to_string()),
             quote_id: QuoteId("Q-1".to_string()),
             approver_role: "sales_manager".to_string(),
             reason: "Discount above threshold".to_string(),
+            justification: "Loyal customer".to_string(),
             status: ApprovalStatus::Pending,
-            created_at: Utc::now(),
+            requested_by: "agent:mcp".to_string(),
+            expires_at: Some(now + chrono::Duration::hours(4)),
+            created_at: now,
+            updated_at: now,
         };
 
         repo.save(approval.clone()).await.map_err(|error| format!("save approval: {error}"))?;

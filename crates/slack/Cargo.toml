@@ -9,6 +9,7 @@ authors.workspace = true
 [dependencies]
 anyhow.workspace = true
 async-trait.workspace = true
+quotey-core = { path = "../core" }
 rust_decimal.workspace = true
 serde.workspace = true
 thiserror.workspace = true

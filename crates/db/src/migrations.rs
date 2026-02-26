@@ -193,6 +193,16 @@ mod tests {
         // 0020 — quote enrich (indexes only; columns added to existing tables)
         "idx_quote_account_id",
         "idx_quote_deal_id",
+        // 0021 — approval_request table
+        "approval_request",
+        "idx_approval_request_quote_id",
+        "idx_approval_request_status",
+        "idx_approval_request_approver_role",
+        // 0022 — suggestion feedback
+        "suggestion_feedback",
+        "idx_suggestion_feedback_request_id",
+        "idx_suggestion_feedback_customer_product",
+        "idx_suggestion_feedback_product_id",
     ];
 
     async fn managed_object_count(pool: &sqlx::SqlitePool, object_name: &str) -> TestResult<i64> {

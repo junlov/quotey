@@ -243,6 +243,43 @@ impl ScoreCalculator {
         reasons
     }
 
+    /// Apply a feedback-based adjustment to a base score.
+    ///
+    /// Uses the product's historical acceptance rate to nudge the score:
+    /// - High add rate (>= 30%) → boost by up to +0.10
+    /// - Low add rate (< 10%) with enough data (>= 5 shown) → penalize by up to -0.05
+    /// - Click rate above 50% adds a smaller secondary boost
+    ///
+    /// The adjustment is bounded so feedback never dominates the deterministic scoring.
+    pub fn feedback_adjusted_score(
+        &self,
+        base_score: f64,
+        acceptance: &ProductAcceptanceRate,
+    ) -> f64 {
+        // Need enough data for meaningful adjustment
+        if acceptance.shown_count < 3 {
+            return base_score;
+        }
+
+        let mut adjustment = 0.0;
+
+        // Primary signal: add rate (strongest feedback)
+        if acceptance.add_rate >= 0.30 {
+            // Strong positive signal — boost proportional to add rate
+            adjustment += (acceptance.add_rate * 0.15).min(0.10);
+        } else if acceptance.add_rate < 0.10 && acceptance.shown_count >= 5 {
+            // Weak add rate with enough data — mild penalty
+            adjustment -= 0.05;
+        }
+
+        // Secondary signal: click rate
+        if acceptance.click_rate >= 0.50 {
+            adjustment += 0.03;
+        }
+
+        (base_score + adjustment).clamp(0.0, 1.0)
+    }
+
     /// Filter and sort suggestions, ensuring diversity
     pub fn filter_and_diversify(
         &self,
@@ -367,5 +404,76 @@ mod tests {
         assert_eq!(RelationshipType::AddOn.base_score(), 0.8);
         assert_eq!(RelationshipType::Upgrade.base_score(), 0.6);
         assert_eq!(RelationshipType::CrossSell.base_score(), 0.4);
+    }
+
+    #[test]
+    fn feedback_adjusted_score_boosts_high_add_rate() {
+        let calc = ScoreCalculator::new();
+        let acceptance = ProductAcceptanceRate {
+            shown_count: 10,
+            clicked_count: 6,
+            added_count: 4,
+            click_rate: 0.6,
+            add_rate: 0.4,
+        };
+        let adjusted = calc.feedback_adjusted_score(0.60, &acceptance);
+        // add_rate=0.4 → boost = (0.4 * 0.15).min(0.10) = 0.06
+        // click_rate=0.6 → +0.03
+        // total adjustment = +0.09
+        assert!((adjusted - 0.69).abs() < 0.01);
+    }
+
+    #[test]
+    fn feedback_adjusted_score_penalizes_low_add_rate() {
+        let calc = ScoreCalculator::new();
+        let acceptance = ProductAcceptanceRate {
+            shown_count: 10,
+            clicked_count: 1,
+            added_count: 0,
+            click_rate: 0.1,
+            add_rate: 0.0,
+        };
+        let adjusted = calc.feedback_adjusted_score(0.60, &acceptance);
+        // add_rate=0.0 < 0.10 and shown_count >= 5 → penalty -0.05
+        assert!((adjusted - 0.55).abs() < 0.01);
+    }
+
+    #[test]
+    fn feedback_adjusted_score_ignores_insufficient_data() {
+        let calc = ScoreCalculator::new();
+        let acceptance = ProductAcceptanceRate {
+            shown_count: 2,
+            clicked_count: 2,
+            added_count: 2,
+            click_rate: 1.0,
+            add_rate: 1.0,
+        };
+        let adjusted = calc.feedback_adjusted_score(0.60, &acceptance);
+        // shown_count < 3 → no adjustment
+        assert!((adjusted - 0.60).abs() < 0.001);
+    }
+
+    #[test]
+    fn feedback_adjusted_score_clamps_to_bounds() {
+        let calc = ScoreCalculator::new();
+        let high_rate = ProductAcceptanceRate {
+            shown_count: 100,
+            clicked_count: 90,
+            added_count: 90,
+            click_rate: 0.9,
+            add_rate: 0.9,
+        };
+        let adjusted = calc.feedback_adjusted_score(0.95, &high_rate);
+        assert!(adjusted <= 1.0, "score should not exceed 1.0");
+
+        let low_rate = ProductAcceptanceRate {
+            shown_count: 10,
+            clicked_count: 0,
+            added_count: 0,
+            click_rate: 0.0,
+            add_rate: 0.0,
+        };
+        let adjusted = calc.feedback_adjusted_score(0.02, &low_rate);
+        assert!(adjusted >= 0.0, "score should not go below 0.0");
     }
 }

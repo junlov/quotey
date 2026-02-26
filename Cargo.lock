@@ -1539,6 +1539,7 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
+ "quotey-core",
  "rust_decimal",
  "serde",
  "thiserror",

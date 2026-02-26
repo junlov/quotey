@@ -1180,6 +1180,62 @@ Use `/quote help` for supported button and slash-command actions."
     }
 }
 
+/// Extract a suggestion feedback event from a block action, if applicable.
+///
+/// Returns `Some(event)` when `action_id` matches a `suggest.add.*` or
+/// `suggest.details.*` pattern. The caller is responsible for persisting
+/// the event via a `SuggestionFeedbackRepository`.
+pub fn extract_suggestion_feedback(
+    action_id: &str,
+    raw_value: Option<&str>,
+    request_id: &str,
+) -> Option<quotey_core::suggestions::SuggestionFeedbackEvent> {
+    use quotey_core::suggestions::SuggestionFeedbackEvent;
+
+    let value_pairs = action_value_pairs(raw_value);
+
+    if action_id.starts_with("suggest.add.") {
+        let product_id = value_pairs
+            .as_ref()
+            .and_then(|pairs| pairs.get("product"))
+            .cloned()
+            .unwrap_or_default();
+        let product_sku =
+            value_pairs.as_ref().and_then(|pairs| pairs.get("sku")).cloned().unwrap_or_default();
+        let quote_id = value_pairs.as_ref().and_then(|pairs| pairs.get("quote")).cloned();
+
+        if product_id.is_empty() {
+            return None;
+        }
+
+        return Some(SuggestionFeedbackEvent::Added {
+            request_id: request_id.to_owned(),
+            product_id,
+            product_sku,
+            quote_id,
+        });
+    }
+
+    if action_id.starts_with("suggest.details.") {
+        let product_id = value_pairs
+            .as_ref()
+            .and_then(|pairs| pairs.get("product"))
+            .cloned()
+            .unwrap_or_default();
+
+        if product_id.is_empty() {
+            return None;
+        }
+
+        return Some(SuggestionFeedbackEvent::Clicked {
+            request_id: request_id.to_owned(),
+            product_id,
+        });
+    }
+
+    None
+}
+
 pub(crate) fn action_value_pairs(raw_value: Option<&str>) -> Option<HashMap<String, String>> {
     let value = raw_value?;
     if value.trim().is_empty() {
@@ -1964,5 +2020,62 @@ mod tests {
                 "send", "clone", "suggest"
             ]
         );
+    }
+
+    #[test]
+    fn extract_suggestion_feedback_add_action() {
+        use quotey_core::suggestions::SuggestionFeedbackEvent;
+
+        let value = "action=add_suggested;quote=Q-2026-001;product=prod_sso;sku=ADDON-SSO-001";
+        let event = super::extract_suggestion_feedback("suggest.add.0.v1", Some(value), "req-42")
+            .expect("should extract add event");
+
+        assert_eq!(
+            event,
+            SuggestionFeedbackEvent::Added {
+                request_id: "req-42".to_owned(),
+                product_id: "prod_sso".to_owned(),
+                product_sku: "ADDON-SSO-001".to_owned(),
+                quote_id: Some("Q-2026-001".to_owned()),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_suggestion_feedback_details_action() {
+        use quotey_core::suggestions::SuggestionFeedbackEvent;
+
+        let value = "action=view_product;product=prod_sso";
+        let event =
+            super::extract_suggestion_feedback("suggest.details.0.v1", Some(value), "req-43")
+                .expect("should extract clicked event");
+
+        assert_eq!(
+            event,
+            SuggestionFeedbackEvent::Clicked {
+                request_id: "req-43".to_owned(),
+                product_id: "prod_sso".to_owned(),
+            }
+        );
+    }
+
+    #[test]
+    fn extract_suggestion_feedback_irrelevant_action_returns_none() {
+        let result = super::extract_suggestion_feedback(
+            "quote.refresh.v1",
+            Some("quote=Q-2026-001"),
+            "req-44",
+        );
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_suggestion_feedback_missing_product_returns_none() {
+        let result = super::extract_suggestion_feedback(
+            "suggest.add.0.v1",
+            Some("action=add_suggested"),
+            "req-45",
+        );
+        assert!(result.is_none());
     }
 }
