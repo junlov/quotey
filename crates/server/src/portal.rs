@@ -1,12 +1,14 @@
 //! Web portal routes for customer-facing quote approval and interaction.
 //!
 //! Endpoints:
-//! - `POST /quote/{token}/approve`     — capture electronic approval
-//! - `POST /quote/{token}/reject`      — capture rejection with reason
-//! - `POST /quote/{token}/comment`     — add a customer comment
-//! - `POST /api/v1/portal/links`       — generate a shareable link
-//! - `POST /api/v1/portal/links/revoke`— revoke an existing link
-//! - `GET  /api/v1/portal/links/{quote_id}` — list active links for a quote
+//! - `POST /quote/{token}/approve`              — capture electronic approval
+//! - `POST /quote/{token}/reject`               — capture rejection with reason
+//! - `POST /quote/{token}/comment`              — add an overall customer comment
+//! - `GET  /quote/{token}/comments`             — list all comments for a quote
+//! - `POST /quote/{token}/line/{line_id}/comment` — add a per-line-item comment
+//! - `POST /api/v1/portal/links`                — generate a shareable link
+//! - `POST /api/v1/portal/links/revoke`         — revoke an existing link
+//! - `GET  /api/v1/portal/links/{quote_id}`     — list active links for a quote
 
 use axum::{
     extract::{Path, State},
@@ -720,7 +722,7 @@ mod tests {
 
     use super::*;
 
-    async fn setup() -> (sqlx::SqlitePool, String) {
+    async fn setup() -> (sqlx::SqlitePool, String, String) {
         let pool = connect_with_settings("sqlite::memory:", 1, 30).await.expect("connect");
         migrations::run_pending(&pool).await.expect("migrations");
 
@@ -736,7 +738,21 @@ mod tests {
         .await
         .expect("seed quote");
 
-        (pool, "Q-TEST-001".to_string())
+        // Create a portal link so handlers can resolve the token
+        let token = generate_token();
+        let expires_at = (Utc::now() + chrono::Duration::days(30)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO portal_link (id, quote_id, token, expires_at, created_by, created_at)
+             VALUES ('PL-TEST', 'Q-TEST-001', ?, ?, 'test', ?)",
+        )
+        .bind(&token)
+        .bind(&expires_at)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed portal link");
+
+        (pool, "Q-TEST-001".to_string(), token)
     }
 
     fn state(pool: sqlx::SqlitePool) -> State<PortalState> {
@@ -745,10 +761,10 @@ mod tests {
 
     #[tokio::test]
     async fn approve_quote_records_approval_and_updates_status() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, token) = setup().await;
 
         let result = approve_quote(
-            axum::extract::Path(quote_id.clone()),
+            axum::extract::Path(token.clone()),
             state(pool.clone()),
             Json(ApproveRequest {
                 approver_name: "Jane Doe".to_string(),
@@ -792,10 +808,10 @@ mod tests {
 
     #[tokio::test]
     async fn approve_quote_rejects_empty_name() {
-        let (pool, quote_id) = setup().await;
+        let (pool, _, token) = setup().await;
 
         let result = approve_quote(
-            axum::extract::Path(quote_id),
+            axum::extract::Path(token),
             state(pool),
             Json(ApproveRequest {
                 approver_name: "  ".to_string(),
@@ -812,10 +828,10 @@ mod tests {
 
     #[tokio::test]
     async fn reject_quote_records_rejection_and_updates_status() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, token) = setup().await;
 
         let result = reject_quote(
-            axum::extract::Path(quote_id.clone()),
+            axum::extract::Path(token.clone()),
             state(pool.clone()),
             Json(RejectRequest { reason: "Pricing too high for our budget".to_string() }),
         )
@@ -845,10 +861,10 @@ mod tests {
 
     #[tokio::test]
     async fn reject_quote_rejects_empty_reason() {
-        let (pool, quote_id) = setup().await;
+        let (pool, _, token) = setup().await;
 
         let result = reject_quote(
-            axum::extract::Path(quote_id),
+            axum::extract::Path(token),
             state(pool),
             Json(RejectRequest { reason: "".to_string() }),
         )
@@ -861,10 +877,10 @@ mod tests {
 
     #[tokio::test]
     async fn add_comment_records_audit_event() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, token) = setup().await;
 
         let result = add_comment(
-            axum::extract::Path(quote_id.clone()),
+            axum::extract::Path(token.clone()),
             state(pool.clone()),
             Json(CommentRequest {
                 text: "Can we discuss pricing?".to_string(),
@@ -891,10 +907,10 @@ mod tests {
 
     #[tokio::test]
     async fn add_comment_rejects_empty_text() {
-        let (pool, quote_id) = setup().await;
+        let (pool, _, token) = setup().await;
 
         let result = add_comment(
-            axum::extract::Path(quote_id),
+            axum::extract::Path(token),
             state(pool),
             Json(CommentRequest {
                 text: "  ".to_string(),
@@ -910,7 +926,7 @@ mod tests {
 
     #[tokio::test]
     async fn approve_nonexistent_quote_returns_not_found() {
-        let (pool, _) = setup().await;
+        let (pool, _, _) = setup().await;
 
         let result = approve_quote(
             axum::extract::Path("Q-NONEXISTENT".to_string()),
@@ -935,7 +951,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_link_returns_token_and_expiry() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, _token) = setup().await;
 
         let result = create_link(
             state(pool.clone()),
@@ -957,7 +973,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_link_for_nonexistent_quote_returns_not_found() {
-        let (pool, _) = setup().await;
+        let (pool, _, _) = setup().await;
 
         let result = create_link(
             state(pool),
@@ -976,7 +992,7 @@ mod tests {
 
     #[tokio::test]
     async fn create_link_revokes_previous_links() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, _token) = setup().await;
 
         // Create first link
         let first = create_link(
@@ -1014,7 +1030,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_link_succeeds() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, _token) = setup().await;
 
         let link = create_link(
             state(pool.clone()),
@@ -1035,7 +1051,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_link_already_revoked_returns_not_found() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, _token) = setup().await;
 
         let link = create_link(
             state(pool.clone()),
@@ -1066,7 +1082,7 @@ mod tests {
 
     #[tokio::test]
     async fn revoke_link_empty_token_returns_bad_request() {
-        let (pool, _) = setup().await;
+        let (pool, _, _) = setup().await;
 
         let result =
             revoke_link(state(pool), Json(RevokeLinkRequest { token: "  ".to_string() })).await;
@@ -1078,7 +1094,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_links_returns_active_only() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, _token) = setup().await;
 
         // Create two links (first gets auto-revoked by second)
         let _first = create_link(
@@ -1113,7 +1129,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_quote_by_token_via_portal_link() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, _token) = setup().await;
 
         let link = create_link(
             state(pool.clone()),
@@ -1133,7 +1149,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_quote_by_token_revoked_returns_gone() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, _token) = setup().await;
 
         let link = create_link(
             state(pool.clone()),
@@ -1157,7 +1173,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_quote_by_token_expired_returns_gone() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, _token) = setup().await;
 
         // Insert a link that already expired
         let past = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
@@ -1180,7 +1196,7 @@ mod tests {
 
     #[tokio::test]
     async fn resolve_quote_by_raw_id_fallback() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, _token) = setup().await;
 
         let result = resolve_quote_by_token(&pool, &quote_id).await;
 
@@ -1190,7 +1206,7 @@ mod tests {
 
     #[tokio::test]
     async fn list_links_excludes_expired_links() {
-        let (pool, quote_id) = setup().await;
+        let (pool, quote_id, _token) = setup().await;
 
         let first = create_link(
             state(pool.clone()),
@@ -1225,5 +1241,207 @@ mod tests {
         let links = result.0;
         assert_eq!(links.len(), 1);
         assert_eq!(links[0].token, active.0.token);
+    }
+
+    // -----------------------------------------------------------------------
+    // Comment functionality tests (quotey-003-4)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn add_comment_defaults_author_fields() {
+        let (pool, _, token) = setup().await;
+
+        let _ = add_comment(
+            axum::extract::Path(token.clone()),
+            state(pool.clone()),
+            Json(CommentRequest {
+                text: "Hello".to_string(),
+                author_name: None,
+                author_email: None,
+                parent_id: None,
+            }),
+        )
+        .await
+        .expect("should succeed");
+
+        let name: String = sqlx::query_scalar("SELECT author_name FROM portal_comment LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch name");
+        assert_eq!(name, "Portal Customer");
+
+        let email: String = sqlx::query_scalar("SELECT author_email FROM portal_comment LIMIT 1")
+            .fetch_one(&pool)
+            .await
+            .expect("fetch email");
+        assert_eq!(email, "noreply@portal.local");
+    }
+
+    #[tokio::test]
+    async fn add_comment_threaded_reply() {
+        let (pool, _, token) = setup().await;
+
+        // Create parent comment
+        let _ = add_comment(
+            axum::extract::Path(token.clone()),
+            state(pool.clone()),
+            Json(CommentRequest {
+                text: "Parent comment".to_string(),
+                author_name: Some("Alice".to_string()),
+                author_email: Some("alice@acme.com".to_string()),
+                parent_id: None,
+            }),
+        )
+        .await
+        .expect("parent comment");
+
+        let parent_id: String =
+            sqlx::query_scalar("SELECT id FROM portal_comment WHERE body = 'Parent comment'")
+                .fetch_one(&pool)
+                .await
+                .expect("get parent id");
+
+        // Create threaded reply
+        let _ = add_comment(
+            axum::extract::Path(token.clone()),
+            state(pool.clone()),
+            Json(CommentRequest {
+                text: "Reply to parent".to_string(),
+                author_name: Some("Bob".to_string()),
+                author_email: Some("bob@acme.com".to_string()),
+                parent_id: Some(parent_id.clone()),
+            }),
+        )
+        .await
+        .expect("reply comment");
+
+        let stored_parent: Option<String> = sqlx::query_scalar(
+            "SELECT parent_id FROM portal_comment WHERE body = 'Reply to parent'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("fetch parent_id");
+        assert_eq!(stored_parent, Some(parent_id));
+    }
+
+    #[tokio::test]
+    async fn add_comment_invalid_parent_returns_not_found() {
+        let (pool, _, token) = setup().await;
+
+        let result = add_comment(
+            axum::extract::Path(token),
+            state(pool),
+            Json(CommentRequest {
+                text: "Reply".to_string(),
+                author_name: None,
+                author_email: None,
+                parent_id: Some("NONEXISTENT".to_string()),
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn add_line_comment_stores_line_id() {
+        let (pool, quote_id, token) = setup().await;
+
+        // Seed a quote line
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO quote_line (id, quote_id, product_id, quantity, created_at, updated_at)
+             VALUES ('QL-001', ?, 'PROD-A', 2, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed line");
+
+        let result = add_line_comment(
+            axum::extract::Path((token.clone(), "QL-001".to_string())),
+            state(pool.clone()),
+            Json(CommentRequest {
+                text: "This line item is too expensive".to_string(),
+                author_name: Some("Customer".to_string()),
+                author_email: Some("cust@example.com".to_string()),
+                parent_id: None,
+            }),
+        )
+        .await
+        .expect("line comment");
+
+        assert!(result.0.success);
+
+        let line_id: Option<String> =
+            sqlx::query_scalar("SELECT quote_line_id FROM portal_comment WHERE quote_id = ?")
+                .bind(&quote_id)
+                .fetch_one(&pool)
+                .await
+                .expect("fetch line_id");
+        assert_eq!(line_id, Some("QL-001".to_string()));
+    }
+
+    #[tokio::test]
+    async fn add_line_comment_nonexistent_line_returns_not_found() {
+        let (pool, _, token) = setup().await;
+
+        let result = add_line_comment(
+            axum::extract::Path((token, "QL-FAKE".to_string())),
+            state(pool),
+            Json(CommentRequest {
+                text: "Comment".to_string(),
+                author_name: None,
+                author_email: None,
+                parent_id: None,
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn list_comments_returns_all_comments_ordered() {
+        let (pool, _, token) = setup().await;
+
+        let _ = add_comment(
+            axum::extract::Path(token.clone()),
+            state(pool.clone()),
+            Json(CommentRequest {
+                text: "First".to_string(),
+                author_name: None,
+                author_email: None,
+                parent_id: None,
+            }),
+        )
+        .await
+        .expect("first comment");
+
+        let _ = add_comment(
+            axum::extract::Path(token.clone()),
+            state(pool.clone()),
+            Json(CommentRequest {
+                text: "Second".to_string(),
+                author_name: None,
+                author_email: None,
+                parent_id: None,
+            }),
+        )
+        .await
+        .expect("second comment");
+
+        let result =
+            list_comments(axum::extract::Path(token), state(pool)).await.expect("list comments");
+
+        let comments = result.0;
+        let arr = comments["comments"].as_array().expect("comments array");
+        assert_eq!(arr.len(), 2);
     }
 }
