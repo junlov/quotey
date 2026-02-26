@@ -11,16 +11,15 @@ authors = ["Quotey Contributors"]
 rmcp = { version = "0.8", features = ["server"] }
 
 # Quotey internal
-core = { package = "quotey-core", path = "../core" }
-db = { package = "quotey-db", path = "../db" }
+quotey-core = { path = "../core" }
+quotey-db = { path = "../db" }
 
 # Async runtime
-tokio = { workspace = true }
+tokio = { workspace = true, features = ["io-std", "macros"] }
 
 # Serialization
 serde = { workspace = true }
 serde_json = { workspace = true }
-schemars = "0.8"
 
 # Error handling
 anyhow = { workspace = true }
@@ -28,6 +27,7 @@ thiserror = { workspace = true }
 
 # Logging
 tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
 
 # Other
 async-trait = { workspace = true }
@@ -35,3 +35,7 @@ chrono = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"
+
+[[bin]]
+name = "quotey-mcp"
+path = "src/main.rs"

@@ -4,21 +4,36 @@
 //! to programmatically interact with Quotey for quote creation, pricing,
 //! approval workflows, and catalog management.
 //!
-//! ## Architecture
+//! ## Tools Available
 //!
-//! - `QuoteyMcpServer`: Main server implementing MCP protocol
-//! - `tools/`: Individual tool implementations (catalog, quote, approval, pdf)
-//! - `transport/`: Transport layer (stdio, TCP, WebSocket)
+//! ### Catalog Tools
+//! - `catalog_search`: Search products by name, SKU, or description
+//! - `catalog_get`: Get detailed product information by ID
+//!
+//! ### Quote Tools
+//! - `quote_create`: Create a new quote for a customer
+//! - `quote_get`: Get detailed quote information
+//! - `quote_price`: Run pricing engine on a quote
+//! - `quote_list`: List quotes with optional filters
+//!
+//! ### Approval Tools
+//! - `approval_request`: Submit a quote for approval
+//! - `approval_status`: Check approval status for a quote
+//! - `approval_pending`: List all pending approval requests
+//!
+//! ### PDF Tools
+//! - `quote_pdf`: Generate PDF for a quote
 //!
 //! ## Example Usage
 //!
 //! ```no_run
 //! use quotey_mcp::QuoteyMcpServer;
-//! use std::io::{stdin, stdout};
+//! use db::connect;
 //!
 //! #[tokio::main]
 //! async fn main() -> anyhow::Result<()> {
-//!     let server = QuoteyMcpServer::new().await?;
+//!     let db_pool = connect("sqlite://quotey.db").await?;
+//!     let server = QuoteyMcpServer::new(db_pool);
 //!     server.run_stdio().await
 //! }
 //! ```
@@ -35,7 +50,7 @@ use thiserror::Error;
 #[derive(Error, Debug)]
 pub enum McpError {
     #[error("database error: {0}")]
-    Database(#[from] db::RepositoryError),
+    Database(#[from] quotey_db::repositories::RepositoryError),
 
     #[error("domain error: {0}")]
     Domain(String),
@@ -68,3 +83,6 @@ impl McpError {
 
 /// Result type for MCP operations
 pub type McpResult<T> = Result<T, McpError>;
+
+/// Version of the MCP server
+pub const VERSION: &str = env!("CARGO_PKG_VERSION");
