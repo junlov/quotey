@@ -274,7 +274,7 @@
 {
   "id": "quotey-002-1",
   "title": "TASK: Design similarity scoring algorithm",
-  "status": "open",
+  "status": "closed",
   "priority": 1,
   "issue_type": "task",
   "created_at": "2026-02-26T11:15:00Z",
@@ -287,7 +287,9 @@
     "recommendations",
     "algorithm",
     "design"
-  ]
+  ],
+  "resolution": "completed",
+  "assigned_to": "Kimi"
 }
 {
   "id": "quotey-002-2",
