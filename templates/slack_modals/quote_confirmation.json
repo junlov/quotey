@@ -1,0 +1,221 @@
+{
+  "title": {
+    "type": "plain_text",
+    "text": "✅ Confirm Quote"
+  },
+  "callback_id": "quote_confirmation_modal",
+  "submit": {
+    "type": "plain_text",
+    "text": "Confirm & Send"
+  },
+  "close": {
+    "type": "plain_text",
+    "text": "Edit Quote"
+  },
+  "blocks": [
+    {
+      "type": "header",
+      "text": {
+        "type": "plain_text",
+        "text": "Quote Summary",
+        "emoji": true
+      }
+    },
+    {
+      "type": "section",
+      "fields": [
+        {
+          "type": "mrkdwn",
+          "text": "*Quote ID:*\n{{ quote.id | default(value='Q-2026-0001') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Version:*\nv{{ quote.version | default(value=1) }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Customer:*\n{{ customer.name | default(value='Acme Corp') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Status:*\n{{ quote.status | default(value='Draft') }}"
+        }
+      ]
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📋 Line Items*"
+      }
+    },
+    {% for line in quote.lines | default(value=[
+      {product_name: "Pro Plan", quantity: 100, unit_price: "$10.00", total: "$1,000.00"},
+      {product_name: "SSO Add-on", quantity: 100, unit_price: "$2.00", total: "$200.00"},
+      {product_name: "Premium Support", quantity: 1, unit_price: "$500.00", total: "$500.00"}
+    ]) %}
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "{{ loop.index }}. *{{ line.product_name }}*\n   {{ line.quantity }} × {{ line.unit_price }} = {{ line.total }}"
+      }
+    },
+    {% endfor %}
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "fields": [
+        {
+          "type": "mrkdwn",
+          "text": "*Subtotal:*\n{{ quote.subtotal | default(value='$1,700.00') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Discount:*\n{{ quote.discount_total | default(value='$0.00') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Tax:*\n{{ quote.tax_amount | default(value='$0.00') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Total:*\n*{{ quote.total | default(value='$1,700.00') }}*"
+        }
+      ]
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📅 Quote Details*"
+      }
+    },
+    {
+      "type": "section",
+      "fields": [
+        {
+          "type": "mrkdwn",
+          "text": "*Term:*\n{{ quote.term_months | default(value=12) }} months"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Valid Until:*\n{{ quote.valid_until | default(value='2026-03-28') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Payment Terms:*\n{{ quote.payment_terms | default(value='Net 30') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Billing:*\n{{ quote.billing_frequency | default(value='Monthly') }}"
+        }
+      ]
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*✓ Policy Checks*"
+      }
+    },
+    {% if policy_violations | default(value=[]) | length > 0 %}
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "⚠️ *Attention Required:*\n{% for violation in policy_violations %}• {{ violation.message }}\n{% endfor %}"
+      },
+      "accessory": {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "Request Approval"
+        },
+        "value": "request_approval|{{ quote.id }}",
+        "action_id": "request_approval",
+        "style": "primary"
+      }
+    },
+    {% else %}
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "✅ All policy checks passed\n✅ No approval required\n✅ Pricing validated"
+      }
+    },
+    {% endif %}
+    {
+      "type": "divider"
+    },
+    {
+      "type": "input",
+      "block_id": "notes_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "notes",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Add any notes for the customer..."
+        },
+        "multiline": true
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Notes (Optional)"
+      },
+      "optional": true
+    },
+    {
+      "type": "section",
+      "block_id": "delivery_options_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📤 Delivery Options*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "delivery_option",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Select option"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Send PDF via Email"
+            },
+            "value": "email_pdf"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Share Portal Link"
+            },
+            "value": "portal_link"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Save to CRM Only"
+            },
+            "value": "crm_only"
+          }
+        ]
+      }
+    }
+  ]
+}

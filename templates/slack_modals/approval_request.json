@@ -1,0 +1,300 @@
+{
+  "title": {
+    "type": "plain_text",
+    "text": "🔔 Approval Request"
+  },
+  "callback_id": "approval_request_modal",
+  "submit": {
+    "type": "plain_text",
+    "text": "Submit Request"
+  },
+  "close": {
+    "type": "plain_text",
+    "text": "Cancel"
+  },
+  "blocks": [
+    {
+      "type": "header",
+      "text": {
+        "type": "plain_text",
+        "text": "Request Approval",
+        "emoji": true
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "Quote *{{ quote.id | default(value='Q-2026-0001') }}* requires approval before it can be finalized."
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📊 Quote Summary*"
+      }
+    },
+    {
+      "type": "section",
+      "fields": [
+        {
+          "type": "mrkdwn",
+          "text": "*Customer:*\n{{ customer.name | default(value='Acme Corp') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Segment:*\n{{ customer.segment | default(value='Enterprise') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Deal Value:*\n{{ quote.total | default(value='$25,000.00') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Discount:*\n{{ quote.discount_pct | default(value='15%') }}"
+        }
+      ]
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*⚠️ Policy Violations*"
+      }
+    },
+    {% for violation in policy_violations | default(value=[
+      {policy: "SMB Discount Cap", threshold: "10%", actual: "15%", severity: "approval_required"}
+    ]) %}
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "• *{{ violation.policy }}*\n  Threshold: {{ violation.threshold }} | Actual: {{ violation.actual }}"
+      }
+    },
+    {% endfor %}
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📈 Deal Context*"
+      }
+    },
+    {
+      "type": "section",
+      "fields": [
+        {
+          "type": "mrkdwn",
+          "text": "*Customer Tenure:*\n{{ customer.tenure_months | default(value='14') }} months"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Previous Discount Avg:*\n{{ customer.avg_discount | default(value='7.8%') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Competitor:*\n{{ deal.competitor | default(value='Vendor X') }}"
+        },
+        {
+          "type": "mrkdwn",
+          "text": "*Close Date:*\n{{ deal.close_date | default(value='2026-03-15') }}"
+        }
+      ]
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*👤 Approver*"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "approver_select_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Select Approver*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "approver_select",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Select..."
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Sales Manager"
+            },
+            "value": "sales_manager"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "VP Sales"
+            },
+            "value": "vp_sales"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Deal Desk"
+            },
+            "value": "deal_desk"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "CFO"
+            },
+            "value": "cfo"
+          }
+        ],
+        "initial_option": {
+          "text": {
+            "type": "plain_text",
+            "text": "{{ required_approver | default(value='Sales Manager') }}"
+          },
+          "value": "{{ required_approver_value | default(value='sales_manager') }}"
+        }
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "specific_approver_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Or Select Specific Person*"
+      },
+      "accessory": {
+        "type": "users_select",
+        "action_id": "specific_approver",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Search users..."
+        }
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "input",
+      "block_id": "justification_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "justification",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Explain why this discount is necessary..."
+        },
+        "multiline": true,
+        "initial_value": "{{ auto_justification | default(value='') }}"
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Justification"
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*💡 Auto-Generated Context* (included in request):"
+      }
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "{{ auto_context | default(value='• Customer has 98% utilization\n• Expansion of 50 seats (+33%)\n• Competitive pressure from Vendor X (20% discount offered)\n• Net revenue impact: +$1,020/year vs current contract') }}"
+        }
+      ]
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "block_id": "urgency_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*⚡ Urgency*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "urgency",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Normal"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "🟢 Normal (24h)"
+            },
+            "value": "normal"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "🟡 High (4h)"
+            },
+            "value": "high"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "🔴 Urgent (1h)"
+            },
+            "value": "urgent"
+          }
+        ]
+      }
+    },
+    {
+      "type": "input",
+      "block_id": "expiry_block",
+      "element": {
+        "type": "datepicker",
+        "action_id": "expiry_date",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Select expiry date"
+        },
+        "initial_date": "{{ default_expiry | default(value='2026-02-28') }}"
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Request Expires"
+      },
+      "optional": true
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "💡 Tip: The approver will receive a notification in Slack with all the details. They can approve directly from the notification."
+        }
+      ]
+    }
+  ]
+}

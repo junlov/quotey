@@ -1,0 +1,321 @@
+{
+  "title": {
+    "type": "plain_text",
+    "text": "🔗 Constraint Rule Builder"
+  },
+  "callback_id": "constraint_rule_builder_modal",
+  "submit": {
+    "type": "plain_text",
+    "text": "Save Constraint"
+  },
+  "close": {
+    "type": "plain_text",
+    "text": "Cancel"
+  },
+  "blocks": [
+    {
+      "type": "header",
+      "text": {
+        "type": "plain_text",
+        "text": "Create Product Constraint",
+        "emoji": true
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "Define relationships between products (requires, excludes, etc.)"
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "input",
+      "block_id": "constraint_name_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "constraint_name",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "e.g., SSO Requires Enterprise"
+        }
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Constraint Name"
+      }
+    },
+    {
+      "type": "input",
+      "block_id": "constraint_description_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "constraint_description",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Explain what this constraint enforces"
+        },
+        "multiline": true
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Description"
+      },
+      "optional": true
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📌 Constraint Type*"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "constraint_type_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Select Type*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "constraint_type",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Choose constraint type"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "➕ Requires - Product A requires Product B"
+            },
+            "value": "requires"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "⛔ Excludes - Product A excludes Product B"
+            },
+            "value": "excludes"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "🔗 Recommends - Product A recommends Product B"
+            },
+            "value": "recommends"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "📊 Attribute - Must satisfy attribute condition"
+            },
+            "value": "attribute"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "🔢 Quantity - Min/max quantity constraint"
+            },
+            "value": "quantity"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "📦 Bundle - Bundle composition rule"
+            },
+            "value": "bundle"
+          }
+        ]
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*🏷️ Source Product*"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "source_product_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Select Product*"
+      },
+      "accessory": {
+        "type": "external_select",
+        "action_id": "source_product",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Search products..."
+        }
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*➡️ Target Product* (for Requires/Excludes/Recommends)"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "target_product_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Select Product*"
+      },
+      "accessory": {
+        "type": "external_select",
+        "action_id": "target_product",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Search products..."
+        }
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*⚙️ Advanced Options*"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "conditional_constraint_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Apply Only When* (Optional Condition)"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "conditional_constraint",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Always apply"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Always apply"
+            },
+            "value": "always"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "If quantity > X"
+            },
+            "value": "if_quantity"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "If segment = Enterprise"
+            },
+            "value": "if_enterprise"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Custom condition..."
+            },
+            "value": "custom"
+          }
+        ]
+      }
+    },
+    {
+      "type": "input",
+      "block_id": "error_message_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "error_message",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Message shown when constraint is violated"
+        },
+        "initial_value": "{{ default_error | default(value='This combination is not allowed.') }}"
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Error Message"
+      },
+      "optional": true
+    },
+    {
+      "type": "input",
+      "block_id": "suggestion_message_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "suggestion_message",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Suggested fix when constraint is violated"
+        }
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Suggestion Message"
+      },
+      "optional": true
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📝 Preview*"
+      }
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "```\nSSO Add-on\n  REQUIRES Enterprise Plan\n  \n  Error: SSO requires Enterprise tier\n  Suggestion: Upgrade to Enterprise or remove SSO\n```"
+        }
+      ]
+    },
+    {
+      "type": "actions",
+      "elements": [
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
+            "text": "🧪 Test Constraint"
+          },
+          "value": "test_constraint",
+          "action_id": "test_constraint"
+        },
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
+            "text": "👁️ View Examples"
+          },
+          "value": "view_examples",
+          "action_id": "view_constraint_examples"
+        }
+      ]
+    }
+  ]
+}
