@@ -29,9 +29,8 @@ fn tera_format_filter(
     value: &tera::Value,
     args: &HashMap<String, tera::Value>,
 ) -> tera::Result<tera::Value> {
-    let format_str = value
-        .as_str()
-        .ok_or_else(|| tera::Error::msg("format filter expects a string input"))?;
+    let format_str =
+        value.as_str().ok_or_else(|| tera::Error::msg("format filter expects a string input"))?;
 
     let val = args
         .get("value")
@@ -72,6 +71,16 @@ fn tera_money_filter(
     Ok(tera::Value::String(format!("{:.2}", num)))
 }
 
+fn register_quote_style_partials(tera: &mut Tera) {
+    tera.add_raw_template(
+        "styles/quote-base.css",
+        include_str!("../../../templates/styles/quote-base.css"),
+    )
+    .ok();
+    tera.add_raw_template("styles/quote.css", include_str!("../../../templates/styles/quote.css"))
+        .ok();
+}
+
 /// PDF generation error types
 #[derive(Debug, thiserror::Error)]
 pub enum PdfError {
@@ -99,11 +108,11 @@ impl PdfGenerator {
             .map_err(|e| PdfError::Template(e.to_string()))?;
 
         register_template_filters(&mut tera);
+        register_quote_style_partials(&mut tera);
 
         // Check for wkhtmltopdf
-        let wkhtmltopdf_path = which::which("wkhtmltopdf")
-            .ok()
-            .map(|p| p.to_string_lossy().to_string());
+        let wkhtmltopdf_path =
+            which::which("wkhtmltopdf").ok().map(|p| p.to_string_lossy().to_string());
 
         if wkhtmltopdf_path.is_none() {
             warn!("wkhtmltopdf not found in PATH - PDF generation will use browser rendering");
@@ -118,37 +127,40 @@ impl PdfGenerator {
     pub fn with_embedded_templates() -> Self {
         let mut tera = Tera::default();
         register_template_filters(&mut tera);
+        register_quote_style_partials(&mut tera);
 
         // Add embedded templates - unwrap to ensure they load successfully
         tera.add_raw_template(
             "detailed.html.tera",
             include_str!("../../../templates/quotes/detailed.html.tera"),
-        ).expect("Failed to load detailed.html.tera template");
-        
+        )
+        .expect("Failed to load detailed.html.tera template");
+
         tera.add_raw_template(
             "executive_summary.html.tera",
             include_str!("../../../templates/quotes/executive_summary.html.tera"),
-        ).expect("Failed to load executive_summary.html.tera template");
-        
+        )
+        .expect("Failed to load executive_summary.html.tera template");
+
         tera.add_raw_template(
             "compact.html.tera",
             include_str!("../../../templates/quotes/compact.html.tera"),
-        ).expect("Failed to load compact.html.tera template");
+        )
+        .expect("Failed to load compact.html.tera template");
 
         // Check for wkhtmltopdf
-        let wkhtmltopdf_path = which::which("wkhtmltopdf")
-            .ok()
-            .map(|p| p.to_string_lossy().to_string());
+        let wkhtmltopdf_path =
+            which::which("wkhtmltopdf").ok().map(|p| p.to_string_lossy().to_string());
 
         Self { tera, wkhtmltopdf_path }
     }
 
     /// Generate a PDF for a quote
-    /// 
+    ///
     /// # Arguments
     /// * `quote_data` - The quote data to render
     /// * `template` - The template name to use (detailed, executive_summary, compact)
-    /// 
+    ///
     /// # Returns
     /// Either a PDF bytes or HTML bytes depending on wkhtmltopdf availability
     pub async fn generate_quote_pdf(
@@ -159,13 +171,50 @@ impl PdfGenerator {
         // Build context
         let mut context = Context::new();
         context.insert("quote", quote_data);
-        context.insert("account", &quote_data.get("account").cloned().unwrap_or(serde_json::json!({})));
+        context.insert(
+            "account",
+            &quote_data.get("account").cloned().unwrap_or(serde_json::json!({})),
+        );
         context.insert("lines", &quote_data.get("lines").cloned().unwrap_or(serde_json::json!([])));
-        context.insert("pricing", &quote_data.get("pricing").cloned().unwrap_or(serde_json::json!({})));
-        context.insert("sales_rep", &quote_data.get("sales_rep").cloned().unwrap_or(serde_json::json!({})));
-        context.insert("company_name", &quote_data.get("company_name").cloned().unwrap_or(serde_json::json!("Quotey")));
-        context.insert("primary_color", &quote_data.get("primary_color").cloned().unwrap_or(serde_json::json!("#2563eb")));
+        context.insert(
+            "pricing",
+            &quote_data.get("pricing").cloned().unwrap_or(serde_json::json!({})),
+        );
+        context.insert(
+            "sales_rep",
+            &quote_data.get("sales_rep").cloned().unwrap_or(serde_json::json!({})),
+        );
+        context.insert(
+            "company_name",
+            &quote_data.get("company_name").cloned().unwrap_or(serde_json::json!("Quotey")),
+        );
+        context.insert(
+            "primary_color",
+            &quote_data.get("primary_color").cloned().unwrap_or(serde_json::json!("#2563eb")),
+        );
         context.insert("white_label", &false);
+
+        // Assumption tracking for F-003
+        context.insert(
+            "assumptions",
+            &quote_data.get("assumptions").cloned().unwrap_or(serde_json::json!([])),
+        );
+        context.insert(
+            "has_assumptions",
+            &quote_data.get("has_assumptions").cloned().unwrap_or(serde_json::json!(false)),
+        );
+        context.insert(
+            "currency_explicit",
+            &quote_data.get("currency_explicit").cloned().unwrap_or(serde_json::json!(false)),
+        );
+        context.insert(
+            "tax_rate_explicit",
+            &quote_data.get("tax_rate_explicit").cloned().unwrap_or(serde_json::json!(false)),
+        );
+        context.insert(
+            "payment_terms_explicit",
+            &quote_data.get("payment_terms_explicit").cloned().unwrap_or(serde_json::json!(false)),
+        );
 
         // Render HTML
         let template_name = format!("{}.html.tera", template);
@@ -243,19 +292,40 @@ impl PdfGenerator {
     }
 
     /// Generate HTML for browser printing
-    pub fn generate_print_html(&self, quote_data: &serde_json::Value, template: &str) -> Result<String, PdfError> {
+    pub fn generate_print_html(
+        &self,
+        quote_data: &serde_json::Value,
+        template: &str,
+    ) -> Result<String, PdfError> {
         let mut context = Context::new();
         context.insert("quote", quote_data);
-        context.insert("account", &quote_data.get("account").cloned().unwrap_or(serde_json::json!({})));
+        context.insert(
+            "account",
+            &quote_data.get("account").cloned().unwrap_or(serde_json::json!({})),
+        );
         context.insert("lines", &quote_data.get("lines").cloned().unwrap_or(serde_json::json!([])));
-        context.insert("pricing", &quote_data.get("pricing").cloned().unwrap_or(serde_json::json!({})));
-        context.insert("company_name", &quote_data.get("company_name").cloned().unwrap_or(serde_json::json!("Quotey")));
+        context.insert(
+            "pricing",
+            &quote_data.get("pricing").cloned().unwrap_or(serde_json::json!({})),
+        );
+        context.insert(
+            "company_name",
+            &quote_data.get("company_name").cloned().unwrap_or(serde_json::json!("Quotey")),
+        );
         context.insert("white_label", &false);
 
+        // Assumption tracking for F-003
+        context.insert(
+            "assumptions",
+            &quote_data.get("assumptions").cloned().unwrap_or(serde_json::json!([])),
+        );
+        context.insert(
+            "has_assumptions",
+            &quote_data.get("has_assumptions").cloned().unwrap_or(serde_json::json!(false)),
+        );
+
         let template_name = format!("{}.html.tera", template);
-        self.tera
-            .render(&template_name, &context)
-            .map_err(|e| PdfError::Template(e.to_string()))
+        self.tera.render(&template_name, &context).map_err(|e| PdfError::Template(e.to_string()))
     }
 }
 
@@ -345,16 +415,16 @@ mod tests {
             },
         });
 
-        let result = generator
-            .generate_quote_pdf(&quote_data, "compact")
-            .await;
+        let result = generator.generate_quote_pdf(&quote_data, "compact").await;
 
         match result {
             Ok(PdfResult::Html(html)) => {
                 assert!(html.contains("Q-TEST-001"));
                 assert!(html.contains("Test Account"));
             }
-            Ok(PdfResult::Pdf(_)) => panic!("Expected HTML result when wkhtmltopdf is not available"),
+            Ok(PdfResult::Pdf(_)) => {
+                panic!("Expected HTML result when wkhtmltopdf is not available")
+            }
             Err(e) => {
                 eprintln!("PDF generation error: {}", e);
                 // For debugging, let's just verify the template loads and the generator works

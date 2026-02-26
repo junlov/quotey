@@ -248,7 +248,7 @@
       </div>
       <div class="detail-row">
         <span class="detail-label">Payment Terms</span>
-        <span class="detail-value">{{ quote.payment_terms | default(value="Net 30") }}</span>
+        <span class="detail-value">{{ quote.payment_terms | default(value="Net 30") }}{% if not payment_terms_explicit %}<span class="assumed-inline">(assumed)</span>{% endif %}</span>
       </div>
     </div>
   </section>

@@ -389,14 +389,21 @@ async fn view_quote_page(
         .unwrap_or(false);
 
     // Extract assumption flags from database
-    let currency_explicit: bool = quote_row.try_get::<i64, _>("currency_explicit").unwrap_or(0) == 1;
-    let tax_rate_explicit: bool = quote_row.try_get::<i64, _>("tax_rate_explicit").unwrap_or(0) == 1;
+    let currency_explicit: bool =
+        quote_row.try_get::<i64, _>("currency_explicit").unwrap_or(0) == 1;
+    let tax_rate_explicit: bool =
+        quote_row.try_get::<i64, _>("tax_rate_explicit").unwrap_or(0) == 1;
     let tax_rate_value: f64 = quote_row.try_get::<f64, _>("tax_rate_value").unwrap_or(0.0);
-    let payment_terms: String = quote_row.try_get::<String, _>("payment_terms").unwrap_or_else(|_| "net_30".to_string());
-    let payment_terms_explicit: bool = quote_row.try_get::<i64, _>("payment_terms_explicit").unwrap_or(0) == 1;
-    let billing_country: Option<String> = quote_row.try_get::<Option<String>, _>("billing_country").unwrap_or(None);
-    let billing_country_explicit: bool = quote_row.try_get::<i64, _>("billing_country_explicit").unwrap_or(0) == 1;
-    let currency: String = quote_row.try_get::<String, _>("currency").unwrap_or_else(|_| "USD".to_string());
+    let payment_terms: String =
+        quote_row.try_get::<String, _>("payment_terms").unwrap_or_else(|_| "net_30".to_string());
+    let payment_terms_explicit: bool =
+        quote_row.try_get::<i64, _>("payment_terms_explicit").unwrap_or(0) == 1;
+    let billing_country: Option<String> =
+        quote_row.try_get::<Option<String>, _>("billing_country").unwrap_or(None);
+    let billing_country_explicit: bool =
+        quote_row.try_get::<i64, _>("billing_country_explicit").unwrap_or(0) == 1;
+    let currency: String =
+        quote_row.try_get::<String, _>("currency").unwrap_or_else(|_| "USD".to_string());
 
     // Build assumptions list for display
     let mut assumptions: Vec<serde_json::Value> = Vec::new();

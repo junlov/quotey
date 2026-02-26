@@ -1180,7 +1180,7 @@
                     <h3>Quote Details</h3>
                     <p><strong>Sales Rep:</strong> {{ rep.name | default(value="—") }}</p>
                     <p class="text-light"><strong>Email:</strong> {{ rep.email | default(value="—") }}</p>
-                    <p class="text-light"><strong>Payment Terms:</strong> {{ quote.payment_terms | default(value="Net 30") }}</p>
+                    <p class="text-light"><strong>Payment Terms:</strong> {{ quote.payment_terms | default(value="Net 30") }}{% if not quote.payment_terms_explicit %} <span class="assumption-badge">Assumed</span>{% endif %}</p>
                 </div>
             </div>
 
@@ -1264,7 +1264,7 @@
                 {% endif %}
                 {% if quote.tax_amount %}
                 <div class="totals-row">
-                    <span>Tax ({{ quote.tax_rate | default(value="0%") }})</span>
+                    <span>Tax ({{ quote.tax_rate | default(value="0%") }}){% if not quote.tax_rate_explicit %} <span class="assumption-badge">Assumed</span>{% endif %}</span>
                     <span class="font-mono">{{ quote.tax_amount }}</span>
                 </div>
                 {% endif %}

@@ -73,6 +73,7 @@ This document captures the current state of Quotey UX before any UI-facing chang
 **Location**: Pricing engine output, Slack messages, Portal display
 **Description**: Tax and payment terms show as defaults without explicit assumption status.
 **Impact**: Users don't know what was assumed vs confirmed.
+**Status**: ✅ **RESOLVED** - Added inline "(assumed)" indicators to all templates (portal, PDFs, Slack). Backend already tracks explicit flags via migration 0026.
 **Evidence**: Task `quotey-ux-001-12` addresses this.
 
 ### F-004: Ambiguous Loading/Error States
@@ -194,7 +195,7 @@ This document captures the current state of Quotey UX before any UI-facing chang
 |----------------|--------|--------|
 | F-001: Portal Subtotal Accumulation Bug | **FIXED** | 4a7c8a2 |
 | F-002: Token Lookup Permissive Fallback | **VERIFIED** (already fails closed) | 4a7c8a2 |
-| F-003: Implicit Tax/Payment Assumptions | **PENDING** (quotey-ux-001-12) | - |
+| F-003: Implicit Tax/Payment Assumptions | **FIXED** - Inline "(assumed)" indicators in portal, PDFs, Slack | - |
 | F-004: Ambiguous Loading/Error States | **PENDING** (quotey-ux-001-13) | - |
 | F-005: No Explicit Assumption Cards | **PENDING** (quotey-ux-001-6) | - |
 | F-006: Non-Deterministic Status Language | **PENDING** (quotey-ux-001-3) | - |
@@ -213,3 +214,4 @@ This document captures the current state of Quotey UX before any UI-facing chang
 | Version | Date | Changes |
 |---------|------|---------|
 | 1.0 | 2026-02-26 | Initial baseline with 13 friction points |
+| 1.1 | 2026-02-26 | F-003 fixed: PDF templates now show assumption indicators for tax, currency, payment terms |

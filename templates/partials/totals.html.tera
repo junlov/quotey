@@ -15,7 +15,7 @@
     {% endif %}
     {% if pricing.tax_total and pricing.tax_total > 0 %}
     <tr>
-      <td>Tax ({{ pricing.tax_rate | default(value=0) }}%)</td>
+      <td>Tax ({{ pricing.tax_rate | default(value=0) }}%){% if not tax_rate_explicit %} <span class="assumed">(assumed)</span>{% endif %}</td>
       <td>{{ quote.currency | default(value="$") }}{{ "%.2f" | format(pricing.tax_total) }}</td>
     </tr>
     {% endif %}
