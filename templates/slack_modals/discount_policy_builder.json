@@ -1,0 +1,444 @@
+{
+  "title": {
+    "type": "plain_text",
+    "text": "🏷️ Discount Policy Builder"
+  },
+  "callback_id": "discount_policy_builder_modal",
+  "submit": {
+    "type": "plain_text",
+    "text": "Save Policy"
+  },
+  "close": {
+    "type": "plain_text",
+    "text": "Cancel"
+  },
+  "blocks": [
+    {
+      "type": "header",
+      "text": {
+        "type": "plain_text",
+        "text": "Create Discount Policy",
+        "emoji": true
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "Define discount limits and approval requirements by segment, product, or deal size."
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "input",
+      "block_id": "policy_name_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "policy_name",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "e.g., SMB Discount Cap"
+        }
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Policy Name"
+      }
+    },
+    {
+      "type": "input",
+      "block_id": "policy_description_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "policy_description",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Brief description of this discount policy"
+        },
+        "multiline": true
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Description"
+      },
+      "optional": true
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*🎯 Applicability*"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "target_segment_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Customer Segment*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "target_segment",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "All segments"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "All Segments"
+            },
+            "value": "all"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "SMB"
+            },
+            "value": "smb"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Mid-Market"
+            },
+            "value": "mid_market"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Enterprise"
+            },
+            "value": "enterprise"
+          }
+        ]
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "target_product_category_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Product Category*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "target_product_category",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "All categories"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "All Categories"
+            },
+            "value": "all"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Base Plans"
+            },
+            "value": "base_plans"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Add-ons"
+            },
+            "value": "addons"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Services"
+            },
+            "value": "services"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Support"
+            },
+            "value": "support"
+          }
+        ]
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "deal_size_range_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Deal Size Range (Optional)*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "deal_size_range",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Any size"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Any Size"
+            },
+            "value": "any"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Under $10K"
+            },
+            "value": "under_10k"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "$10K - $50K"
+            },
+            "value": "10k_50k"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "$50K - $100K"
+            },
+            "value": "50k_100k"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "$100K+"
+            },
+            "value": "over_100k"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Custom range..."
+            },
+            "value": "custom"
+          }
+        ]
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📊 Discount Limits*"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "max_discount_auto_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*🟢 Max Discount (Auto-Approved)*\nDiscounts up to this amount require no approval"
+      }
+    },
+    {
+      "type": "input",
+      "block_id": "max_discount_auto_input_block",
+      "element": {
+        "type": "number_input",
+        "action_id": "max_discount_auto",
+        "is_decimal_allowed": true,
+        "placeholder": {
+          "type": "plain_text",
+          "text": "e.g., 10 for 10%"
+        },
+        "min_value": "0",
+        "max_value": "100"
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Auto-Approve Limit (%)"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "max_discount_with_approval_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*🟡 Max Discount (With Approval)*\nDiscounts above auto-limit and up to this amount require approval"
+      }
+    },
+    {
+      "type": "input",
+      "block_id": "max_discount_with_approval_input_block",
+      "element": {
+        "type": "number_input",
+        "action_id": "max_discount_with_approval",
+        "is_decimal_allowed": true,
+        "placeholder": {
+          "type": "plain_text",
+          "text": "e.g., 25 for 25%"
+        },
+        "min_value": "0",
+        "max_value": "100"
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Approval Required Limit (%)"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "hard_cap_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*🔴 Hard Cap (System Limit)*\nDiscounts above this amount are blocked"
+      }
+    },
+    {
+      "type": "input",
+      "block_id": "hard_cap_input_block",
+      "element": {
+        "type": "number_input",
+        "action_id": "hard_cap",
+        "is_decimal_allowed": true,
+        "placeholder": {
+          "type": "plain_text",
+          "text": "e.g., 40 for 40% (or leave blank for no cap)"
+        },
+        "min_value": "0",
+        "max_value": "100"
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Maximum Allowed Discount (%)"
+      },
+      "optional": true
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*👤 Approval Routing*"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "approver_role_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Required Approver Role*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "approver_role",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Select role"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Sales Manager"
+            },
+            "value": "sales_manager"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "VP Sales"
+            },
+            "value": "vp_sales"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Deal Desk"
+            },
+            "value": "deal_desk"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "CFO"
+            },
+            "value": "cfo"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "CEO"
+            },
+            "value": "ceo"
+          }
+        ]
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📝 Policy Preview*"
+      }
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "```\nSMB Discount Policy\n├── Applies to: SMB segment, All products\n├── Auto-approve: up to 10%\n├── Requires approval (Sales Manager): 10-20%\n├── Hard cap: 30% (blocked beyond)\n└── Applies to deals: Any size\n```"
+        }
+      ]
+    },
+    {
+      "type": "actions",
+      "elements": [
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
+            "text": "🧪 Test Policy"
+          },
+          "value": "test_policy",
+          "action_id": "test_discount_policy"
+        },
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
+            "text": "📋 Copy from Template"
+          },
+          "value": "copy_template",
+          "action_id": "copy_policy_template"
+        }
+      ]
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "💡 Tip: Create multiple policies for different segments. More specific policies override general ones."
+        }
+      ]
+    }
+  ]
+}
