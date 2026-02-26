@@ -26,7 +26,7 @@ use axum::{
 use chrono::Utc;
 use quotey_db::DbPool;
 use serde::{Deserialize, Serialize};
-use sqlx::Row;
+use sqlx::{QueryBuilder, Row};
 use std::sync::Arc;
 use tera::{Context, Tera};
 use tracing::{error, info, warn};
@@ -137,7 +137,7 @@ fn init_templates() -> Arc<Tera> {
 
 pub fn router(db_pool: DbPool) -> Router {
     let templates = init_templates();
-    
+
     // Initialize PDF generator with templates
     let pdf_generator = match PdfGenerator::new("templates/quotes") {
         Ok(generator) => {
@@ -178,6 +178,45 @@ pub struct PortalIndexQuery {
     pub search: Option<String>,
 }
 
+const INDEX_PENDING_STATUSES: [&str; 3] = ["draft", "pending", "sent"];
+
+fn canonical_quote_status(raw_status: &str) -> &'static str {
+    let lower = raw_status.to_ascii_lowercase();
+    match lower.as_str() {
+        "draft" | "pending" => "pending",
+        "rejected" | "declined" => "declined",
+        "expired" => "expired",
+        "approved" => "approved",
+        "sent" => "sent",
+        _ => "pending",
+    }
+}
+
+fn normalize_status_filter(raw_status: Option<&str>) -> Option<Vec<String>> {
+    let normalized = raw_status.map(|value| value.trim().to_ascii_lowercase());
+    match normalized.as_deref() {
+        None | Some("") | Some("all") => None,
+        Some("pending") => Some(INDEX_PENDING_STATUSES.iter().map(ToString::to_string).collect()),
+        Some("declined") => Some(vec!["rejected".to_string(), "declined".to_string()]),
+        Some("sent") => Some(vec!["sent".to_string()]),
+        Some("approved") => Some(vec!["approved".to_string()]),
+        Some("expired") => Some(vec!["expired".to_string()]),
+        Some(other) => Some(vec![other.to_string()]),
+    }
+}
+
+fn selected_status(raw_status: Option<&str>) -> String {
+    let normalized = raw_status.map(|value| value.trim().to_ascii_lowercase());
+    match normalized.as_deref() {
+        Some(value) if !value.is_empty() => value.to_string(),
+        _ => "all".to_string(),
+    }
+}
+
+fn selected_search(raw_search: Option<&str>) -> String {
+    raw_search.map(|value| value.trim().to_string()).filter(|v| !v.is_empty()).unwrap_or_default()
+}
+
 /// Render the quote viewer HTML page.
 async fn view_quote_page(
     Path(token): Path<String>,
@@ -190,7 +229,7 @@ async fn view_quote_page(
     // Fetch quote details
     let quote_row = sqlx::query(
         "SELECT id, status, version, currency, term_months, valid_until,
-                created_at, updated_at, created_by
+                created_at, updated_at, created_by, account_id
          FROM quote WHERE id = ?",
     )
     .bind(&quote_id)
@@ -205,10 +244,56 @@ async fn view_quote_page(
         None => return Err((StatusCode::NOT_FOUND, Html("<h1>Quote not found</h1>".to_string()))),
     };
 
+    // Get quote version for pricing snapshot lookup
+    let quote_version: i64 = quote_row.try_get("version").unwrap_or(1);
+
+    // Fetch authoritative pricing snapshot from database (single source of truth for totals)
+    let pricing_snapshot_row = sqlx::query(
+        "SELECT subtotal, discount_total, tax_total, total, currency
+         FROM quote_pricing_snapshot
+         WHERE quote_id = ? AND version = ?
+         LIMIT 1",
+    )
+    .bind(&quote_id)
+    .bind(quote_version)
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
+    })?;
+
+    // Use authoritative totals from pricing snapshot when available
+    let authoritative_subtotal: f64;
+    let authoritative_discount: f64;
+    let authoritative_tax: f64;
+    let authoritative_total: f64;
+    let has_snapshot: bool;
+
+    match &pricing_snapshot_row {
+        Some(row) => {
+            authoritative_subtotal = row.try_get("subtotal").unwrap_or(0.0);
+            authoritative_discount = row.try_get("discount_total").unwrap_or(0.0);
+            authoritative_tax = row.try_get("tax_total").unwrap_or(0.0);
+            authoritative_total = row.try_get("total").unwrap_or(0.0);
+            has_snapshot = true;
+        }
+        None => {
+            authoritative_subtotal = 0.0;
+            authoritative_discount = 0.0;
+            authoritative_tax = 0.0;
+            authoritative_total = 0.0;
+            has_snapshot = false;
+        }
+    };
+
     // Fetch quote lines
     let line_rows = sqlx::query(
-        "SELECT id, product_id, quantity, unit_price, discount_pct, subtotal, notes
-         FROM quote_line WHERE quote_id = ? ORDER BY created_at",
+        "SELECT ql.id, ql.quantity, ql.unit_price, ql.subtotal, ql.discount_pct, ql.notes,
+                COALESCE(p.name, ql.product_id) as product_name, ql.product_id
+         FROM quote_line ql
+         LEFT JOIN product p ON p.id = ql.product_id
+         WHERE ql.quote_id = ?
+         ORDER BY ql.created_at",
     )
     .bind(&quote_id)
     .fetch_all(&state.db_pool)
@@ -217,27 +302,48 @@ async fn view_quote_page(
         (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
     })?;
 
-    // Compute pricing totals from line items (these columns don't exist on the quote table)
-    let mut computed_subtotal = 0.0_f64;
-    let mut computed_discount = 0.0_f64;
-    for row in &line_rows {
-        let qty: i64 = row.try_get("quantity").unwrap_or(0);
-        let unit_price: f64 = row.try_get("unit_price").unwrap_or(0.0);
-        let discount_pct: f64 = row.try_get("discount_pct").unwrap_or(0.0);
-        let line_total = unit_price * qty as f64;
-        computed_subtotal += line_total;
-        computed_discount += line_total * discount_pct / 100.0;
-    }
-    let computed_total = computed_subtotal - computed_discount;
+    // Use authoritative totals from pricing snapshot, or compute from line items as fallback
+    let (final_subtotal, final_discount, final_tax, final_total) = if has_snapshot {
+        // Use authoritative totals from pricing snapshot
+        (authoritative_subtotal, authoritative_discount, authoritative_tax, authoritative_total)
+    } else {
+        // Fallback: compute from line items (for quotes without pricing snapshot)
+        let mut computed_subtotal = 0.0_f64;
+        let mut computed_discount = 0.0_f64;
+        for row in &line_rows {
+            let qty: i64 = row.try_get("quantity").unwrap_or(0);
+            let unit_price: f64 = row.try_get("unit_price").unwrap_or(0.0);
+            let base_subtotal = match row.try_get::<Option<f64>, _>("subtotal") {
+                Ok(Some(value)) => value,
+                _ => unit_price * qty as f64,
+            };
+            let discount_pct: f64 =
+                row.try_get::<f64, _>("discount_pct").unwrap_or(0.0).clamp(0.0, 100.0);
+            computed_subtotal += base_subtotal;
+            computed_discount += base_subtotal * discount_pct / 100.0;
+        }
+        let computed_total = computed_subtotal - computed_discount;
+        (computed_subtotal, computed_discount, 0.0, computed_total)
+    };
 
     let lines: Vec<serde_json::Value> = line_rows
         .iter()
         .map(|row| {
+            let quantity = row.try_get::<i64, _>("quantity").unwrap_or(0);
+            let unit_price: f64 = row.try_get("unit_price").unwrap_or(0.0);
+            let subtotal = match row.try_get::<Option<f64>, _>("subtotal") {
+                Ok(Some(value)) => value,
+                _ => unit_price * quantity as f64,
+            };
+            let discount_pct: f64 =
+                row.try_get::<f64, _>("discount_pct").unwrap_or(0.0).clamp(0.0, 100.0);
+            let line_total = subtotal * (1.0 - discount_pct / 100.0);
+
             serde_json::json!({
-                "product_name": row.try_get::<String, _>("product_id").unwrap_or_default(),
-                "quantity": row.try_get::<i64, _>("quantity").unwrap_or(0),
-                "unit_price": format_price(row.try_get::<f64, _>("unit_price").unwrap_or(0.0)),
-                "total": format_price(row.try_get::<f64, _>("subtotal").unwrap_or(0.0)),
+                "product_name": row.try_get::<String, _>("product_name").unwrap_or_default(),
+                "quantity": quantity,
+                "unit_price": format_price(unit_price),
+                "total": format_price(line_total),
                 "description": row.try_get::<String, _>("notes").unwrap_or_default(),
             })
         })
@@ -252,41 +358,62 @@ async fn view_quote_page(
     .bind(&quote_id)
     .fetch_all(&state.db_pool)
     .await
-    .unwrap_or_default();
+    .map_err(|e| {
+        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
+    })?;
 
-    let comments: Vec<serde_json::Value> = comment_rows.iter().map(|row| {
-        serde_json::json!({
-            "author": row.try_get::<String, _>("author_name").unwrap_or_default(),
-            "text": row.try_get::<String, _>("body").unwrap_or_default(),
-            "timestamp": row.try_get::<String, _>("created_at").unwrap_or_default(),
-            "is_customer": !row.try_get::<String, _>("author_email").unwrap_or_default().contains("@quotey"),
+    let comments: Vec<serde_json::Value> = comment_rows
+        .iter()
+        .map(|row| {
+            let author_email = row.try_get::<String, _>("author_email").unwrap_or_default();
+
+            serde_json::json!({
+                "author": row.try_get::<String, _>("author_name").unwrap_or_default(),
+                "text": row.try_get::<String, _>("body").unwrap_or_default(),
+                "timestamp": row.try_get::<String, _>("created_at").unwrap_or_default(),
+                "is_customer": !author_email.starts_with("portal:"),
+            })
         })
-    }).collect();
+        .collect();
 
     // Build template context
     let mut context = Context::new();
+    let raw_status = quote_row.try_get::<String, _>("status").unwrap_or_default();
+    let display_status = canonical_quote_status(&raw_status);
+    let valid_until = quote_row.try_get::<String, _>("valid_until").unwrap_or_default();
+    let expires_soon = valid_until
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .map(|expires_at| (expires_at - Utc::now()).num_days() <= 3)
+        .unwrap_or(false);
+
     context.insert("quote", &serde_json::json!({
         "quote_id": quote_id,
         "token": token,
-        "status": quote_row.try_get::<String, _>("status").unwrap_or_default(),
+        "status": display_status,
         "version": quote_row.try_get::<i64, _>("version").unwrap_or(1),
         "created_at": quote_row.try_get::<String, _>("created_at").unwrap_or_default(),
-        "valid_until": quote_row.try_get::<String, _>("valid_until").unwrap_or_default(),
+        "valid_until": valid_until,
         "term_months": quote_row.try_get::<i64, _>("term_months").unwrap_or(12),
         "payment_terms": "Net 30",
-        "subtotal": format_price(computed_subtotal),
-        "discount_total": format_price(computed_discount),
-        "tax_amount": format_price(0.0),
-        "total": format_price(computed_total),
+        "subtotal": format_price(final_subtotal),
+        "discount_total": if final_discount > 0.0 { format_price(final_discount) } else { "".to_string() },
+        "tax_rate": format!("{:.0}%", 0.0),
+        "tax_amount": if final_tax > 0.0 { format_price(final_tax) } else { "".to_string() },
+        "total": format_price(final_total),
         "lines": lines,
-        "expires_soon": false, // TODO: calculate from valid_until
+        "expires_soon": expires_soon,
     }));
 
     context.insert(
         "customer",
         &serde_json::json!({
-            "name": "Customer", // TODO: fetch from account table
-            "email": "",
+            "name": quote_row
+                .try_get::<Option<String>, _>("account_id")
+                .ok()
+                .flatten()
+                .map(|id| format!("{id}"))
+                .unwrap_or_else(|| "Customer".to_string()),
+            "email": "customer@example.com",
             "phone": "",
         }),
     );
@@ -295,7 +422,11 @@ async fn view_quote_page(
         "rep",
         &serde_json::json!({
             "name": quote_row.try_get::<String, _>("created_by").unwrap_or_default(),
-            "email": "",
+            "email": if quote_row.try_get::<String, _>("created_by").unwrap_or_default().contains('@') {
+                quote_row.try_get::<String, _>("created_by").unwrap_or_default()
+            } else {
+                String::new()
+            },
         }),
     );
 
@@ -337,7 +468,10 @@ async fn download_quote_pdf(
     // Check if PDF generator is available
     let pdf_generator = state.pdf_generator.as_ref().ok_or_else(|| {
         error!("PDF generator not initialized");
-        (StatusCode::SERVICE_UNAVAILABLE, Json(PortalError { error: "PDF generation not available".to_string() }))
+        (
+            StatusCode::SERVICE_UNAVAILABLE,
+            Json(PortalError { error: "PDF generation not available".to_string() }),
+        )
     })?;
 
     // Fetch complete quote data for PDF generation
@@ -370,23 +504,21 @@ async fn fetch_quote_for_pdf(
     pool: &DbPool,
     quote_id: &str,
 ) -> Result<serde_json::Value, (StatusCode, Json<PortalError>)> {
-    // Fetch quote basic info with account
+    // Fetch quote basic info
     let quote_row = sqlx::query(
-        r#"SELECT 
-            q.id, q.status, q.created_at, q.valid_until,
-            q.account_id, a.name as account_name, a.industry as account_industry
+        r#"SELECT
+            q.id, q.status, q.created_at, q.valid_until, q.currency,
+            q.account_id
          FROM quote q
-         LEFT JOIN account a ON a.id = q.account_id
          WHERE q.id = ?"#,
     )
     .bind(quote_id)
     .fetch_one(pool)
     .await
     .map_err(|e| match e {
-        sqlx::Error::RowNotFound => (
-            StatusCode::NOT_FOUND,
-            Json(PortalError { error: "Quote not found".to_string() }),
-        ),
+        sqlx::Error::RowNotFound => {
+            (StatusCode::NOT_FOUND, Json(PortalError { error: "Quote not found".to_string() }))
+        }
         _ => (
             StatusCode::INTERNAL_SERVER_ERROR,
             Json(PortalError { error: format!("Database error: {}", e) }),
@@ -394,13 +526,16 @@ async fn fetch_quote_for_pdf(
     })?;
 
     // Fetch quote lines
+    let account_id: Option<String> =
+        quote_row.try_get::<Option<String>, _>("account_id").unwrap_or(None);
+    let account_name = account_id.clone().unwrap_or_else(|| "Unknown Account".to_string());
+
     let lines = sqlx::query(
-        r#"SELECT 
-            ql.id, ql.quote_id, ql.product_id, ql.quantity, ql.unit_price,
-            ql.list_price, ql.discount_amount, ql.total_price,
+        r#"SELECT
+            ql.id, ql.quote_id, ql.product_id, ql.quantity, ql.unit_price, ql.subtotal, ql.discount_pct,
             p.name as product_name, p.sku as product_sku
          FROM quote_line ql
-         JOIN product p ON p.id = ql.product_id
+         LEFT JOIN product p ON p.id = ql.product_id
          WHERE ql.quote_id = ?
          ORDER BY ql.id"#,
     )
@@ -415,50 +550,75 @@ async fn fetch_quote_for_pdf(
         )
     })?;
 
-    // Calculate pricing summary
-    let subtotal: f64 = lines.iter()
-        .map(|r| r.try_get::<f64, _>("total_price").unwrap_or(0.0))
-        .sum();
-    let total_discount: f64 = lines.iter()
-        .map(|r| r.try_get::<f64, _>("discount_amount").unwrap_or(0.0))
-        .sum();
-    let tax_rate = 0.08; // 8% tax - in real app this would be configurable
-    let tax = subtotal * tax_rate;
-    let total = subtotal + tax;
+    // Calculate pricing summary using fold to properly accumulate totals
+    let (subtotal, total_discount, lines): (f64, f64, Vec<serde_json::Value>) = lines.iter().fold(
+        (0.0_f64, 0.0_f64, Vec::new()),
+        |(mut sub_acc, mut disc_acc, mut lines_acc), r| {
+            let quantity: i64 = r.try_get("quantity").unwrap_or(0);
+            let unit_price: f64 = r.try_get("unit_price").unwrap_or(0.0);
+            let base_subtotal = match r.try_get::<Option<f64>, _>("subtotal") {
+                Ok(Some(value)) => value,
+                _ => unit_price * quantity as f64,
+            };
+            let discount_pct: f64 =
+                r.try_get::<f64, _>("discount_pct").unwrap_or(0.0).clamp(0.0, 100.0);
+            let discount_amount = base_subtotal * discount_pct / 100.0;
+            let total_price = base_subtotal - discount_amount;
+
+            sub_acc += base_subtotal;
+            disc_acc += discount_amount;
+
+            lines_acc.push(serde_json::json!({
+                "id": r.try_get::<String, _>("id").unwrap_or_default(),
+                "product_name": r.try_get::<String, _>("product_name").unwrap_or_default(),
+                "product_sku": r.try_get::<String, _>("product_sku").unwrap_or_default(),
+                "quantity": quantity,
+                "unit_price": unit_price,
+                "subtotal": total_price,
+                "discount_pct": discount_pct,
+                "discount_amount": discount_amount,
+                "total_price": total_price,
+            }));
+
+            (sub_acc, disc_acc, lines_acc)
+        },
+    );
+
+    let discounted_total = subtotal - total_discount;
+    let tax_rate = 0.0;
+    let tax = discounted_total * tax_rate;
+    let total = discounted_total + tax;
+    let raw_status = quote_row.try_get::<String, _>("status").unwrap_or_default();
 
     // Build the JSON structure expected by the PDF templates
     let quote_data = serde_json::json!({
         "id": quote_id,
-        "status": quote_row.try_get::<String, _>("status").unwrap_or_default(),
+        "status": canonical_quote_status(&raw_status),
         "created_at": quote_row.try_get::<chrono::DateTime<chrono::Utc>, _>("created_at")
             .map(|d| d.to_rfc3339())
             .unwrap_or_default(),
         "valid_until": quote_row.try_get::<chrono::DateTime<chrono::Utc>, _>("valid_until")
             .map(|d| d.to_rfc3339())
             .unwrap_or_default(),
+        "currency": quote_row.try_get::<String, _>("currency").unwrap_or_default(),
         "account": {
-            "id": quote_row.try_get::<String, _>("account_id").unwrap_or_default(),
-            "name": quote_row.try_get::<String, _>("account_name").unwrap_or_else(|_| "Unknown Account".to_string()),
-            "industry": quote_row.try_get::<String, _>("account_industry").unwrap_or_default(),
+            "id": account_id.clone().unwrap_or_default(),
+            "name": account_name,
+            "industry": "",
         },
-        "lines": lines.iter().map(|r| serde_json::json!({
-            "id": r.try_get::<String, _>("id").unwrap_or_default(),
-            "product_name": r.try_get::<String, _>("product_name").unwrap_or_default(),
-            "product_sku": r.try_get::<String, _>("product_sku").unwrap_or_default(),
-            "quantity": r.try_get::<i64, _>("quantity").unwrap_or(1),
-            "unit_price": r.try_get::<f64, _>("unit_price").unwrap_or(0.0),
-            "list_price": r.try_get::<f64, _>("list_price").unwrap_or(0.0),
-            "discount_amount": r.try_get::<f64, _>("discount_amount").unwrap_or(0.0),
-            "total_price": r.try_get::<f64, _>("total_price").unwrap_or(0.0),
-        })).collect::<Vec<_>>(),
+        "lines": lines,
         "pricing": {
             "subtotal": subtotal,
             "total_discount": total_discount,
+            "discount_total": total_discount,
             "tax_rate": tax_rate,
             "tax": tax,
+            "tax_total": tax,
             "total": total,
         },
         "company_name": "Quotey",
+        "quote_id": quote_id,
+        "status_text": canonical_quote_status(&raw_status),
     });
 
     Ok(quote_data)
@@ -470,34 +630,59 @@ async fn portal_index_page(
     State(state): State<PortalState>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
     // Fetch all quotes with optional status filter
-    let status_filter = query.status.as_deref().unwrap_or("all");
+    let status_filter = normalize_status_filter(query.status.as_deref());
+    let selected_filter = selected_status(query.status.as_deref());
+    let selected_search_value = selected_search(query.search.as_deref());
+    let now = Utc::now().to_rfc3339();
+    let search_pattern = selected_search_value.to_ascii_lowercase();
+    let search_pattern =
+        if search_pattern.is_empty() { None } else { Some(format!("%{}%", search_pattern)) };
 
-    let quote_rows = if status_filter == "all" {
-        sqlx::query(
-            "SELECT q.id, q.status, q.created_at, q.valid_until,
-                    COALESCE(SUM(ql.unit_price * ql.quantity), 0.0) AS computed_total
-             FROM quote q
-             LEFT JOIN quote_line ql ON ql.quote_id = q.id
-             GROUP BY q.id
-             ORDER BY q.created_at DESC LIMIT 100",
-        )
-        .fetch_all(&state.db_pool)
-        .await
-    } else {
-        sqlx::query(
-            "SELECT q.id, q.status, q.created_at, q.valid_until,
-                    COALESCE(SUM(ql.unit_price * ql.quantity), 0.0) AS computed_total
-             FROM quote q
-             LEFT JOIN quote_line ql ON ql.quote_id = q.id
-             WHERE q.status = ?
-             GROUP BY q.id
-             ORDER BY q.created_at DESC LIMIT 100",
-        )
-        .bind(status_filter)
-        .fetch_all(&state.db_pool)
-        .await
+    let mut query_builder = QueryBuilder::new(
+        r#"
+        SELECT q.id, q.status, q.created_at, q.valid_until,
+            COALESCE(SUM(
+                (COALESCE(ql.subtotal, COALESCE(ql.unit_price, 0.0) * COALESCE(ql.quantity, 0))
+                * (1.0 - (MAX(0.0, MIN(COALESCE(ql.discount_pct, 0.0), 100.0)) / 100.0))
+            ), 0.0) AS computed_total,
+            (
+                SELECT pl.token
+                FROM portal_link pl
+                WHERE pl.quote_id = q.id
+                  AND pl.revoked = 0
+                  AND pl.expires_at > ?
+                ORDER BY pl.created_at DESC
+                LIMIT 1
+            ) AS token
+        FROM quote q
+        LEFT JOIN quote_line ql ON ql.quote_id = q.id
+        "#,
+    );
+    query_builder.push(" WHERE 1=1");
+    query_builder.push_bind(now);
+
+    if let Some(filter_values) = &status_filter {
+        query_builder.push(" AND q.status IN (");
+        let mut separated = query_builder.separated(", ");
+        for status in filter_values {
+            separated.push_bind(status);
+        }
+        query_builder.push(")");
     }
-    .map_err(|e| {
+
+    if let Some(pattern) = search_pattern.clone() {
+        query_builder.push(" AND (LOWER(q.id) LIKE ");
+        query_builder.push_bind(pattern.clone());
+        query_builder.push(" OR LOWER(q.account_id) LIKE ");
+        query_builder.push_bind(pattern.clone());
+        query_builder.push(" OR LOWER(q.created_by) LIKE ");
+        query_builder.push_bind(pattern);
+        query_builder.push(")");
+    }
+
+    query_builder.push(" GROUP BY q.id ORDER BY q.created_at DESC LIMIT 100");
+
+    let quote_rows = query_builder.build().fetch_all(&state.db_pool).await.map_err(|e| {
         (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
     })?;
 
@@ -507,10 +692,14 @@ async fn portal_index_page(
         .await
         .unwrap_or(0);
 
-    let pending_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE status = 'sent'")
-        .fetch_one(&state.db_pool)
-        .await
-        .unwrap_or(0);
+    let pending_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE status IN (?, ?, ?)")
+            .bind(INDEX_PENDING_STATUSES[0])
+            .bind(INDEX_PENDING_STATUSES[1])
+            .bind(INDEX_PENDING_STATUSES[2])
+            .fetch_one(&state.db_pool)
+            .await
+            .unwrap_or(0);
 
     let approved_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE status = 'approved'")
@@ -518,15 +707,26 @@ async fn portal_index_page(
             .await
             .unwrap_or(0);
 
+    let total_expired_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE status = 'expired'")
+            .fetch_one(&state.db_pool)
+            .await
+            .unwrap_or(0);
+
+    let declined_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE status IN ('rejected', 'declined')")
+            .fetch_one(&state.db_pool)
+            .await
+            .unwrap_or(0);
+
     // Build quotes list
     let quotes: Vec<serde_json::Value> = quote_rows
         .iter()
-        .map(|row| {
+        .map(|row: &sqlx::sqlite::SqliteRow| {
             let quote_id: String = row.try_get("id").unwrap_or_default();
-            let status: String = row.try_get("status").unwrap_or_default();
-
-            // Get the active token for this quote
-            let token = format!("token-{}", &quote_id); // Simplified for now
+            let status = canonical_quote_status(&row.try_get::<String, _>("status").unwrap_or_default());
+            let link_token: Option<String> = row.try_get::<Option<String>, _>("token").unwrap_or(None);
+            let token = link_token.unwrap_or_else(|| quote_id.clone());
 
             serde_json::json!({
                 "token": token,
@@ -535,6 +735,7 @@ async fn portal_index_page(
                 "valid_until": row.try_get::<String, _>("valid_until").unwrap_or_default(),
                 "status": status,
                 "total_amount": format_price(row.try_get::<f64, _>("computed_total").unwrap_or(0.0)),
+                "total_amount_raw": row.try_get::<f64, _>("computed_total").unwrap_or(0.0),
             })
         })
         .collect();
@@ -555,10 +756,14 @@ async fn portal_index_page(
             "total": total_count,
             "pending": pending_count,
             "approved": approved_count,
+            "expired": total_expired_count,
+            "declined": declined_count,
         }),
     );
 
     context.insert("quotes", &quotes);
+    context.insert("status_filter", &selected_filter);
+    context.insert("search", &selected_search_value);
 
     context.insert(
         "branding",
