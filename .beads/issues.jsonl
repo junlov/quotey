@@ -1,12 +1,12 @@
 {
   "id": "quotey-001",
   "title": "EPIC-V2-MCP: MCP Server for AI Agents",
-  "status": "in_progress",
+  "status": "open",
   "priority": 1,
   "issue_type": "epic",
   "created_at": "2026-02-26T11:00:00Z",
   "created_by": "ubuntuman",
-  "updated_at": "2026-02-26T11:25:00Z",
+  "updated_at": "2026-02-26T11:00:00Z",
   "description": "## Overview\nMake Quotey controllable by AI coding agents via Model Context Protocol (MCP). AI agents can programmatically query pricing, create quotes, check approvals, and trigger document generation.\n\n## Why This Matters\nEvery other CPQ tool requires human interaction only. AI agents become internal users, enabling AI-powered quoting workflows. This is a critical differentiator - no competitor offers this. Opens new use cases: automated deal scoring, AI quote optimization, programmatic quote generation.\n\n## Background\nMCP is an open protocol enabling AI agents to connect to tools and services. By exposing Quotey via MCP, we enable Claude Code and other AI agents to create quotes programmatically, automated workflows from external systems, and integration with AI-powered CRM systems.\n\n## Technical Considerations\n- MCP server implementation in Rust (use existing MCP SDK or build custom)\n- Define tool schema for each Quotey capability following MCP conventions\n- Support API key and OAuth authentication\n- Handle rate limiting and error responses properly\n- Ensure idempotency for agent retries\n- Full audit trail for ALL agent actions (critical for enterprise)\n\n## Goals\n1. Agents can query product catalog programmatically\n2. Agents can create and price quotes\n3. Agents can check approval status and trigger approval flows\n4. Agents can trigger PDF generation\n5. Full audit trail exists for all agent actions\n\n## Dependencies\nNone - foundational capability, can start immediately\n\n[Created from: ultrathink feature ideation - TOP 10 IDEA #1]",
   "labels": [
     "v2",
@@ -14,8 +14,7 @@
     "ai-agents",
     "epic",
     "foundational"
-  ],
-  "assigned_to": "Kimi"
+  ]
 }
 {
   "id": "quotey-002",
@@ -186,32 +185,29 @@
 {
   "id": "quotey-001-1",
   "title": "TASK: Research MCP protocol and existing SDKs",
-  "status": "closed",
+  "status": "open",
   "priority": 1,
   "issue_type": "task",
   "created_at": "2026-02-26T11:10:00Z",
   "created_by": "ubuntuman",
-  "updated_at": "2026-02-26T11:30:00Z",
+  "updated_at": "2026-02-26T11:10:00Z",
   "parent": "quotey-001",
   "description": "## Overview\nResearch Model Context Protocol specification, existing SDKs, and how other projects implement MCP servers. Determine best approach for Quotey.\n\n## Why This Matters\nNeed to understand the protocol before implementing. Avoid reinventing wheel by using existing libraries. Ensure approach aligns with MCP conventions for compatibility.\n\n## Tasks\n- Read MCP protocol specification\n- Find existing MCP server implementations (reference implementations)\n- Evaluate Rust MCP SDKs (if any)\n- Document findings and recommendation\n\n## Output\nTechnical recommendation document with:\n- Protocol overview\n- Recommended implementation approach\n- Estimated complexity\n- Dependencies needed\n\n[Created from: ultrathink - EPIC-V2-MCP subtask]",
   "labels": [
     "v2",
     "mcp",
     "research"
-  ],
-  "assigned_to": "Kimi",
-  "resolution": "completed",
-  "completed_at": "2026-02-26T11:30:00Z"
+  ]
 }
 {
   "id": "quotey-001-2",
   "title": "TASK: Define MCP tool schema for Quotey",
-  "status": "closed",
+  "status": "open",
   "priority": 1,
   "issue_type": "task",
   "created_at": "2026-02-26T11:11:00Z",
   "created_by": "ubuntuman",
-  "updated_at": "2026-02-26T11:35:00Z",
+  "updated_at": "2026-02-26T11:11:00Z",
   "parent": "quotey-001",
   "description": "## Overview\nDefine the MCP tool schema - what tools/actions Quotey exposes to AI agents.\n\n## Why This Matters\nThe schema defines the contract between Quotey and AI agents. Must be comprehensive yet simple. Each tool needs clear inputs/outputs.\n\n## Tools to Define\n1. `catalog.search(query)` - Search products\n2. `catalog.get(product_id)` - Get product details\n3. `quote.create(customer_id, lines)` - Create new quote\n4. `quote.get(quote_id)` - Get quote details\n5. `quote.price(quote_id)` - Price a quote\n6. `quote.approve(quote_id)` - Request approval\n7. `quote.status(quote_id)` - Get approval status\n8. `quote.pdf(quote_id)` - Generate PDF\n9. `quote.list(filters)` - List quotes\n10. `approval.pending()` - Get pending approvals\n\n## Output\nJSON schema document for each tool with:\n- Tool name and description\n- Input parameters and types\n- Output format\n- Error cases\n\n[Created from: ultrathink - EPIC-V2-MCP subtask]",
   "labels": [
@@ -219,20 +215,17 @@
     "mcp",
     "schema",
     "api"
-  ],
-  "assigned_to": "Kimi",
-  "resolution": "completed",
-  "completed_at": "2026-02-26T11:35:00Z"
+  ]
 }
 {
   "id": "quotey-001-3",
   "title": "TASK: Implement MCP server in Rust",
-  "status": "in_progress",
+  "status": "closed",
   "priority": 1,
   "issue_type": "task",
   "created_at": "2026-02-26T11:12:00Z",
   "created_by": "ubuntuman",
-  "updated_at": "2026-02-26T11:35:00Z",
+  "updated_at": "2026-02-26T12:00:00Z",
   "parent": "quotey-001",
   "description": "## Overview\nImplement the MCP server that exposes Quotey capabilities to AI agents.\n\n## Why This Matters\nCore implementation of the MCP integration. Connects MCP protocol to existing Quotey functionality.\n\n## Implementation Details\n- Create new crate or module: `quotey-mcp`\n- Implement MCP protocol handler\n- Wire up each tool to existing Quotey functions\n- Add authentication (API key)\n- Add rate limiting\n- Add logging/audit\n\n## Technical Notes\n- Use existing Quotey functions (don't duplicate logic)\n- Ensure idempotency for retries\n- Handle errors gracefully with meaningful messages\n- Full audit trail for compliance\n\n[Created from: ultrathink - EPIC-V2-MCP subtask]",
   "labels": [
@@ -241,7 +234,8 @@
     "implementation",
     "rust"
   ],
-  "assigned_to": "Kimi"
+  "resolution": "completed",
+  "completed_at": "2026-02-26T12:00:00Z"
 }
 {
   "id": "quotey-001-4",
@@ -1084,5 +1078,629 @@
     "v2",
     "performance",
     "optimization"
+  ]
+}
+{
+  "id": "quotey-101",
+  "title": "EPIC-ARCH: Product Catalog Structure Overhaul",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "epic",
+  "created_at": "2026-02-26T15:00:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:00:00Z",
+  "description": "Flat product model lacks hierarchical families, configurable attributes, and option groups. Need ProductAttribute, ProductFamily, OptionGroup, ProductRelationship types, SQLite schema, SqlProductRepository with JOINs, and enriched in-memory Catalog with secondary indexes.",
+  "labels": [
+    "arch",
+    "catalog",
+    "epic"
+  ]
+}
+{
+  "id": "quotey-101-1",
+  "title": "TASK: Extend Product domain model with attributes/families/options",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:01:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:01:00Z",
+  "parent": "quotey-101",
+  "description": "Add ProductAttribute, ProductFamily, OptionGroup, and ProductRelationship types to crates/core/src/domain/product.rs.",
+  "labels": [
+    "arch",
+    "catalog",
+    "domain"
+  ]
+}
+{
+  "id": "quotey-101-2",
+  "title": "TASK: Create SQLite schema for product structure",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:02:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:02:00Z",
+  "parent": "quotey-101",
+  "description": "Migration for product_attribute, product_family, option_group, option_choice, and product_relationship tables.",
+  "labels": [
+    "arch",
+    "catalog",
+    "schema",
+    "migration"
+  ]
+}
+{
+  "id": "quotey-101-3",
+  "title": "TASK: Implement SqlProductRepository with JOINs",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:03:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:03:00Z",
+  "parent": "quotey-101",
+  "description": "Replace stub with full CRUD and list_all() using JOINs to avoid N+1 queries.",
+  "labels": [
+    "arch",
+    "catalog",
+    "repository"
+  ]
+}
+{
+  "id": "quotey-101-4",
+  "title": "TASK: Enrich Catalog with secondary indexes",
+  "status": "open",
+  "priority": 2,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:04:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:04:00Z",
+  "parent": "quotey-101",
+  "description": "Add secondary indexes to in-memory Catalog for O(1) lookup by family and attribute.",
+  "labels": [
+    "arch",
+    "catalog",
+    "performance"
+  ]
+}
+{
+  "id": "quotey-102",
+  "title": "EPIC-ARCH: Constraint Engine Evolution",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "epic",
+  "created_at": "2026-02-26T15:05:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:05:00Z",
+  "description": "Constraint engine only validates data hygiene (empty quotes, zero quantity). Needs dependency/exclusion rules, forward-checking, constraint propagation, and suggestion generation.",
+  "labels": [
+    "arch",
+    "constraints",
+    "epic"
+  ]
+}
+{
+  "id": "quotey-102-1",
+  "title": "TASK: Define constraint rule domain model",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:06:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:06:00Z",
+  "parent": "quotey-102",
+  "description": "Create ConstraintType enum (Requires, Excludes, Cardinality, AttributeMatch) and ConstraintRule struct in crates/core/src/cpq/constraints.rs.",
+  "labels": [
+    "arch",
+    "constraints",
+    "domain"
+  ]
+}
+{
+  "id": "quotey-102-2",
+  "title": "TASK: Create constraint rules SQLite schema",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:07:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:07:00Z",
+  "parent": "quotey-102",
+  "description": "Migration for constraint_rule table with seed data (e.g., Enterprise Plan requires SSO).",
+  "labels": [
+    "arch",
+    "constraints",
+    "schema",
+    "migration"
+  ]
+}
+{
+  "id": "quotey-102-3",
+  "title": "TASK: Implement DatabaseConstraintEngine",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:08:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:08:00Z",
+  "parent": "quotey-102",
+  "description": "Load rules from SQLite and evaluate against quotes, preserving existing hygiene checks.",
+  "labels": [
+    "arch",
+    "constraints",
+    "engine"
+  ]
+}
+{
+  "id": "quotey-102-4",
+  "title": "TASK: Implement constraint propagation (valid_additions)",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:09:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:09:00Z",
+  "parent": "quotey-102",
+  "description": "Add valid_additions() to compute what products are still valid to add given current selections via forward-checking.",
+  "labels": [
+    "arch",
+    "constraints",
+    "propagation"
+  ]
+}
+{
+  "id": "quotey-102-5",
+  "title": "TASK: Implement constraint suggestion generator",
+  "status": "open",
+  "priority": 2,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:10:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:10:00Z",
+  "parent": "quotey-102",
+  "description": "Generate structured ConstraintSuggestion objects (Add/Remove/Replace) for the agent to present in Slack.",
+  "labels": [
+    "arch",
+    "constraints",
+    "suggestions",
+    "ux"
+  ]
+}
+{
+  "id": "quotey-103",
+  "title": "EPIC-ARCH: Pricing Engine Pipeline",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "epic",
+  "created_at": "2026-02-26T15:11:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:11:00Z",
+  "description": "Pricing engine is a simple multiplication operator (unit_price * quantity). Needs composable pipeline with price books, volume tiers, graduated pricing, formulas, and discount stacking.",
+  "labels": [
+    "arch",
+    "pricing",
+    "epic"
+  ]
+}
+{
+  "id": "quotey-103-1",
+  "title": "TASK: Define pricing rule domain model",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:12:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:12:00Z",
+  "parent": "quotey-103",
+  "description": "Create PriceBook, VolumeTier, DiscountRule, and PricingFormula types in crates/core/src/cpq/pricing.rs.",
+  "labels": [
+    "arch",
+    "pricing",
+    "domain"
+  ]
+}
+{
+  "id": "quotey-103-2",
+  "title": "TASK: Create pricing rules SQLite schema",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:13:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:13:00Z",
+  "parent": "quotey-103",
+  "description": "Migration for price_book, volume_tier, discount_rule, pricing_formula tables with seed data.",
+  "labels": [
+    "arch",
+    "pricing",
+    "schema",
+    "migration"
+  ]
+}
+{
+  "id": "quotey-103-3",
+  "title": "TASK: Implement PricingContext and Pipeline executor",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:14:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:14:00Z",
+  "parent": "quotey-103",
+  "description": "Define PricingStage trait and PricingPipeline executor to process stages sequentially with trace accumulation.",
+  "labels": [
+    "arch",
+    "pricing",
+    "pipeline"
+  ]
+}
+{
+  "id": "quotey-103-4",
+  "title": "TASK: Implement PriceBookResolver stage",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:15:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:15:00Z",
+  "parent": "quotey-103",
+  "description": "Resolve unit prices based on currency, segment, and priority from price book entries.",
+  "labels": [
+    "arch",
+    "pricing",
+    "pricebook"
+  ]
+}
+{
+  "id": "quotey-103-5",
+  "title": "TASK: Implement VolumeTierCalculator stage",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:16:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:16:00Z",
+  "parent": "quotey-103",
+  "description": "Support both Step and Graduated pricing models for volume-based discounts.",
+  "labels": [
+    "arch",
+    "pricing",
+    "volume-tiers"
+  ]
+}
+{
+  "id": "quotey-103-6",
+  "title": "TASK: Implement FormulaEvaluator stage",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:17:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:17:00Z",
+  "parent": "quotey-103",
+  "description": "Evaluate derived pricing (e.g., Support = 18% of License) using topological sort for dependencies. Recursive descent parser supporting min/max/round functions.",
+  "labels": [
+    "arch",
+    "pricing",
+    "formulas"
+  ]
+}
+{
+  "id": "quotey-103-7",
+  "title": "TASK: Implement DiscountApplicator stage",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:18:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:18:00Z",
+  "parent": "quotey-103",
+  "description": "Apply percentage or fixed-amount discounts with compound or additive stacking modes.",
+  "labels": [
+    "arch",
+    "pricing",
+    "discounts"
+  ]
+}
+{
+  "id": "quotey-103-8",
+  "title": "TASK: Compose PipelinePricingEngine and verify isomorphism",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:19:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:19:00Z",
+  "parent": "quotey-103",
+  "description": "Integrate all stages into PipelinePricingEngine. Verify baseline compatibility: when no rules exist, output matches DeterministicPricingEngine.",
+  "labels": [
+    "arch",
+    "pricing",
+    "integration"
+  ]
+}
+{
+  "id": "quotey-104",
+  "title": "EPIC-ARCH: Policy Engine Database-Driven",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "epic",
+  "created_at": "2026-02-26T15:20:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:20:00Z",
+  "description": "Policy engine has hardcoded 20%/30% discount thresholds and 10% margin floor in Rust constants. Needs database-driven versioned rules for CLO replay support.",
+  "labels": [
+    "arch",
+    "policy",
+    "epic"
+  ]
+}
+{
+  "id": "quotey-104-1",
+  "title": "TASK: Define policy rule domain model with versioning",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:21:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:21:00Z",
+  "parent": "quotey-104",
+  "description": "Create PolicyRule and PolicyVersion types to support versioned approval thresholds.",
+  "labels": [
+    "arch",
+    "policy",
+    "domain"
+  ]
+}
+{
+  "id": "quotey-104-2",
+  "title": "TASK: Create policy rules SQLite schema",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:22:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:22:00Z",
+  "parent": "quotey-104",
+  "description": "Migration for versioned policy rules. Seed with current hardcoded thresholds for backward compatibility.",
+  "labels": [
+    "arch",
+    "policy",
+    "schema",
+    "migration"
+  ]
+}
+{
+  "id": "quotey-104-3",
+  "title": "TASK: Implement DatabasePolicyEngine",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:23:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:23:00Z",
+  "parent": "quotey-104",
+  "description": "Load active versions and evaluate rules. Return policy_version_id in decisions for audit trails.",
+  "labels": [
+    "arch",
+    "policy",
+    "engine"
+  ]
+}
+{
+  "id": "quotey-104-4",
+  "title": "TASK: Add policy replay support for CLO",
+  "status": "open",
+  "priority": 2,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:24:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:24:00Z",
+  "parent": "quotey-104",
+  "description": "Add compare_replay() to test candidate policies against historical data for Closed-Loop Optimizer.",
+  "labels": [
+    "arch",
+    "policy",
+    "clo",
+    "replay"
+  ]
+}
+{
+  "id": "quotey-105",
+  "title": "EPIC-ARCH: Agent Conversation Layer (Structured Slot-Filling)",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "epic",
+  "created_at": "2026-02-26T15:25:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:25:00Z",
+  "description": "Agent intent classification is keyword-based (.contains matching). Needs structured slot-filling state machine, LLM extraction pipeline, and flow engine integration.",
+  "labels": [
+    "arch",
+    "agent",
+    "conversation",
+    "epic"
+  ]
+}
+{
+  "id": "quotey-105-1",
+  "title": "TASK: Define slot-filling state machine",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:26:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:26:00Z",
+  "parent": "quotey-105",
+  "description": "Create SlotSchema, SlotDefinition, and SlotState types to track gathered fields for structured quote building.",
+  "labels": [
+    "arch",
+    "agent",
+    "slots",
+    "domain"
+  ]
+}
+{
+  "id": "quotey-105-2",
+  "title": "TASK: Implement structured extraction pipeline",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:27:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:27:00Z",
+  "parent": "quotey-105",
+  "description": "Pipeline: raw_text → LLM extraction → schema validation → slot delta. Replaces keyword matching.",
+  "labels": [
+    "arch",
+    "agent",
+    "extraction",
+    "llm"
+  ]
+}
+{
+  "id": "quotey-105-3",
+  "title": "TASK: Connect slot machine to flow engine",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:28:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:28:00Z",
+  "parent": "quotey-105",
+  "description": "Bridge slot state to FlowContext.missing_required_fields to drive deterministic flow transitions.",
+  "labels": [
+    "arch",
+    "agent",
+    "flow-engine",
+    "integration"
+  ]
+}
+{
+  "id": "quotey-106",
+  "title": "EPIC-ARCH: Similarity Index (LSH)",
+  "status": "open",
+  "priority": 2,
+  "issue_type": "epic",
+  "created_at": "2026-02-26T15:29:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:29:00Z",
+  "description": "Similarity search is O(n) brute-force scan over all candidates. Needs Locality-Sensitive Hashing (LSH) band partitioning for sub-linear candidate filtering at scale.",
+  "labels": [
+    "arch",
+    "dna",
+    "lsh",
+    "performance",
+    "epic"
+  ]
+}
+{
+  "id": "quotey-106-1",
+  "title": "TASK: Implement LSH band partitioning",
+  "status": "open",
+  "priority": 2,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:30:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:30:00Z",
+  "parent": "quotey-106",
+  "description": "Partition 128-bit SimHash fingerprints into bands (e.g., 8 bands × 16 bits) for probabilistic candidate filtering.",
+  "labels": [
+    "arch",
+    "dna",
+    "lsh",
+    "algorithm"
+  ]
+}
+{
+  "id": "quotey-106-2",
+  "title": "TASK: Create LSH bucket SQLite schema",
+  "status": "open",
+  "priority": 2,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:31:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:31:00Z",
+  "parent": "quotey-106",
+  "description": "Migration for dna_lsh_bucket table to store persistent band hashes for indexed similarity search.",
+  "labels": [
+    "arch",
+    "dna",
+    "lsh",
+    "schema",
+    "migration"
+  ]
+}
+{
+  "id": "quotey-106-3",
+  "title": "TASK: Integrate LSH with SimilarityEngine",
+  "status": "open",
+  "priority": 2,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:32:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:32:00Z",
+  "parent": "quotey-106",
+  "description": "Use LSH as probabilistic pre-filter in find_similar() to reduce candidate set before exact Hamming distance computation.",
+  "labels": [
+    "arch",
+    "dna",
+    "lsh",
+    "integration"
+  ]
+}
+{
+  "id": "quotey-107",
+  "title": "EPIC-ARCH: Server Wiring and Integration",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "epic",
+  "created_at": "2026-02-26T15:33:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:33:00Z",
+  "description": "Components are independently correct but not fully wired in bootstrap. Some repositories return not-implemented errors. Need ServiceContainer composition and end-to-end lifecycle test.",
+  "labels": [
+    "arch",
+    "server",
+    "wiring",
+    "epic"
+  ]
+}
+{
+  "id": "quotey-107-1",
+  "title": "TASK: Implement service composition in bootstrap",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:34:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:34:00Z",
+  "parent": "quotey-107",
+  "description": "Wire engines to repositories in crates/server/src/bootstrap.rs using a ServiceContainer. Connect PricingEngine, ConstraintEngine, PolicyEngine, Catalog, and repositories.",
+  "labels": [
+    "arch",
+    "server",
+    "bootstrap",
+    "integration"
+  ]
+}
+{
+  "id": "quotey-107-2",
+  "title": "TASK: End-to-end integration test for full quote lifecycle",
+  "status": "open",
+  "priority": 1,
+  "issue_type": "task",
+  "created_at": "2026-02-26T15:35:00Z",
+  "created_by": "agent",
+  "updated_at": "2026-02-26T15:35:00Z",
+  "parent": "quotey-107",
+  "description": "Integration test exercising complete quote lifecycle: create → configure → price → validate constraints → evaluate policy → finalize → generate PDF.",
+  "labels": [
+    "arch",
+    "server",
+    "e2e",
+    "testing"
   ]
 }

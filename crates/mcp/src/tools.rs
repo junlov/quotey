@@ -6,100 +6,72 @@
 //! - Approval: Approval workflow management
 //! - PDF: Document generation
 
-// Re-export types from server for convenience
-pub use crate::server::{
-    CatalogSearchInput, CatalogSearchResult, LineItemInput,
-    PaginationInfo, ProductSummary, QuoteCreateInput, QuoteCreateResult,
-};
-
-/// Tool category trait for organization
-pub trait ToolCategory {
-    /// Category name
-    fn category_name() -> &'static str;
-    
-    /// List of tool names in this category
-    fn tool_names() -> &'static [&'static str];
-}
-
+// Tool categories for organization
 /// Catalog tools category
 pub struct CatalogTools;
-
-impl ToolCategory for CatalogTools {
-    fn category_name() -> &'static str {
-        "catalog"
-    }
-    
-    fn tool_names() -> &'static [&'static str] {
-        &["catalog_search", "catalog_get"]
-    }
-}
 
 /// Quote tools category
 pub struct QuoteTools;
 
-impl ToolCategory for QuoteTools {
-    fn category_name() -> &'static str {
-        "quote"
-    }
-    
-    fn tool_names() -> &'static [&'static str] {
-        &["quote_create", "quote_get", "quote_price", "quote_list"]
-    }
-}
-
 /// Approval tools category
 pub struct ApprovalTools;
-
-impl ToolCategory for ApprovalTools {
-    fn category_name() -> &'static str {
-        "approval"
-    }
-    
-    fn tool_names() -> &'static [&'static str] {
-        &["approval_request", "approval_status", "approval_pending"]
-    }
-}
 
 /// PDF tools category
 pub struct PdfTools;
 
-impl ToolCategory for PdfTools {
-    fn category_name() -> &'static str {
-        "pdf"
-    }
-    
-    fn tool_names() -> &'static [&'static str] {
-        &["quote_pdf"]
+/// Tool category trait
+pub trait ToolCategory {
+    /// Category name
+    fn category_name() -> &'static str where Self: Sized;
+    /// List of tool names in this category
+    fn tool_names() -> &'static [&'static str] where Self: Sized;
+}
+
+impl ToolCategory for CatalogTools {
+    fn category_name() -> &'static str { "catalog" }
+    fn tool_names() -> &'static [&'static str] { &["catalog_search", "catalog_get"] }
+}
+
+impl ToolCategory for QuoteTools {
+    fn category_name() -> &'static str { "quote" }
+    fn tool_names() -> &'static [&'static str] { 
+        &["quote_create", "quote_get", "quote_price", "quote_list"] 
     }
 }
 
-/// All tool categories
-pub const ALL_CATEGORIES: &[&dyn ToolCategory] = &[
-    &CatalogTools,
-    &QuoteTools,
-    &ApprovalTools,
-    &PdfTools,
+impl ToolCategory for ApprovalTools {
+    fn category_name() -> &'static str { "approval" }
+    fn tool_names() -> &'static [&'static str] { 
+        &["approval_request", "approval_status", "approval_pending"] 
+    }
+}
+
+impl ToolCategory for PdfTools {
+    fn category_name() -> &'static str { "pdf" }
+    fn tool_names() -> &'static [&'static str] { &["quote_pdf"] }
+}
+
+/// All tool names
+pub const ALL_TOOL_NAMES: &[&str] = &[
+    "catalog_search", "catalog_get",
+    "quote_create", "quote_get", "quote_price", "quote_list",
+    "approval_request", "approval_status", "approval_pending",
+    "quote_pdf",
 ];
 
 /// Total number of tools
-pub const TOTAL_TOOLS: usize = 10;
+pub const TOTAL_TOOLS: usize = ALL_TOOL_NAMES.len();
 
 #[cfg(test)]
 mod tests {
     use super::*;
     
     #[test]
-    fn test_tool_categories() {
+    fn test_tool_counts() {
         assert_eq!(CatalogTools::tool_names().len(), 2);
         assert_eq!(QuoteTools::tool_names().len(), 4);
         assert_eq!(ApprovalTools::tool_names().len(), 3);
         assert_eq!(PdfTools::tool_names().len(), 1);
-        
-        let total = CatalogTools::tool_names().len()
-            + QuoteTools::tool_names().len()
-            + ApprovalTools::tool_names().len()
-            + PdfTools::tool_names().len();
-        
-        assert_eq!(total, TOTAL_TOOLS);
+        assert_eq!(TOTAL_TOOLS, 10);
     }
 }
