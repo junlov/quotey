@@ -232,13 +232,38 @@ pub enum BusinessRuleType {
 #[derive(Debug, Clone)]
 pub struct SuggestionFeedback {
     pub id: String,
+    pub request_id: String,
     pub customer_id: String,
     pub product_id: String,
+    pub product_sku: String,
+    pub score: f64,
+    pub confidence: String,
+    pub category: String,
+    pub quote_id: Option<String>,
     pub suggested_at: DateTime<Utc>,
     pub was_shown: bool,
     pub was_clicked: bool,
     pub was_added_to_quote: bool,
     pub context: Option<serde_json::Value>,
+}
+
+/// Event extracted from a suggestion block action
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum SuggestionFeedbackEvent {
+    /// User clicked "Add to Quote" on a suggestion
+    Added { request_id: String, product_id: String, product_sku: String, quote_id: Option<String> },
+    /// User clicked "View Details" on a suggestion
+    Clicked { request_id: String, product_id: String },
+}
+
+/// Acceptance rate for a product across all suggestion feedback
+#[derive(Debug, Clone, Copy)]
+pub struct ProductAcceptanceRate {
+    pub shown_count: u32,
+    pub clicked_count: u32,
+    pub added_count: u32,
+    pub click_rate: f64,
+    pub add_rate: f64,
 }
 
 /// Customer data for similarity calculation

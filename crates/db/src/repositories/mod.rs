@@ -8,6 +8,7 @@ use quotey_core::domain::execution::{
 };
 use quotey_core::domain::product::{Product, ProductId};
 use quotey_core::domain::quote::{Quote, QuoteId};
+use quotey_core::suggestions::{ProductAcceptanceRate, SuggestionFeedback};
 
 pub mod approval;
 pub mod customer;
@@ -20,6 +21,7 @@ pub mod pricing_snapshot;
 pub mod product;
 pub mod quote;
 pub mod simulation;
+pub mod suggestion_feedback;
 
 pub use approval::SqlApprovalRepository;
 pub use customer::SqlCustomerRepository;
@@ -28,6 +30,7 @@ pub use explanation::{ExplanationRepository, SqlExplanationRepository};
 pub use memory::{
     InMemoryApprovalRepository, InMemoryExecutionQueueRepository, InMemoryIdempotencyRepository,
     InMemoryPolicyOptimizerRepository, InMemoryProductRepository, InMemoryQuoteRepository,
+    InMemorySuggestionFeedbackRepository,
 };
 pub use optimizer::{PolicyOptimizerRepository, SqlPolicyOptimizerRepository};
 pub use precedent::{PrecedentRepository, SqlPrecedentRepository};
@@ -38,6 +41,7 @@ pub use simulation::{
     ScenarioAuditEventRecord, ScenarioDeltaRecord, ScenarioRepository, ScenarioRunRecord,
     ScenarioVariantRecord, SqlScenarioRepository,
 };
+pub use suggestion_feedback::SqlSuggestionFeedbackRepository;
 
 #[derive(Debug, Error)]
 pub enum RepositoryError {
@@ -78,6 +82,15 @@ pub trait ApprovalRepository: Send + Sync {
     async fn find_by_id(&self, id: &ApprovalId)
         -> Result<Option<ApprovalRequest>, RepositoryError>;
     async fn save(&self, approval: ApprovalRequest) -> Result<(), RepositoryError>;
+    async fn find_by_quote_id(
+        &self,
+        quote_id: &QuoteId,
+    ) -> Result<Vec<ApprovalRequest>, RepositoryError>;
+    async fn list_pending(
+        &self,
+        approver_role: Option<&str>,
+        limit: u32,
+    ) -> Result<Vec<ApprovalRequest>, RepositoryError>;
 }
 
 #[async_trait]
@@ -114,4 +127,26 @@ pub trait IdempotencyRepository: Send + Sync {
     ) -> Result<Option<IdempotencyRecord>, RepositoryError>;
 
     async fn save_operation(&self, record: IdempotencyRecord) -> Result<(), RepositoryError>;
+}
+
+#[async_trait]
+pub trait SuggestionFeedbackRepository: Send + Sync {
+    async fn record_shown(&self, feedbacks: Vec<SuggestionFeedback>)
+        -> Result<(), RepositoryError>;
+    async fn record_clicked(
+        &self,
+        request_id: &str,
+        product_id: &str,
+    ) -> Result<(), RepositoryError>;
+    async fn record_added(&self, request_id: &str, product_id: &str)
+        -> Result<(), RepositoryError>;
+    async fn find_by_product(
+        &self,
+        product_id: &str,
+        limit: u32,
+    ) -> Result<Vec<SuggestionFeedback>, RepositoryError>;
+    async fn acceptance_rate(
+        &self,
+        product_id: &str,
+    ) -> Result<Option<ProductAcceptanceRate>, RepositoryError>;
 }

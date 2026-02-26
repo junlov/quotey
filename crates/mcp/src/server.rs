@@ -776,39 +776,123 @@ impl QuoteyMcpServer {
     async fn quote_price(&self, Parameters(input): Parameters<QuotePriceInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_price called");
 
+        use quotey_core::cpq::policy::evaluate_policy_input;
+        use quotey_core::cpq::policy::PolicyInput;
+        use quotey_core::cpq::pricing::price_quote_with_trace;
+        use quotey_core::domain::quote::QuoteId;
+        use quotey_db::repositories::QuoteRepository;
+        use rust_decimal::Decimal;
+
+        let quote_repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
+
+        let quote = match quote_repo.find_by_id(&QuoteId(input.quote_id.clone())).await {
+            Ok(Some(q)) => q,
+            Ok(None) => {
+                return serde_json::json!({"error": format!("Quote '{}' not found", input.quote_id)})
+                    .to_string();
+            }
+            Err(e) => {
+                warn!(error = %e, "quote_price: failed to load quote");
+                return serde_json::json!({"error": e.to_string()}).to_string();
+            }
+        };
+
+        // Run deterministic pricing engine
+        let pricing_result = price_quote_with_trace(&quote, &quote.currency);
+
+        // Run deterministic policy engine
+        let discount_pct = Decimal::try_from(input.requested_discount_pct).unwrap_or(Decimal::ZERO);
+        let deal_value_dec = pricing_result.total;
+        // Estimate margin: if no discount requested, margin is 100%; otherwise approximate
+        let margin_pct = if deal_value_dec > Decimal::ZERO {
+            let discount_amount = deal_value_dec * discount_pct / Decimal::from(100);
+            let net = deal_value_dec - discount_amount;
+            (net * Decimal::from(100)) / deal_value_dec
+        } else {
+            Decimal::from(100)
+        };
+
+        let policy_input = PolicyInput {
+            requested_discount_pct: discount_pct,
+            deal_value: deal_value_dec,
+            minimum_margin_pct: margin_pct,
+        };
+        let policy_decision = evaluate_policy_input(&policy_input);
+
+        // Build per-line pricing
+        let product_repo = quotey_db::repositories::SqlProductRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::ProductRepository;
+
+        let mut line_pricing = Vec::new();
+        for (i, line) in quote.lines.iter().enumerate() {
+            let product_name = match product_repo.find_by_id(&line.product_id).await {
+                Ok(Some(p)) => p.name,
+                _ => format!("Product {}", line.product_id.0),
+            };
+
+            let base_price_f64: f64 = line.unit_price.to_string().parse().unwrap_or(0.0);
+            let line_subtotal = base_price_f64 * line.quantity as f64;
+
+            // Apply both the line-level discount and the requested global discount
+            let effective_discount = if input.requested_discount_pct > 0.0 {
+                input.requested_discount_pct
+            } else {
+                line.discount_pct
+            };
+            let discount_amount = line_subtotal * effective_discount / 100.0;
+            let discounted_unit = base_price_f64 * (1.0 - effective_discount / 100.0);
+
+            line_pricing.push(LinePricingInfo {
+                line_id: format!("{}-ql-{}", quote.id.0, i + 1),
+                product_id: line.product_id.0.clone(),
+                product_name,
+                quantity: line.quantity,
+                base_unit_price: base_price_f64,
+                unit_price: discounted_unit,
+                subtotal_before_discount: line_subtotal,
+                discount_pct: effective_discount,
+                discount_amount,
+                line_total: line_subtotal - discount_amount,
+            });
+        }
+
+        let subtotal_f64: f64 = pricing_result.subtotal.to_string().parse().unwrap_or(0.0);
+        let discount_f64: f64 = line_pricing.iter().map(|l| l.discount_amount).sum();
+        let total_f64 = subtotal_f64 - discount_f64;
+
+        let policy_violations: Vec<PolicyViolation> = policy_decision
+            .violations
+            .iter()
+            .map(|v| PolicyViolation {
+                policy_id: v.policy_id.clone(),
+                policy_name: v.policy_id.replace(['-', '_'], " "),
+                severity: if v.required_approval.is_some() {
+                    "approval_required".to_string()
+                } else {
+                    "warning".to_string()
+                },
+                description: v.reason.clone(),
+                threshold: None,
+                actual: Some(input.requested_discount_pct),
+                required_approver_role: v.required_approval.clone(),
+            })
+            .collect();
+
+        use quotey_db::repositories::quote::quote_status_as_str;
         let result = QuotePriceResult {
-            quote_id: input.quote_id,
-            version: 1,
-            status: "priced".to_string(),
+            quote_id: quote.id.0.clone(),
+            version: quote.version,
+            status: quote_status_as_str(&quote.status).to_string(),
             pricing: PricingInfo {
-                subtotal: 14400.00,
-                discount_total: 1440.00,
-                tax_total: 0.00,
-                total: 12960.00,
+                subtotal: subtotal_f64,
+                discount_total: discount_f64,
+                tax_total: 0.0,
+                total: total_f64,
                 priced_at: Some(chrono::Utc::now().to_rfc3339()),
             },
-            line_pricing: vec![LinePricingInfo {
-                line_id: "ql_001".to_string(),
-                product_id: "prod_pro_v2".to_string(),
-                product_name: "Pro Plan".to_string(),
-                quantity: 150,
-                base_unit_price: 10.00,
-                unit_price: 6.00,
-                subtotal_before_discount: 14400.00,
-                discount_pct: 10.0,
-                discount_amount: 1440.00,
-                line_total: 12960.00,
-            }],
-            approval_required: true,
-            policy_violations: vec![PolicyViolation {
-                policy_id: "pol_discount_cap".to_string(),
-                policy_name: "Discount Cap".to_string(),
-                severity: "approval_required".to_string(),
-                description: "10% discount exceeds auto-approval threshold".to_string(),
-                threshold: Some(5.0),
-                actual: Some(10.0),
-                required_approver_role: Some("sales_manager".to_string()),
-            }],
+            line_pricing,
+            approval_required: policy_decision.approval_required,
+            policy_violations,
         };
 
         serde_json::to_string_pretty(&result).unwrap_or_default()
@@ -886,16 +970,62 @@ impl QuoteyMcpServer {
     ) -> String {
         debug!(quote_id = %input.quote_id, "approval_request called");
 
+        use quotey_core::domain::approval::{
+            ApprovalId, ApprovalRequest as DomainApproval, ApprovalStatus,
+        };
+        use quotey_core::domain::quote::QuoteId;
+        use quotey_db::repositories::ApprovalRepository;
+
+        // Verify quote exists
+        let quote_repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::QuoteRepository;
+
+        let quote = match quote_repo.find_by_id(&QuoteId(input.quote_id.clone())).await {
+            Ok(Some(q)) => q,
+            Ok(None) => {
+                return serde_json::json!({"error": format!("Quote '{}' not found", input.quote_id)})
+                    .to_string();
+            }
+            Err(e) => {
+                warn!(error = %e, "approval_request: failed to load quote");
+                return serde_json::json!({"error": e.to_string()}).to_string();
+            }
+        };
+
+        let now = chrono::Utc::now();
+        let approval_id =
+            format!("APR-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000"));
+        let expires_at = now + chrono::Duration::hours(4);
+
+        let approval = DomainApproval {
+            id: ApprovalId(approval_id.clone()),
+            quote_id: quote.id.clone(),
+            approver_role: "sales_manager".to_string(),
+            reason: format!("Approval requested for quote {}", quote.id.0),
+            justification: input.justification.clone(),
+            status: ApprovalStatus::Pending,
+            requested_by: "agent:mcp".to_string(),
+            expires_at: Some(expires_at),
+            created_at: now,
+            updated_at: now,
+        };
+
+        let repo = quotey_db::repositories::SqlApprovalRepository::new(self.db_pool.clone());
+        if let Err(e) = repo.save(approval).await {
+            warn!(error = %e, "approval_request: failed to save");
+            return serde_json::json!({"error": e.to_string()}).to_string();
+        }
+
         let result = ApprovalRequestResult {
-            approval_id: format!("APR-{}", chrono::Utc::now().format("%Y-%m%d%H%M%S")),
+            approval_id,
             quote_id: input.quote_id,
             status: "pending".to_string(),
             approver_role: "sales_manager".to_string(),
             requested_by: "agent:mcp".to_string(),
             justification: input.justification,
-            created_at: chrono::Utc::now().to_rfc3339(),
-            expires_at: (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339(),
-            message: "Approval request submitted".to_string(),
+            created_at: now.to_rfc3339(),
+            expires_at: expires_at.to_rfc3339(),
+            message: "Approval request submitted and persisted".to_string(),
         };
 
         serde_json::to_string_pretty(&result).unwrap_or_default()
@@ -905,17 +1035,50 @@ impl QuoteyMcpServer {
     async fn approval_status(&self, Parameters(input): Parameters<ApprovalStatusInput>) -> String {
         debug!(quote_id = %input.quote_id, "approval_status called");
 
+        use quotey_core::domain::approval::ApprovalStatus as DomainStatus;
+        use quotey_core::domain::quote::QuoteId;
+        use quotey_db::repositories::approval::approval_status_as_str;
+        use quotey_db::repositories::ApprovalRepository;
+
+        let repo = quotey_db::repositories::SqlApprovalRepository::new(self.db_pool.clone());
+        let approvals = match repo.find_by_quote_id(&QuoteId(input.quote_id.clone())).await {
+            Ok(a) => a,
+            Err(e) => {
+                warn!(error = %e, "approval_status: failed to load approvals");
+                return serde_json::json!({"error": e.to_string()}).to_string();
+            }
+        };
+
+        let pending: Vec<PendingApproval> = approvals
+            .iter()
+            .filter(|a| a.status == DomainStatus::Pending)
+            .map(|a| PendingApproval {
+                approval_id: a.id.0.clone(),
+                status: approval_status_as_str(&a.status).to_string(),
+                approver_role: a.approver_role.clone(),
+                requested_at: a.created_at.to_rfc3339(),
+                expires_at: a.expires_at.map(|dt| dt.to_rfc3339()).unwrap_or_default(),
+            })
+            .collect();
+
+        let has_approved = approvals.iter().any(|a| a.status == DomainStatus::Approved);
+        let has_pending = !pending.is_empty();
+
+        let current_status = if has_approved && !has_pending {
+            "approved".to_string()
+        } else if has_pending {
+            "pending_approval".to_string()
+        } else if approvals.iter().any(|a| a.status == DomainStatus::Rejected) {
+            "rejected".to_string()
+        } else {
+            "no_approvals".to_string()
+        };
+
         let result = ApprovalStatusResult {
             quote_id: input.quote_id,
-            current_status: "pending_approval".to_string(),
-            pending_requests: vec![PendingApproval {
-                approval_id: "APR-2026-0089".to_string(),
-                status: "pending".to_string(),
-                approver_role: "sales_manager".to_string(),
-                requested_at: chrono::Utc::now().to_rfc3339(),
-                expires_at: (chrono::Utc::now() + chrono::Duration::hours(4)).to_rfc3339(),
-            }],
-            can_proceed: false,
+            current_status,
+            pending_requests: pending,
+            can_proceed: has_approved && !has_pending,
         };
 
         serde_json::to_string_pretty(&result).unwrap_or_default()
@@ -924,22 +1087,57 @@ impl QuoteyMcpServer {
     #[tool(description = "List all pending approval requests")]
     async fn approval_pending(
         &self,
-        Parameters(_input): Parameters<ApprovalPendingInput>,
+        Parameters(input): Parameters<ApprovalPendingInput>,
     ) -> String {
         debug!("approval_pending called");
 
-        let result = ApprovalPendingResult {
-            items: vec![ApprovalPendingItem {
-                approval_id: "APR-2026-0089".to_string(),
-                quote_id: "Q-2026-0042".to_string(),
-                account_name: "Acme Corp".to_string(),
-                quote_total: 12960.00,
-                requested_by: "agent:mcp".to_string(),
-                justification: "10% discount for loyal customer".to_string(),
-                requested_at: chrono::Utc::now().to_rfc3339(),
-            }],
-            total: 1,
+        use quotey_db::repositories::ApprovalRepository;
+        use quotey_db::repositories::QuoteRepository;
+
+        let repo = quotey_db::repositories::SqlApprovalRepository::new(self.db_pool.clone());
+        let pending = match repo.list_pending(input.approver_role.as_deref(), input.limit).await {
+            Ok(p) => p,
+            Err(e) => {
+                warn!(error = %e, "approval_pending: failed to list");
+                return serde_json::json!({"error": e.to_string()}).to_string();
+            }
         };
+
+        let quote_repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
+
+        let mut items = Vec::new();
+        for approval in &pending {
+            // Look up quote to get total
+            let quote_total = match quote_repo.find_by_id(&approval.quote_id).await {
+                Ok(Some(q)) => {
+                    let total: f64 = q
+                        .lines
+                        .iter()
+                        .map(|l| {
+                            let unit: f64 = l.unit_price.to_string().parse().unwrap_or(0.0);
+                            let subtotal = unit * l.quantity as f64;
+                            let discount = subtotal * l.discount_pct / 100.0;
+                            subtotal - discount
+                        })
+                        .sum();
+                    total
+                }
+                _ => 0.0,
+            };
+
+            items.push(ApprovalPendingItem {
+                approval_id: approval.id.0.clone(),
+                quote_id: approval.quote_id.0.clone(),
+                account_name: String::new(), // TODO: customer repo lookup
+                quote_total,
+                requested_by: approval.requested_by.clone(),
+                justification: approval.justification.clone(),
+                requested_at: approval.created_at.to_rfc3339(),
+            });
+        }
+
+        let total = items.len() as u32;
+        let result = ApprovalPendingResult { items, total };
 
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }

@@ -20,6 +20,10 @@ pub struct ApprovalRequest {
     pub quote_id: QuoteId,
     pub approver_role: String,
     pub reason: String,
+    pub justification: String,
     pub status: ApprovalStatus,
+    pub requested_by: String,
+    pub expires_at: Option<DateTime<Utc>>,
     pub created_at: DateTime<Utc>,
+    pub updated_at: DateTime<Utc>,
 }
