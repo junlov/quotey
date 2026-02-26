@@ -651,6 +651,167 @@ pub fn error_message(summary: &str, correlation_id: &str) -> MessageTemplate {
         .build()
 }
 
+/// Loading state categories for user-facing operations
+#[derive(Clone, Debug, PartialEq)]
+pub enum LoadingState {
+    Initializing { operation: String },
+    Fetching { resource: String },
+    Processing { operation: String },
+    Generating { artifact: String },
+    Queued { position: Option<u32> },
+}
+
+/// Build a loading state message for Slack
+pub fn loading_state_message(state: LoadingState, quote_id: Option<&str>) -> MessageTemplate {
+    let (icon, status_text, hint) = match &state {
+        LoadingState::Initializing { operation } => (
+            "🔄",
+            format!("Initializing {operation}..."),
+            "Setting up the workspace. This usually takes a few seconds."
+        ),
+        LoadingState::Fetching { resource } => (
+            "⏳",
+            format!("Retrieving {resource}..."),
+            "Fetching the latest data. Please wait."
+        ),
+        LoadingState::Processing { operation } => (
+            "⚙️",
+            format!("Processing {operation}..."),
+            "Running validation and policy checks. This may take a moment."
+        ),
+        LoadingState::Generating { artifact } => (
+            "📄",
+            format!("Generating {artifact}..."),
+            "Creating your document. Almost there."
+        ),
+        LoadingState::Queued { position } => {
+            let pos_text = position.map_or("in queue".to_string(), |p| format!("position #{p}"));
+            (
+                "⏳",
+                format!("Queued ({pos_text})..."),
+                "Your request is waiting to be processed. We'll update you shortly."
+            )
+        }
+    };
+
+    let quote_context = quote_id.map_or(String::new(), |id| format!(" for quote `{id}`"));
+    let fallback = format!("{icon} {status_text}{quote_context}");
+
+    let mut builder = MessageBuilder::new(&fallback)
+        .section("loading.state.header.v1", |section| {
+            section.mrkdwn(format!("{icon} *{status_text}*"));
+        })
+        .section("loading.state.hint.v1", |section| {
+            section.mrkdwn(hint);
+        });
+
+    if let Some(qid) = quote_id {
+        builder = builder.context("loading.state.context.v1", |context| {
+            context.plain(format!("Quote: {qid}"));
+        });
+    }
+
+    builder.build()
+}
+
+/// Error category for user-facing error messages
+#[derive(Clone, Debug, PartialEq)]
+pub enum ErrorCategory {
+    NotFound { resource_type: String, resource_id: String },
+    Validation { field: String, reason: String },
+    Permission { action: String },
+    RateLimited { retry_after_seconds: Option<u32> },
+    ServiceUnavailable { service: String },
+    Internal { correlation_id: String },
+}
+
+/// Build an enhanced error message with category-specific recovery actions
+pub fn categorized_error_message(category: ErrorCategory, quote_id: Option<&str>) -> MessageTemplate {
+    let (icon, title, recovery_steps) = match &category {
+        ErrorCategory::NotFound { resource_type, resource_id } => (
+            "🔍",
+            format!("{resource_type} not found"),
+            vec![
+                format!("The {resource_type} `{resource_id}` doesn't exist or has been deleted."),
+                "Check the ID and try again.".to_string(),
+            ]
+        ),
+        ErrorCategory::Validation { field, reason } => (
+            "⚠️",
+            "Invalid input".to_string(),
+            vec![
+                format!("Field `{field}`: {reason}"),
+                "Correct the value and resubmit.".to_string(),
+            ]
+        ),
+        ErrorCategory::Permission { action } => (
+            "🔒",
+            "Permission denied".to_string(),
+            vec![
+                format!("You don't have permission to {action}."),
+                "Contact your administrator if you believe this is an error.".to_string(),
+            ]
+        ),
+        ErrorCategory::RateLimited { retry_after_seconds } => {
+            let retry_text = retry_after_seconds.map_or("a few moments".to_string(), |s| format!("{s} seconds"));
+            (
+                "⏱️",
+                "Rate limited".to_string(),
+                vec![
+                    "Too many requests. Please slow down.".to_string(),
+                    format!("Retry after {retry_text}."),
+                ]
+            )
+        }
+        ErrorCategory::ServiceUnavailable { service } => (
+            "🔌",
+            "Service temporarily unavailable".to_string(),
+            vec![
+                format!("The {service} service is experiencing issues."),
+                "Wait a moment and try again. If this persists, contact support.".to_string(),
+            ]
+        ),
+        ErrorCategory::Internal { correlation_id } => (
+            "🚨",
+            "Unexpected error".to_string(),
+            vec![
+                "An unexpected error occurred. Our team has been notified.".to_string(),
+                format!("Reference ID: `{correlation_id}`"),
+                "Share this ID with support if the issue continues.".to_string(),
+            ]
+        ),
+    };
+
+    let quote_context = quote_id.map_or(String::new(), |id| format!(" for quote `{id}`"));
+    let fallback = format!("{icon} {title}{quote_context}");
+
+    let recovery_text = recovery_steps.join("\n");
+
+    let mut builder = MessageBuilder::new(&fallback)
+        .section("error.category.header.v1", |section| {
+            section.mrkdwn(format!("{icon} *{title}*"));
+        })
+        .section("error.category.recovery.v1", |section| {
+            section.mrkdwn(recovery_text);
+        });
+
+    if let Some(qid) = quote_id {
+        builder = builder.context("error.category.context.v1", |context| {
+            context.plain(format!("Quote: {qid}"));
+        });
+    }
+
+    builder
+        .actions("error.category.actions.v1", |actions| {
+            actions.button(
+                ButtonElement::new("error.help.v1", "Get Help")
+                    .style(ButtonStyle::Primary)
+                    .value("help"),
+            );
+        })
+        .build()
+}
+
 pub fn preview_mode_message(
     operation: &str,
     quote_id: Option<&str>,
