@@ -6,6 +6,7 @@ members = [
   "crates/agent",
   "crates/cli",
   "crates/server",
+  "crates/mcp",
 ]
 resolver = "2"
 
