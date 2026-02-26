@@ -37,6 +37,17 @@ venv/
 # bv (beads viewer) local config and caches
 .bv/
 
+# beads database files
+.beads/*.db
+.beads/*.db-*
+.beads/*.bak
+.beads/*.bad
+.beads/*.old
+.beads/*.backup
+.beads/*.malformed
+.beads/*.beforefix
+.beads/*.recovered
+
 # Rust build artifacts
 target/
 .sqlx/
