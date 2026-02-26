@@ -1,0 +1,105 @@
+{
+  "title": {
+    "type": "plain_text",
+    "text": "💡 Product Suggestions"
+  },
+  "callback_id": "product_suggestions_modal",
+  "blocks": [
+    {
+      "type": "header",
+      "text": {
+        "type": "plain_text",
+        "text": "Suggestions for {{ customer.name | default(value='Acme Corp') }}",
+        "emoji": true
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "Based on {{ customer.segment | default(value='Enterprise') }} segment and similar customers, we recommend:"
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {% for suggestion in suggestions | default(value=[
+      {product_name: "Premium Support", match_score: 85, reason: "Enterprise customers typically add in year 1", product_id: "prod_support_premium"},
+      {product_name: "SSO Add-on", match_score: 72, reason: "3 of 5 similar FinTech customers added", product_id: "prod_sso"},
+      {product_name: "Onboarding Package", match_score: 65, reason: "Recommended for 150+ seats", product_id: "prod_onboarding"}
+    ]) %}
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*{{ loop.index }}. {{ suggestion.product_name }}* ({{ suggestion.match_score }}% match)\n>{{ suggestion.reason }}"
+      },
+      "accessory": {
+        "type": "button",
+        "text": {
+          "type": "plain_text",
+          "text": "Add to Quote",
+          "emoji": true
+        },
+        "value": "add_suggested|{{ suggestion.product_id }}|{{ quote_id | default(value='Q-0000') }}",
+        "action_id": "add_suggested_{{ loop.index }}",
+        "style": "primary"
+      }
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "{% if suggestion.match_score >= 80 %}🟢{% elif suggestion.match_score >= 60 %}🟡{% else %}⚪{% endif %} Confidence: {{ suggestion.match_score }}% • Similar deals: {{ suggestion.similar_count | default(value='—') }}"
+        }
+      ]
+    },
+    {% endfor %}
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Not what you're looking for?* Search for other products or dismiss these suggestions."
+      }
+    },
+    {
+      "type": "actions",
+      "elements": [
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
+            "text": "🔍 Search Products",
+            "emoji": true
+          },
+          "value": "search_products|{{ quote_id | default(value='Q-0000') }}",
+          "action_id": "open_product_search"
+        },
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
+            "text": "✓ Dismiss All",
+            "emoji": true
+          },
+          "value": "dismiss_suggestions|{{ quote_id | default(value='Q-0000') }}",
+          "action_id": "dismiss_suggestions",
+          "style": "danger"
+        }
+      ]
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "💡 Powered by Quotey Suggestions Engine • <{{ feedback_url | default(value='#') }}|Give feedback>"
+        }
+      ]
+    }
+  ]
+}
