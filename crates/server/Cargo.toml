@@ -15,6 +15,7 @@ quotey-core = { path = "../core" }
 quotey-db = { path = "../db" }
 quotey-slack = { path = "../slack" }
 serde.workspace = true
+serde_json.workspace = true
 sqlx.workspace = true
 thiserror.workspace = true
 tokio.workspace = true
