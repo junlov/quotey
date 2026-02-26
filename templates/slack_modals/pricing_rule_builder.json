@@ -1,0 +1,362 @@
+{
+  "title": {
+    "type": "plain_text",
+    "text": "⚙️ Pricing Rule Builder"
+  },
+  "callback_id": "pricing_rule_builder_modal",
+  "submit": {
+    "type": "plain_text",
+    "text": "Save Rule"
+  },
+  "close": {
+    "type": "plain_text",
+    "text": "Cancel"
+  },
+  "blocks": [
+    {
+      "type": "header",
+      "text": {
+        "type": "plain_text",
+        "text": "Create New Pricing Rule",
+        "emoji": true
+      }
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "Define pricing rules based on customer attributes. Rules are evaluated in priority order."
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "input",
+      "block_id": "rule_name_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "rule_name",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "e.g., Enterprise US Pricing"
+        }
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Rule Name"
+      }
+    },
+    {
+      "type": "input",
+      "block_id": "rule_description_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "rule_description",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Brief description of this pricing rule"
+        },
+        "multiline": true
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Description"
+      },
+      "optional": true
+    },
+    {
+      "type": "input",
+      "block_id": "rule_priority_block",
+      "element": {
+        "type": "number_input",
+        "action_id": "rule_priority",
+        "is_decimal_allowed": false,
+        "placeholder": {
+          "type": "plain_text",
+          "text": "1-100 (higher = evaluated first)"
+        },
+        "min_value": "1",
+        "max_value": "100"
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Priority (1-100)"
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📋 Conditions (IF)*"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "condition_field_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Field*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "condition_field",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Select field"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Customer Segment"
+            },
+            "value": "customer_segment"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Region"
+            },
+            "value": "region"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Deal Size"
+            },
+            "value": "deal_size"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Product Category"
+            },
+            "value": "product_category"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Quantity"
+            },
+            "value": "quantity"
+          }
+        ]
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "condition_operator_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Operator*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "condition_operator",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Select operator"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "equals"
+            },
+            "value": "equals"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "not equals"
+            },
+            "value": "not_equals"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "greater than"
+            },
+            "value": "greater_than"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "less than"
+            },
+            "value": "less_than"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "contains"
+            },
+            "value": "contains"
+          }
+        ]
+      }
+    },
+    {
+      "type": "input",
+      "block_id": "condition_value_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "condition_value",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Value to match"
+        }
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Value"
+      }
+    },
+    {
+      "type": "actions",
+      "elements": [
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
+            "text": "+ Add Another Condition"
+          },
+          "value": "add_condition",
+          "action_id": "add_condition"
+        }
+      ]
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*⚡ Action (THEN)*"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "action_type_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Action Type*"
+      },
+      "accessory": {
+        "type": "static_select",
+        "action_id": "action_type",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Select action"
+        },
+        "options": [
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Set Base Price"
+            },
+            "value": "set_base_price"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Apply Discount %"
+            },
+            "value": "apply_discount_pct"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Apply Discount Amount"
+            },
+            "value": "apply_discount_amount"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Apply Volume Tier"
+            },
+            "value": "apply_volume_tier"
+          },
+          {
+            "text": {
+              "type": "plain_text",
+              "text": "Use Price Book"
+            },
+            "value": "use_price_book"
+          }
+        ]
+      }
+    },
+    {
+      "type": "input",
+      "block_id": "action_value_block",
+      "element": {
+        "type": "plain_text_input",
+        "action_id": "action_value",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "e.g., 100.00 or 15%"
+        }
+      },
+      "label": {
+        "type": "plain_text",
+        "text": "Action Value"
+      }
+    },
+    {
+      "type": "section",
+      "block_id": "target_product_block",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*Target Product (Optional)*"
+      },
+      "accessory": {
+        "type": "external_select",
+        "action_id": "target_product",
+        "placeholder": {
+          "type": "plain_text",
+          "text": "Search products..."
+        }
+      }
+    },
+    {
+      "type": "divider"
+    },
+    {
+      "type": "section",
+      "text": {
+        "type": "mrkdwn",
+        "text": "*📝 Preview*"
+      }
+    },
+    {
+      "type": "context",
+      "elements": [
+        {
+          "type": "mrkdwn",
+          "text": "```\nIF customer_segment equals Enterprise\nAND region equals US\nTHEN set_base_price = $10.00\n```"
+        }
+      ]
+    },
+    {
+      "type": "actions",
+      "elements": [
+        {
+          "type": "button",
+          "text": {
+            "type": "plain_text",
+            "text": "🧪 Test Rule"
+          },
+          "value": "test_rule",
+          "action_id": "test_rule"
+        }
+      ]
+    }
+  ]
+}
