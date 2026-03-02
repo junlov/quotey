@@ -11,6 +11,7 @@
 //! - `POST /quote/{token}/comment`              — add an overall customer comment
 //! - `GET  /quote/{token}/comments`             — list all comments for a quote
 //! - `POST /quote/{token}/line/{line_id}/comment` — add a per-line-item comment
+//! - `POST /quote/{token}/assumptions`          — update quote assumptions and recalculate
 //! - `POST /api/v1/portal/links`                — generate a shareable link
 //! - `POST /api/v1/portal/links/revoke`         — revoke an existing link
 //! - `GET  /api/v1/portal/links/{quote_id}`     — list active links for a quote
@@ -63,6 +64,33 @@ pub struct CommentRequest {
     pub author_name: Option<String>,
     pub author_email: Option<String>,
     pub parent_id: Option<String>,
+}
+
+/// Request to update quote assumptions (tax, payment terms, billing country)
+#[derive(Debug, Deserialize)]
+pub struct UpdateAssumptionsRequest {
+    /// Tax rate as decimal (e.g., 0.08 for 8%)
+    pub tax_rate: Option<f64>,
+    /// Payment terms: 'net_30', 'net_60', 'net_90', 'upfront'
+    pub payment_terms: Option<String>,
+    /// Billing country code (ISO 3166-1 alpha-2)
+    pub billing_country: Option<String>,
+    /// Currency code (ISO 4217)
+    pub currency: Option<String>,
+}
+
+/// Response for assumption updates including recalculated totals
+#[derive(Debug, Serialize)]
+pub struct AssumptionsUpdateResponse {
+    pub success: bool,
+    pub message: String,
+    pub quote_id: String,
+    /// Updated assumptions
+    pub assumptions: serde_json::Value,
+    /// Updated totals after recalculation
+    pub totals: serde_json::Value,
+    /// Whether the quote has any remaining assumptions
+    pub has_assumptions: bool,
 }
 
 #[derive(Debug, Serialize)]
@@ -227,6 +255,7 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/quote/{token}/comment", post(add_comment))
         .route("/quote/{token}/comments", get(list_comments))
         .route("/quote/{token}/line/{line_id}/comment", post(add_line_comment))
+        .route("/quote/{token}/assumptions", post(update_assumptions))
         .route("/api/v1/portal/links", post(create_link))
         .route("/api/v1/portal/links/revoke", post(revoke_link))
         .route("/api/v1/portal/links/{quote_id}", get(list_links))
@@ -1262,6 +1291,235 @@ async fn add_line_comment(
     Ok(Json(PortalResponse {
         success: true,
         message: format!("Comment on line {line_id} recorded."),
+    }))
+}
+
+/// Update quote assumptions and recalculate totals.
+///
+/// This endpoint allows portal users to override assumed values (tax rate,
+/// payment terms, billing country, currency) and see updated totals in real-time.
+async fn update_assumptions(
+    Path(token): Path<String>,
+    State(state): State<PortalState>,
+    Json(body): Json<UpdateAssumptionsRequest>,
+) -> Result<Json<AssumptionsUpdateResponse>, (StatusCode, Json<PortalError>)> {
+    let quote_id = resolve_quote_by_token(&state.db_pool, &token).await?;
+
+    // Fetch current quote data
+    let current = sqlx::query(
+        "SELECT currency, tax_rate_value, payment_terms, billing_country,
+                currency_explicit, tax_rate_explicit, payment_terms_explicit, billing_country_explicit
+         FROM quote WHERE id = ?",
+    )
+    .bind(&quote_id)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    // Get current values (use existing if not provided in request)
+    let new_tax_rate =
+        body.tax_rate.unwrap_or_else(|| current.try_get::<f64, _>("tax_rate_value").unwrap_or(0.0));
+    let new_payment_terms = body.payment_terms.unwrap_or_else(|| {
+        current.try_get::<String, _>("payment_terms").unwrap_or_else(|_| "net_30".to_string())
+    });
+    let new_billing_country = body
+        .billing_country
+        .or_else(|| current.try_get::<Option<String>, _>("billing_country").unwrap_or(None));
+    let new_currency = body.currency.unwrap_or_else(|| {
+        current.try_get::<String, _>("currency").unwrap_or_else(|_| "USD".to_string())
+    });
+
+    // Validate payment terms
+    let valid_payment_terms = ["net_30", "net_60", "net_90", "upfront"];
+    if !valid_payment_terms.contains(&new_payment_terms.as_str()) {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(PortalError::validation(
+                "payment_terms",
+                "must be one of: net_30, net_60, net_90, upfront",
+            )),
+        ));
+    }
+
+    // Validate tax rate (0-100%)
+    if new_tax_rate < 0.0 || new_tax_rate > 1.0 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(PortalError::validation("tax_rate", "must be between 0.0 and 1.0 (0% to 100%)")),
+        ));
+    }
+
+    let now = Utc::now();
+
+    // Update quote with explicit values
+    sqlx::query(
+        "UPDATE quote SET
+            tax_rate_value = ?,
+            tax_rate_explicit = 1,
+            payment_terms = ?,
+            payment_terms_explicit = 1,
+            billing_country = ?,
+            billing_country_explicit = 1,
+            currency = ?,
+            currency_explicit = 1,
+            updated_at = ?
+         WHERE id = ?",
+    )
+    .bind(new_tax_rate)
+    .bind(&new_payment_terms)
+    .bind(&new_billing_country)
+    .bind(&new_currency)
+    .bind(now.to_rfc3339())
+    .bind(&quote_id)
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    // Fetch quote lines to recalculate totals
+    let lines = sqlx::query(
+        "SELECT quantity, unit_price, subtotal, discount_pct
+         FROM quote_line WHERE quote_id = ?",
+    )
+    .bind(&quote_id)
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    // Recalculate totals
+    let mut subtotal = 0.0_f64;
+    let mut discount_total = 0.0_f64;
+    for row in &lines {
+        let qty: i64 = row.try_get("quantity").unwrap_or(0);
+        let unit_price: f64 = row.try_get("unit_price").unwrap_or(0.0);
+        let line_subtotal = match row.try_get::<Option<f64>, _>("subtotal") {
+            Ok(Some(value)) => value,
+            _ => unit_price * qty as f64,
+        };
+        let discount_pct: f64 =
+            row.try_get::<f64, _>("discount_pct").unwrap_or(0.0).clamp(0.0, 100.0);
+        subtotal += line_subtotal;
+        discount_total += line_subtotal * discount_pct / 100.0;
+    }
+
+    let discounted_subtotal = subtotal - discount_total;
+    let tax_amount = discounted_subtotal * new_tax_rate;
+    let total = discounted_subtotal + tax_amount;
+
+    // Update or create pricing snapshot with new totals
+    let snapshot_id = format!("PSNAP-{}", &uuid_v4()[..12]);
+    let version: i64 = current.try_get("version").unwrap_or(1);
+
+    // Delete old snapshot for this version (assumption updates create new pricing state)
+    sqlx::query("DELETE FROM quote_pricing_snapshot WHERE quote_id = ? AND version = ?")
+        .bind(&quote_id)
+        .bind(version)
+        .execute(&state.db_pool)
+        .await
+        .map_err(db_error)?;
+
+    // Create new snapshot
+    let pricing_trace = serde_json::json!({
+        "quote_id": &quote_id,
+        "version": version,
+        "priced_at": now.to_rfc3339(),
+        "priced_by": "portal_assumption_update",
+        "reason": "User updated assumptions via portal",
+        "lines": lines.len(),
+        "tax_rate": new_tax_rate,
+        "payment_terms": &new_payment_terms,
+    });
+
+    sqlx::query(
+        "INSERT INTO quote_pricing_snapshot
+            (id, quote_id, version, subtotal, discount_total, tax_total, total, currency, pricing_trace_json, priced_at, priced_by)
+         VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&snapshot_id)
+    .bind(&quote_id)
+    .bind(version)
+    .bind(subtotal)
+    .bind(discount_total)
+    .bind(tax_amount)
+    .bind(total)
+    .bind(&new_currency)
+    .bind(&pricing_trace.to_string())
+    .bind(now.to_rfc3339())
+    .bind("portal")
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    // Record audit event
+    let changes = serde_json::json!({
+        "tax_rate": new_tax_rate,
+        "payment_terms": &new_payment_terms,
+        "billing_country": &new_billing_country,
+        "currency": &new_currency,
+    });
+    record_audit_event(
+        &state.db_pool,
+        &quote_id,
+        "portal.assumptions_updated",
+        &format!("Assumptions updated via portal: {}", changes),
+    )
+    .await;
+
+    info!(
+        event_name = "portal.assumptions.updated",
+        quote_id = %quote_id,
+        tax_rate = %new_tax_rate,
+        "assumptions updated via portal"
+    );
+
+    // Build assumptions list for response
+    let assumptions = serde_json::json!([
+        {
+            "field": "currency",
+            "value": &new_currency,
+            "explicit": true,
+            "label": "Currency",
+        },
+        {
+            "field": "tax_rate",
+            "value": format!("{:.1}%", new_tax_rate * 100.0),
+            "explicit": true,
+            "label": "Tax Rate",
+        },
+        {
+            "field": "payment_terms",
+            "value": &new_payment_terms,
+            "explicit": true,
+            "label": "Payment Terms",
+        },
+        {
+            "field": "billing_country",
+            "value": new_billing_country.as_deref().unwrap_or("Not specified"),
+            "explicit": new_billing_country.is_some(),
+            "label": "Billing Country",
+        },
+    ]);
+
+    let totals = serde_json::json!({
+        "subtotal": format_price(subtotal),
+        "subtotal_raw": subtotal,
+        "discount_total": format_price(discount_total),
+        "discount_total_raw": discount_total,
+        "tax_amount": format_price(tax_amount),
+        "tax_amount_raw": tax_amount,
+        "tax_rate": new_tax_rate,
+        "total": format_price(total),
+        "total_raw": total,
+        "currency": &new_currency,
+    });
+
+    Ok(Json(AssumptionsUpdateResponse {
+        success: true,
+        message: "Assumptions updated successfully. Quote totals have been recalculated."
+            .to_string(),
+        quote_id,
+        assumptions,
+        totals,
+        has_assumptions: new_billing_country.is_none(),
     }))
 }
 

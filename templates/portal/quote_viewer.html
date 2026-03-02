@@ -1223,6 +1223,12 @@
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
                     </svg>
                     <span>Assumptions Made</span>
+                    <button class="btn btn-secondary btn-sm" onclick="openAssumptionsModal()" style="margin-left: auto; font-size: 12px; padding: 6px 12px;">
+                        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-right: 4px;">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                        </svg>
+                        Edit Assumptions
+                    </button>
                 </div>
                 <ul class="assumptions-list">
                     {% for assumption in quote.assumptions %}
@@ -1246,6 +1252,12 @@
                     </svg>
                     <span>All Values Confirmed</span>
                     <span class="assumption-badge">No Assumptions</span>
+                    <button class="btn btn-secondary btn-sm" onclick="openAssumptionsModal()" style="margin-left: auto; font-size: 12px; padding: 6px 12px;">
+                        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-right: 4px;">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                        </svg>
+                        Edit
+                    </button>
                 </div>
                 <p class="assumption-description" style="margin-left: 30px;">Currency, tax rate, payment terms, and billing country have all been explicitly set.</p>
             </div>
@@ -1445,6 +1457,79 @@
                 <button type="submit" form="rejectForm" class="btn btn-danger">
                     <span class="spinner" aria-hidden="true"></span>
                     <span class="btn-text">Confirm Decline</span>
+                </button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Edit Assumptions Modal -->
+    <div class="modal-overlay" id="assumptionsModal" role="dialog" aria-labelledby="assumptions-title" aria-modal="true">
+        <div class="modal" style="max-width: 600px;">
+            <div class="modal-header">
+                <h2 id="assumptions-title">Edit Quote Assumptions</h2>
+            </div>
+            <div class="modal-body">
+                <p style="margin-bottom: 16px; color: var(--text-light);">Update the assumptions below. Changes will recalculate the quote totals immediately.</p>
+                <form id="assumptionsForm" onsubmit="submitAssumptions(event)">
+                    <div class="form-group">
+                        <label class="form-label" for="taxRate">Tax Rate</label>
+                        <select id="taxRate" name="taxRate" class="form-input">
+                            <option value="0" {% if quote.tax_rate_raw == 0.0 %}selected{% endif %}>0% (No tax)</option>
+                            <option value="0.05" {% if quote.tax_rate_raw == 0.05 %}selected{% endif %}>5%</option>
+                            <option value="0.08" {% if quote.tax_rate_raw == 0.08 %}selected{% endif %}>8%</option>
+                            <option value="0.10" {% if quote.tax_rate_raw == 0.10 %}selected{% endif %}>10%</option>
+                            <option value="0.15" {% if quote.tax_rate_raw == 0.15 %}selected{% endif %}>15%</option>
+                            <option value="0.20" {% if quote.tax_rate_raw == 0.20 %}selected{% endif %}>20%</option>
+                        </select>
+                        <p class="form-hint">Select the applicable tax rate for this quote</p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="paymentTerms">Payment Terms</label>
+                        <select id="paymentTerms" name="paymentTerms" class="form-input">
+                            <option value="net_30" {% if quote.payment_terms_raw == 'net_30' %}selected{% endif %}>Net 30 (Due in 30 days)</option>
+                            <option value="net_60" {% if quote.payment_terms_raw == 'net_60' %}selected{% endif %}>Net 60 (Due in 60 days)</option>
+                            <option value="net_90" {% if quote.payment_terms_raw == 'net_90' %}selected{% endif %}>Net 90 (Due in 90 days)</option>
+                            <option value="upfront" {% if quote.payment_terms_raw == 'upfront' %}selected{% endif %}>Upfront (Payment required before service)</option>
+                        </select>
+                        <p class="form-hint">When payment is expected</p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="billingCountry">Billing Country</label>
+                        <input 
+                            type="text" 
+                            id="billingCountry"
+                            name="billingCountry" 
+                            class="form-input"
+                            placeholder="e.g., US, UK, CA"
+                            maxlength="2"
+                            value="{{ quote.billing_country | default(value='') }}"
+                        >
+                        <p class="form-hint">ISO country code (2 letters) - affects tax calculation</p>
+                    </div>
+                    <div class="form-group">
+                        <label class="form-label" for="currency">Currency</label>
+                        <select id="currency" name="currency" class="form-input">
+                            <option value="USD" {% if quote.currency == 'USD' %}selected{% endif %}>USD - US Dollar</option>
+                            <option value="EUR" {% if quote.currency == 'EUR' %}selected{% endif %}>EUR - Euro</option>
+                            <option value="GBP" {% if quote.currency == 'GBP' %}selected{% endif %}>GBP - British Pound</option>
+                            <option value="CAD" {% if quote.currency == 'CAD' %}selected{% endif %}>CAD - Canadian Dollar</option>
+                            <option value="AUD" {% if quote.currency == 'AUD' %}selected{% endif %}>AUD - Australian Dollar</option>
+                        </select>
+                        <p class="form-hint">Currency for this quote</p>
+                    </div>
+                </form>
+                
+                <!-- Live preview of totals -->
+                <div id="assumptionsPreview" style="margin-top: 24px; padding: 16px; background: var(--bg-light); border-radius: var(--radius); display: none;">
+                    <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--text-dark);">Updated Totals Preview</h3>
+                    <div id="assumptionsPreviewContent"></div>
+                </div>
+            </div>
+            <div class="modal-footer">
+                <button type="button" class="btn btn-secondary" onclick="closeModal('assumptionsModal')">Cancel</button>
+                <button type="submit" form="assumptionsForm" class="btn btn-primary">
+                    <span class="spinner" aria-hidden="true"></span>
+                    <span class="btn-text">Save & Recalculate</span>
                 </button>
             </div>
         </div>
@@ -1695,6 +1780,67 @@
         window.addEventListener('online', () => {
             showToast('You are back online!', 'success');
         });
+
+        // Assumptions modal functions
+        function openAssumptionsModal() {
+            document.getElementById('assumptionsModal').classList.add('active');
+            document.getElementById('taxRate').focus();
+            document.body.style.overflow = 'hidden';
+        }
+
+        // Submit assumptions update
+        async function submitAssumptions(event) {
+            event.preventDefault();
+            const form = event.target;
+            const submitBtn = form.closest('.modal').querySelector('.btn-primary');
+            
+            setLoading(submitBtn, true);
+            
+            const formData = new FormData(form);
+            const taxRate = parseFloat(formData.get('taxRate'));
+            const paymentTerms = formData.get('paymentTerms');
+            const billingCountry = formData.get('billingCountry').trim().toUpperCase();
+            const currency = formData.get('currency');
+            
+            // Validate billing country (2 letters if provided)
+            if (billingCountry && billingCountry.length !== 2) {
+                showToast('Billing country must be a 2-letter ISO code (e.g., US, UK, CA)', 'error');
+                setLoading(submitBtn, false);
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/quote/{{ quote.token }}/assumptions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        tax_rate: taxRate,
+                        payment_terms: paymentTerms,
+                        billing_country: billingCountry || null,
+                        currency: currency
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    closeModal('assumptionsModal');
+                    // Reload to show updated totals
+                    setTimeout(() => window.location.reload(), 1000);
+                } else {
+                    const errorMsg = data.recovery_hint 
+                        ? `${data.message || 'Error'} ${data.recovery_hint}` 
+                        : (data.message || 'Failed to update assumptions. Please try again.');
+                    showToast(errorMsg, 'error');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('Connection error. Please check your network and try again.', 'error');
+            } finally {
+                setLoading(submitBtn, false);
+            }
+        }
     </script>
 </body>
 </html>
