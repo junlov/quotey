@@ -1,8 +1,8 @@
-# MCP Tool Schema for Quotey (v1.1.0)
+# MCP Tool Schema for Quotey (v1.1.1)
 
 **Task:** quotey-001-2: Define MCP tool schema for Quotey  
-**Date:** 2026-02-26  
-**Author:** Kimi (AI Agent)  
+**Date:** 2026-03-02  
+**Author:** Kimi (AI Agent), updated by FoggyFinch  
 **Status:** Aligned to implementation in `crates/mcp/src/server.rs`
 
 ---
@@ -41,7 +41,6 @@ All user-facing tool failures currently return JSON payloads shaped as:
 - `CONFLICT`: state/capacity conflict (for example duplicate pending approval)
 - `CURRENCY_MISMATCH`: quote line currency mismatch
 - `INTERNAL_ERROR`: unexpected internal failure
-- `INTERNAL_ERROR`: internal failures
 - `POLICY`-related validation failures are represented via `policy_violations` in `quote_price` output for now.
 
 The shared helper is `tool_error()` in `crates/mcp/src/server.rs`.
@@ -542,12 +541,12 @@ Generate a quote artifact (mock PDF placeholder for now).
 ```json
 {
   "quote_id": "Q-...",
-  "template": "standard"
+  "template": "detailed"
 }
 ```
 
-- `template` defaults to `standard`.
-- Allowed values: `standard`, `compact`, `detailed`.
+- `template` defaults to `detailed`.
+- Allowed values: `detailed`, `executive_summary`, `compact`.
 
 #### Output
 
@@ -563,10 +562,15 @@ Generate a quote artifact (mock PDF placeholder for now).
 }
 ```
 
+When PDF rendering is unavailable, the same output shape is returned with:
+- `"pdf_generated": false`
+- `file_path` ending in `.html` (rendered fallback artifact)
+
 #### Validation in scope
 
 - quote must exist
 - template must be in allowlist
+- checksum is a deterministic mock checksum (`mock-checksum:*`), not a cryptographic digest
 
 ---
 
@@ -581,7 +585,7 @@ Generate a quote artifact (mock PDF placeholder for now).
 - [x] consistent user-facing error wrapper
 - [ ] account/counterparty enrichment (`account_name`, customer lookups)
 - [ ] persist quote price result / quote status transitions
-- [ ] actual PDF rendering (template engine)
+- [x] best-effort PDF rendering via `wkhtmltopdf` with HTML fallback
 - [ ] approvals actions (`approve` / `reject`) as dedicated MCP tools
 - [ ] audit event records for every MCP tool invocation
 

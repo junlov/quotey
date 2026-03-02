@@ -316,7 +316,32 @@ audit_log.record(AuditEvent {
 
 ---
 
-## 9. References
+## 9. 2026-03-02 Implementation Status Update
+
+`quotey-mcp` has now been implemented in-repo with `rmcp` and is no longer a greenfield plan.
+
+Implemented surfaces:
+
+- Crate + binary: `crates/mcp/Cargo.toml`, `crates/mcp/src/main.rs`
+- Server + tool routing: `crates/mcp/src/server.rs`
+- Auth + rate limiting: `crates/mcp/src/auth.rs`
+- Tool taxonomy: `crates/mcp/src/tools.rs`
+- Integration tests: `crates/mcp/tests/integration_tests.rs`
+
+Implemented tool contract currently exposes 10 tools:
+
+- `catalog_search`, `catalog_get`
+- `quote_create`, `quote_get`, `quote_price`, `quote_list`
+- `approval_request`, `approval_status`, `approval_pending`
+- `quote_pdf`
+
+Open hardening items remain (follow-up candidates):
+
+1. Protocol-version compatibility review against newer MCP changelog lines.
+2. Formal contract tests around tool payload stability/error envelopes.
+3. Audit-trail persistence completeness for all MCP tool invocations.
+
+## 10. References
 
 - **MCP Specification:** https://modelcontextprotocol.io/specification/2025-06-18
 - **Rust SDK:** https://github.com/modelcontextprotocol/rust-sdk

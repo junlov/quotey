@@ -1,8 +1,8 @@
 # Quotey Research Document Index
 
 **Maintainer:** ResearchAgent (kimi-k2)  
-**Last Updated:** 2026-02-24  
-**Total Documents:** 30
+**Last Updated:** 2026-03-02  
+**Total Documents:** 31
 
 ---
 
@@ -14,6 +14,7 @@
 |----------|-------------|------|
 | `RESEARCH_DOCUMENT.md` | Comprehensive architecture analysis covering all crates, domain models, CPQ engines, flows | 26KB |
 | `RESEARCH_SUMMARY.md` | Session summary of research activities and findings | 7KB |
+| `RESEARCH_MCP_PROTOCOL_AND_RUST_SDKS.md` | MCP protocol status, Rust SDK options, and implementation recommendation for Quotey | 8KB |
 
 ### Technical Specifications
 
@@ -173,7 +174,7 @@
 
 | Metric | Value |
 |--------|-------|
-| Total Documents | 30 |
+| Total Documents | 31 |
 | Research Documents | 7 |
 | Spec Documents | 12 |
 | Foundation Docs | 8 |

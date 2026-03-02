@@ -667,29 +667,25 @@ pub fn loading_state_message(state: LoadingState, quote_id: Option<&str>) -> Mes
         LoadingState::Initializing { operation } => (
             "🔄",
             format!("Initializing {operation}..."),
-            "Setting up the workspace. This usually takes a few seconds."
+            "Setting up the workspace. This usually takes a few seconds.",
         ),
-        LoadingState::Fetching { resource } => (
-            "⏳",
-            format!("Retrieving {resource}..."),
-            "Fetching the latest data. Please wait."
-        ),
+        LoadingState::Fetching { resource } => {
+            ("⏳", format!("Retrieving {resource}..."), "Fetching the latest data. Please wait.")
+        }
         LoadingState::Processing { operation } => (
             "⚙️",
             format!("Processing {operation}..."),
-            "Running validation and policy checks. This may take a moment."
+            "Running validation and policy checks. This may take a moment.",
         ),
-        LoadingState::Generating { artifact } => (
-            "📄",
-            format!("Generating {artifact}..."),
-            "Creating your document. Almost there."
-        ),
+        LoadingState::Generating { artifact } => {
+            ("📄", format!("Generating {artifact}..."), "Creating your document. Almost there.")
+        }
         LoadingState::Queued { position } => {
             let pos_text = position.map_or("in queue".to_string(), |p| format!("position #{p}"));
             (
                 "⏳",
                 format!("Queued ({pos_text})..."),
-                "Your request is waiting to be processed. We'll update you shortly."
+                "Your request is waiting to be processed. We'll update you shortly.",
             )
         }
     };
@@ -726,7 +722,10 @@ pub enum ErrorCategory {
 }
 
 /// Build an enhanced error message with category-specific recovery actions
-pub fn categorized_error_message(category: ErrorCategory, quote_id: Option<&str>) -> MessageTemplate {
+pub fn categorized_error_message(
+    category: ErrorCategory,
+    quote_id: Option<&str>,
+) -> MessageTemplate {
     let (icon, title, recovery_steps) = match &category {
         ErrorCategory::NotFound { resource_type, resource_id } => (
             "🔍",
@@ -734,7 +733,7 @@ pub fn categorized_error_message(category: ErrorCategory, quote_id: Option<&str>
             vec![
                 format!("The {resource_type} `{resource_id}` doesn't exist or has been deleted."),
                 "Check the ID and try again.".to_string(),
-            ]
+            ],
         ),
         ErrorCategory::Validation { field, reason } => (
             "⚠️",
@@ -742,7 +741,7 @@ pub fn categorized_error_message(category: ErrorCategory, quote_id: Option<&str>
             vec![
                 format!("Field `{field}`: {reason}"),
                 "Correct the value and resubmit.".to_string(),
-            ]
+            ],
         ),
         ErrorCategory::Permission { action } => (
             "🔒",
@@ -750,17 +749,18 @@ pub fn categorized_error_message(category: ErrorCategory, quote_id: Option<&str>
             vec![
                 format!("You don't have permission to {action}."),
                 "Contact your administrator if you believe this is an error.".to_string(),
-            ]
+            ],
         ),
         ErrorCategory::RateLimited { retry_after_seconds } => {
-            let retry_text = retry_after_seconds.map_or("a few moments".to_string(), |s| format!("{s} seconds"));
+            let retry_text =
+                retry_after_seconds.map_or("a few moments".to_string(), |s| format!("{s} seconds"));
             (
                 "⏱️",
                 "Rate limited".to_string(),
                 vec![
                     "Too many requests. Please slow down.".to_string(),
                     format!("Retry after {retry_text}."),
-                ]
+                ],
             )
         }
         ErrorCategory::ServiceUnavailable { service } => (
@@ -769,7 +769,7 @@ pub fn categorized_error_message(category: ErrorCategory, quote_id: Option<&str>
             vec![
                 format!("The {service} service is experiencing issues."),
                 "Wait a moment and try again. If this persists, contact support.".to_string(),
-            ]
+            ],
         ),
         ErrorCategory::Internal { correlation_id } => (
             "🚨",
@@ -778,7 +778,7 @@ pub fn categorized_error_message(category: ErrorCategory, quote_id: Option<&str>
                 "An unexpected error occurred. Our team has been notified.".to_string(),
                 format!("Reference ID: `{correlation_id}`"),
                 "Share this ID with support if the issue continues.".to_string(),
-            ]
+            ],
         ),
     };
 

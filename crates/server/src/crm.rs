@@ -16,16 +16,15 @@ use std::collections::{HashMap, HashSet};
 use axum::{
     extract::{Path, Query, State},
     http::{HeaderMap, StatusCode},
-    response::{IntoResponse, Json},
+    response::Json,
     routing::{get, post},
     Router,
 };
 use chrono::{DateTime, Duration, Utc};
 use quotey_core::config::CrmConfig;
 use quotey_core::{
-    DeterministicExecutionEngine, ExecutionEngineConfig, ExecutionError, ExecutionTask,
-    ExecutionTaskId, ExecutionTaskState, ExecutionTransitionEvent, IdempotencyRecord,
-    IdempotencyRecordState, OperationKey, QuoteId, RetryPolicy,
+    DeterministicExecutionEngine, ExecutionEngineConfig, ExecutionError, ExecutionTaskState,
+    OperationKey, QuoteId, RetryPolicy,
 };
 use quotey_db::repositories::{
     ExecutionQueueRepository, IdempotencyRepository, RepositoryError, SqlExecutionQueueRepository,
@@ -135,7 +134,7 @@ impl CrmDirection {
 }
 
 fn to_direction(raw: &str) -> Option<CrmDirection> {
-    let normalized = raw.trim().to_ascii_lowercase().replace('-', "_").replace(' ', "_");
+    let normalized = raw.trim().to_ascii_lowercase().replace(['-', ' '], "_");
     match normalized.as_str() {
         "quotey_to_crm" => Some(CrmDirection::QuoteyToCrm),
         "crm_to_quotey" => Some(CrmDirection::CrmToQuotey),
@@ -589,7 +588,7 @@ fn mapping_catalog(
 }
 
 fn normalize_quotey_field_key(raw: &str) -> String {
-    let normalized = raw.trim().to_ascii_lowercase().replace(' ', "_").replace('-', "_");
+    let normalized = raw.trim().to_ascii_lowercase().replace([' ', '-'], "_");
     normalized.trim_start_matches("quotey.").trim_start_matches("quote.").to_string()
 }
 
@@ -984,6 +983,7 @@ struct CrmStatusPayload {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CrmIntegration {
     provider: CrmProvider,
     status: String,
@@ -997,6 +997,7 @@ struct CrmIntegration {
 }
 
 #[derive(Debug, Clone)]
+#[allow(dead_code)]
 struct CrmFieldMapping {
     provider: CrmProvider,
     id: String,
@@ -1092,6 +1093,7 @@ fn next_retry_delay_seconds(status: &str, attempts: i32) -> Option<i64> {
 }
 
 #[derive(Debug, Clone, Copy)]
+#[allow(dead_code)]
 enum SyncAttemptResultKind {
     Success,
     RetryableFailure,
@@ -1134,9 +1136,10 @@ fn sync_status_is_retryable(status: &str) -> bool {
 
 fn classify_retry_policy(error: &str) -> RetryPolicy {
     let normalized = error.to_ascii_lowercase();
-    if normalized.contains("token expired") && normalized.contains("refresh token") {
-        RetryPolicy::Retry
-    } else if normalized.contains("timeout") || normalized.contains("temporar") {
+    if (normalized.contains("token expired") && normalized.contains("refresh token"))
+        || normalized.contains("timeout")
+        || normalized.contains("temporar")
+    {
         RetryPolicy::Retry
     } else {
         RetryPolicy::FailTerminal
@@ -1237,7 +1240,7 @@ async fn oauth_callback(
     Query(query): Query<OAuthCallbackQuery>,
 ) -> Result<Json<ConnectionResponse>, (StatusCode, Json<CrmError>)> {
     let provider = parse_provider(&provider_raw)?;
-    if let Some(error) = query.error {
+    if let Some(_error) = query.error {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(CrmError {
@@ -1288,9 +1291,7 @@ async fn oauth_callback(
     .await;
 
     let token_expires_at = token.expires_in.and_then(|seconds| {
-        Utc::now()
-            .checked_add_signed(Duration::seconds(seconds.into()))
-            .map(|value| value.to_rfc3339())
+        Utc::now().checked_add_signed(Duration::seconds(seconds)).map(|value| value.to_rfc3339())
     });
 
     let row_id = format!("CRMINT-{}", Uuid::new_v4().simple());
@@ -1431,6 +1432,7 @@ fn crm_execution_key(
     OperationKey(format!("crm:{quote_id}:{provider}:{event_type}:{event_id}"))
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn run_crm_sync_task(
     state: &CrmState,
     integration: &CrmIntegration,
@@ -1470,7 +1472,7 @@ async fn run_crm_sync_task(
     repository.save_task(task.clone()).await.map_err(repository_error)?;
     repository.save_operation(idempotency_record.clone()).await.map_err(repository_error)?;
 
-    update_sync_event_status(&state, event_id, initial_status, attempts, initial_error).await?;
+    update_sync_event_status(state, event_id, initial_status, attempts, initial_error).await?;
 
     let claimed = execution_engine
         .claim_task(task, CRM_SYNC_WORKER_ID, &mut idempotency_record)
@@ -1479,7 +1481,7 @@ async fn run_crm_sync_task(
     repository.save_task(task.clone()).await.map_err(repository_error)?;
     repository.append_transition(claimed.transition.clone()).await.map_err(repository_error)?;
     update_sync_event_status(
-        &state,
+        state,
         event_id,
         crm_sync_queue_status(&ExecutionTaskState::Running),
         attempts,
@@ -1505,7 +1507,7 @@ async fn run_crm_sync_task(
                 .map_err(repository_error)?;
 
             let _ =
-                set_integration_sync_state(&state, integration.provider, "connected", None).await;
+                set_integration_sync_state(state, integration.provider, "connected", None).await;
             QueueSyncResult {
                 status: crm_sync_queue_status(&ExecutionTaskState::Completed).to_string(),
                 message,
@@ -1541,7 +1543,7 @@ async fn run_crm_sync_task(
                 .map_err(repository_error)?;
 
             let _ = set_integration_sync_state(
-                &state,
+                state,
                 integration.provider,
                 if matches!(task.state, ExecutionTaskState::FailedTerminal) {
                     "error"
@@ -1561,7 +1563,7 @@ async fn run_crm_sync_task(
     };
 
     update_sync_event_status(
-        &state,
+        state,
         event_id,
         &result.status,
         result.attempts,
@@ -1998,7 +2000,7 @@ async fn retry_sync_event(
                 extract_inbound_quote_update(&webhook_payload, provider, &mappings);
             let quote_id = resolve_webhook_quote_id(
                 &state,
-                inbound_update.quote_id.as_deref().or_else(|| event.quote_id.as_deref()),
+                inbound_update.quote_id.as_deref().or(event.quote_id.as_deref()),
                 inbound_update.account_id.as_deref(),
                 inbound_update.deal_id.as_deref(),
             )
@@ -2013,40 +2015,38 @@ async fn retry_sync_event(
                     Some("retry payload has no actionable fields".to_string()),
                 )
                 .await?;
-            } else {
-                if let Some(ref quote_id) = quote_id {
-                    if let Err((_code, err)) = apply_crm_update_to_quote(
-                        &state,
-                        quote_id,
-                        inbound_update.account_id.as_deref(),
-                        inbound_update.deal_id.as_deref(),
-                        inbound_update.status.as_deref(),
-                        inbound_update.notes.as_deref(),
-                    )
-                    .await
-                    {
-                        update_sync_event_status(
-                            &state,
-                            &event_id,
-                            "failed",
-                            next_attempt,
-                            Some(err.0.error.clone()),
-                        )
-                        .await?;
-                    } else {
-                        update_sync_event_status(&state, &event_id, "success", next_attempt, None)
-                            .await?;
-                    }
-                } else {
+            } else if let Some(ref quote_id) = quote_id {
+                if let Err((_code, err)) = apply_crm_update_to_quote(
+                    &state,
+                    quote_id,
+                    inbound_update.account_id.as_deref(),
+                    inbound_update.deal_id.as_deref(),
+                    inbound_update.status.as_deref(),
+                    inbound_update.notes.as_deref(),
+                )
+                .await
+                {
                     update_sync_event_status(
                         &state,
                         &event_id,
-                        "skipped",
+                        "failed",
                         next_attempt,
-                        Some("retry could not resolve quote_id from payload".to_string()),
+                        Some(err.0.error.clone()),
                     )
                     .await?;
+                } else {
+                    update_sync_event_status(&state, &event_id, "success", next_attempt, None)
+                        .await?;
                 }
+            } else {
+                update_sync_event_status(
+                    &state,
+                    &event_id,
+                    "skipped",
+                    next_attempt,
+                    Some("retry could not resolve quote_id from payload".to_string()),
+                )
+                .await?;
             }
         }
     }
@@ -2087,6 +2087,7 @@ async fn crm_status(
     .await
     .map_err(db_error)?;
 
+    #[allow(clippy::type_complexity)]
     let mut configured_integrations: HashMap<
         String,
         (String, Option<String>, Option<String>, Option<String>, bool),
@@ -2593,14 +2594,9 @@ fn extract_template_value(expression: &str, source: &Value) -> Option<String> {
         let prefix = &expression[cursor..absolute_start];
         output.push_str(prefix);
         let remainder = &expression[absolute_start + 2..];
-        let end = match remainder.find('}') {
-            Some(idx) => idx,
-            None => return None,
-        };
+        let end = remainder.find('}')?;
         let key = &remainder[..end];
-        if let Some(value) =
-            resolve_payload_value(source, key).as_ref().and_then(|v| value_to_text(v))
-        {
+        if let Some(value) = resolve_payload_value(source, key).as_ref().and_then(value_to_text) {
             output.push_str(&value);
         }
         cursor = absolute_start + 2 + end + 1;
@@ -2991,6 +2987,7 @@ struct OAuthTokenResponse {
     crm_account_id: Option<String>,
 }
 
+#[allow(dead_code)]
 struct TokenExchangeRequest<'a> {
     grant_type: &'a str,
     code: &'a str,
@@ -3096,6 +3093,7 @@ async fn fetch_sync_event(
     Ok(row)
 }
 
+#[allow(clippy::too_many_arguments)]
 async fn create_sync_event(
     state: &CrmState,
     event_id: &str,
@@ -3216,10 +3214,8 @@ async fn apply_crm_update_to_quote(
     sets.push("updated_at = ?");
     let statement = format!("UPDATE quote SET {} WHERE id = ?", sets.join(", "));
     let mut query = sqlx::query(&statement);
-    for value in [account_id, deal_id, status, notes] {
-        if let Some(item) = value {
-            query = query.bind(item);
-        }
+    for item in [account_id, deal_id, status, notes].into_iter().flatten() {
+        query = query.bind(item);
     }
     query = query.bind(Utc::now().to_rfc3339()).bind(quote_id);
     let result = query.execute(&state.db_pool).await.map_err(db_error)?;

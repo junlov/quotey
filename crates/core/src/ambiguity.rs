@@ -179,10 +179,7 @@ impl AmbiguitySet {
 
     /// Get ambiguities by severity
     pub fn by_severity(&self, severity: AmbiguitySeverity) -> Vec<&Ambiguity> {
-        self.ambiguities
-            .iter()
-            .filter(|a| a.ambiguity_type.severity() == severity)
-            .collect()
+        self.ambiguities.iter().filter(|a| a.ambiguity_type.severity() == severity).collect()
     }
 
     /// Get critical ambiguities
@@ -260,9 +257,7 @@ pub struct AmbiguityDetectionEngine {
 
 impl Default for AmbiguityDetectionEngine {
     fn default() -> Self {
-        Self {
-            product_confidence_threshold: 0.7,
-        }
+        Self { product_confidence_threshold: 0.7 }
     }
 }
 
@@ -360,14 +355,10 @@ impl AmbiguityDetectionEngine {
             } else if product.confidence < self.product_confidence_threshold {
                 set.add(Ambiguity {
                     ambiguity_type: AmbiguityType::ProductDisambiguation,
-                    description: format!(
-                        "Low confidence match for '{}'",
-                        product.original_text
-                    ),
+                    description: format!("Low confidence match for '{}'", product.original_text),
                     clarification_prompt: format!(
                         "I matched '{}' to '{}'. Is this correct?",
-                        product.original_text,
-                        product.matched_products[0]
+                        product.original_text, product.matched_products[0]
                     ),
                     options: vec![
                         AmbiguityOption {
@@ -407,19 +398,13 @@ impl AmbiguityDetectionEngine {
         }
 
         // Check if quantity count doesn't match product count
-        let product_count = input
-            .product_mentions
-            .iter()
-            .filter(|p| !p.matched_products.is_empty())
-            .count();
+        let product_count =
+            input.product_mentions.iter().filter(|p| !p.matched_products.is_empty()).count();
 
         if product_count > 1 && input.quantities.len() == 1 {
             set.add(Ambiguity {
                 ambiguity_type: AmbiguityType::QuantityAssociation,
-                description: format!(
-                    "One quantity specified for {} products",
-                    product_count
-                ),
+                description: format!("One quantity specified for {} products", product_count),
                 clarification_prompt: format!(
                     "You specified {} units. Which product(s) should this apply to?",
                     input.quantities[0].value
@@ -468,7 +453,8 @@ impl AmbiguityDetectionEngine {
                 set.add(Ambiguity {
                     ambiguity_type: AmbiguityType::DateDisambiguation,
                     description: format!("{} dates mentioned", input.dates.len()),
-                    clarification_prompt: "Which date should be the contract start date?".to_string(),
+                    clarification_prompt: "Which date should be the contract start date?"
+                        .to_string(),
                     options: input
                         .dates
                         .iter()
@@ -552,12 +538,17 @@ impl AmbiguityDetectionEngine {
         }
     }
 
-    fn detect_missing_billing_country(&self, input: &AmbiguityDetectionInput, set: &mut AmbiguitySet) {
+    fn detect_missing_billing_country(
+        &self,
+        input: &AmbiguityDetectionInput,
+        set: &mut AmbiguitySet,
+    ) {
         if input.billing_country.is_none() {
             set.add(Ambiguity {
                 ambiguity_type: AmbiguityType::MissingBillingCountry,
                 description: "Billing country not specified".to_string(),
-                clarification_prompt: "What country should be used for billing/tax purposes?".to_string(),
+                clarification_prompt: "What country should be used for billing/tax purposes?"
+                    .to_string(),
                 options: vec![],
                 field: "billing_country".to_string(),
                 original_value: None,
@@ -608,7 +599,12 @@ pub fn render_ambiguity_slack_blocks(set: &AmbiguitySet) -> Vec<serde_json::Valu
     for ambiguity in &set.ambiguities {
         let emoji = ambiguity.ambiguity_type.severity().emoji();
 
-        let mut text = format!("*{} {}*\n{}", emoji, ambiguity.ambiguity_type.label(), ambiguity.clarification_prompt);
+        let mut text = format!(
+            "*{} {}*\n{}",
+            emoji,
+            ambiguity.ambiguity_type.label(),
+            ambiguity.clarification_prompt
+        );
 
         if !ambiguity.options.is_empty() {
             text.push_str("\n\n*Options:*");
@@ -690,7 +686,10 @@ mod tests {
             account_id: Some("ACME".to_string()),
             product_mentions: vec![ProductMention {
                 original_text: "enterprise".to_string(),
-                matched_products: vec!["plan-enterprise".to_string(), "addon-enterprise".to_string()],
+                matched_products: vec![
+                    "plan-enterprise".to_string(),
+                    "addon-enterprise".to_string(),
+                ],
                 confidence: 0.5,
             }],
             quantities: vec![QuantityMention {
@@ -722,15 +721,13 @@ mod tests {
             ambiguity_type: AmbiguityType::MissingQuantity,
             description: "No quantity".to_string(),
             clarification_prompt: "How many?".to_string(),
-            options: vec![
-                AmbiguityOption {
-                    id: "10".to_string(),
-                    label: "10".to_string(),
-                    description: None,
-                    value: serde_json::json!(10),
-                    confidence: 1.0,
-                },
-            ],
+            options: vec![AmbiguityOption {
+                id: "10".to_string(),
+                label: "10".to_string(),
+                description: None,
+                value: serde_json::json!(10),
+                confidence: 1.0,
+            }],
             field: "quantity".to_string(),
             original_value: None,
         });

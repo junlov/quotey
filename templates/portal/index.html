@@ -320,6 +320,16 @@
             color: #059669;
         }
 
+        .status-sent {
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+
+        .status-declined {
+            background: #fee2e2;
+            color: #dc2626;
+        }
+
         .status-expired {
             background: #fee2e2;
             color: #dc2626;
@@ -497,27 +507,38 @@
         <div class="filters-bar">
             <div class="filter-group">
                 <label class="filter-label">Status:</label>
-                <select class="filter-select" onchange="filterQuotes(this.value)">
-                    <option value="all">All Quotes</option>
-                    <option value="pending">Pending</option>
-                    <option value="approved">Approved</option>
-                    <option value="expired">Expired</option>
+                <select id="status-filter" class="filter-select" onchange="filterQuotes(this.value)">
+                    <option value="all" {% if status_filter == "all" %}selected{% endif %}>All Quotes</option>
+                    <option value="pending" {% if status_filter == "pending" %}selected{% endif %}>Pending</option>
+                    <option value="approved" {% if status_filter == "approved" %}selected{% endif %}>Approved</option>
+                    <option value="declined" {% if status_filter == "declined" %}selected{% endif %}>Declined</option>
+                    <option value="expired" {% if status_filter == "expired" %}selected{% endif %}>Expired</option>
                 </select>
             </div>
             <div class="filter-group">
                 <label class="filter-label">Sort by:</label>
-                <select class="filter-select" onchange="sortQuotes(this.value)">
+                <select id="sort-quotes" class="filter-select" onchange="sortQuotes(this.value)">
                     <option value="date-desc">Newest First</option>
                     <option value="date-asc">Oldest First</option>
                     <option value="amount-desc">Highest Amount</option>
                     <option value="amount-asc">Lowest Amount</option>
                 </select>
             </div>
-            <div class="search-box">
-                <svg class="search-icon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
-                </svg>
-                <input type="text" class="search-input" placeholder="Search quotes..." oninput="searchQuotes(this.value)">
+            <div class="filter-group">
+                <label class="filter-label">Search:</label>
+                <div class="search-box">
+                    <svg class="search-icon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0z"/>
+                    </svg>
+                    <input
+                        id="search-input"
+                        type="text"
+                        class="search-input"
+                        placeholder="Search quotes..."
+                        value="{{ search | default(value='') }}"
+                        oninput="searchQuotes(this.value)"
+                    >
+                </div>
             </div>
         </div>
 
@@ -541,7 +562,7 @@
                 </thead>
                 <tbody>
                     {% for quote in quotes %}
-                    <tr data-status="{{ quote.status }}" data-amount="{{ quote.total_amount }}">
+                    <tr data-status="{{ quote.status }}" data-amount="{{ quote.total_amount_raw | default(value=0) }}">
                         <td>
                             <a href="/quote/{{ quote.token }}" class="quote-link">{{ quote.quote_id }}</a>
                         </td>
@@ -587,17 +608,27 @@
         function sortQuotes(sortBy) {
             const tbody = document.querySelector('.quotes-table tbody');
             const rows = Array.from(tbody.querySelectorAll('tr'));
+
+            const parseAmount = (value) => {
+                if (!value) {
+                    return 0;
+                }
+                const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
+                return Number.isFinite(parsed) ? parsed : 0;
+            };
             
             rows.sort((a, b) => {
+                const amountA = parseAmount(a.dataset.amount);
+                const amountB = parseAmount(b.dataset.amount);
                 switch(sortBy) {
                     case 'date-desc':
                         return new Date(b.cells[1].textContent) - new Date(a.cells[1].textContent);
                     case 'date-asc':
                         return new Date(a.cells[1].textContent) - new Date(b.cells[1].textContent);
                     case 'amount-desc':
-                        return parseFloat(b.dataset.amount) - parseFloat(a.dataset.amount);
+                        return amountB - amountA;
                     case 'amount-asc':
-                        return parseFloat(a.dataset.amount) - parseFloat(b.dataset.amount);
+                        return amountA - amountB;
                     default:
                         return 0;
                 }
@@ -619,6 +650,17 @@
                 }
             });
         }
+
+        document.addEventListener('DOMContentLoaded', () => {
+            const statusFilter = document.getElementById('status-filter');
+            const searchInput = document.getElementById('search-input');
+            if (statusFilter) {
+                filterQuotes(statusFilter.value || 'all');
+            }
+            if (searchInput) {
+                searchQuotes(searchInput.value || '');
+            }
+        });
     </script>
 </body>
 </html>

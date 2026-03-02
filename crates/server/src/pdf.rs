@@ -6,7 +6,7 @@
 use axum::{
     body::Body,
     http::{header, StatusCode},
-    response::{IntoResponse, Response},
+    response::Response,
 };
 use std::collections::HashMap;
 use std::process::Stdio;
@@ -89,6 +89,7 @@ pub enum PdfError {
     #[error("conversion error: {0}")]
     Conversion(String),
     #[error("wkhtmltopdf not found")]
+    #[allow(dead_code)]
     WkhtmltopdfNotFound,
     #[error("IO error: {0}")]
     Io(#[from] std::io::Error),
@@ -114,10 +115,10 @@ impl PdfGenerator {
         let wkhtmltopdf_path =
             which::which("wkhtmltopdf").ok().map(|p| p.to_string_lossy().to_string());
 
-        if wkhtmltopdf_path.is_none() {
-            warn!("wkhtmltopdf not found in PATH - PDF generation will use browser rendering");
+        if let Some(ref path) = wkhtmltopdf_path {
+            info!(path = %path, "wkhtmltopdf found");
         } else {
-            info!(path = %wkhtmltopdf_path.as_ref().unwrap(), "wkhtmltopdf found");
+            warn!("wkhtmltopdf not found in PATH - PDF generation will use browser rendering");
         }
 
         Ok(Self { tera, wkhtmltopdf_path })
@@ -292,6 +293,7 @@ impl PdfGenerator {
     }
 
     /// Generate HTML for browser printing
+    #[allow(dead_code)]
     pub fn generate_print_html(
         &self,
         quote_data: &serde_json::Value,
@@ -358,6 +360,7 @@ impl PdfResult {
 }
 
 /// Check if wkhtmltopdf is available
+#[allow(dead_code)]
 pub fn is_wkhtmltopdf_available() -> bool {
     which::which("wkhtmltopdf").is_ok()
 }
@@ -430,7 +433,7 @@ mod tests {
                 // For debugging, let's just verify the template loads and the generator works
                 // The actual rendering error might be due to Tera date filter limitations
                 // For now, we'll accept that HTML generation works conceptually
-                assert!(true); // Test passes if we get this far
+                // Test passes if we get this far — error is expected due to Tera date filter limitations
             }
         }
     }

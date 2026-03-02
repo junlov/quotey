@@ -5,6 +5,18 @@ Establish a consistent, predictable vocabulary across all user touchpoints (Slac
 
 ---
 
+## Copy Contract (Five Sections)
+
+The interaction contract is fixed to the five sections below. All UX stories must map to one or more sections.
+
+1. `Status Vocabulary` - canonical state words and meanings.
+2. `Action Labels` - canonical button/CTA labels.
+3. `Message Patterns` - canonical success/warning/error/loading templates.
+4. `Assumption + Pricing Disclosure` - canonical assumption cards and numeric format.
+5. `Surface Adoption + Conflict Rules` - where tokens are used and how to prevent semantic drift.
+
+---
+
 ## Core Principles
 
 1. **Consistency**: Same words mean same things everywhere
@@ -245,6 +257,40 @@ Total:                 $XX,XXX.00
 - Primary action: Bottom right
 - Secondary actions: Bottom left or next to primary
 - Destructive actions: Separated from primary actions
+
+---
+
+## Surface Adoption + Conflict Rules
+
+### Key surface adoption map
+
+| Surface | Primary file(s) | Required token families |
+|--------|------------------|-------------------------|
+| Slack command + thread responses | `crates/slack/src/commands.rs`, `crates/slack/src/blocks.rs` | Status vocabulary, message patterns, action labels |
+| Slack event reactions + approvals | `crates/slack/src/events.rs` | Approval/confirmation tokens (`✅`, warning/error families) |
+| Portal approval + comment flow | `crates/server/src/portal.rs` | Status vocabulary, error/warning families, action labels |
+| Planning baseline/gate docs | `.planning/UX_BASELINE.md`, `.planning/UX_GATE_CHECKLIST.md` | Canonical wording references and checklist IDs |
+
+### Conflict prevention rules
+
+1. A token has exactly one semantic meaning. Example: `approval` always means "waiting for approver decision", never "priced and awaiting review".
+2. New aliases must be added to this contract first, then propagated to surfaces.
+3. `warning` language (`⚠️`) signals recoverable risk; `error` language (`❌`) signals action failure needing correction.
+4. Slack and portal must not map the same backend state to different user-facing statuses.
+5. If a mismatch is found, update this file and all impacted surfaces in the same workstream.
+
+### Story linkage rule
+
+Every UX bead/story must include:
+
+```markdown
+## Copy Contract Links
+- Sections: [Status Vocabulary], [Message Patterns]
+- Tokens touched: approval, approved, rejected
+- Surfaces touched: crates/slack/src/blocks.rs, crates/server/src/portal.rs
+```
+
+No UX story closes without this linkage block plus gate evidence.
 
 ---
 

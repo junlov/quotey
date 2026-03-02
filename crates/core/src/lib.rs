@@ -3,9 +3,9 @@ pub use chrono;
 
 pub mod ambiguity;
 pub use ambiguity::{
-    Ambiguity, AmbiguityDetectionEngine, AmbiguityDetectionInput, AmbiguityOption, AmbiguitySet,
-    AmbiguitySeverity, AmbiguityType, DateMention, ProductMention, QuantityMention,
-    render_ambiguity_slack_blocks,
+    render_ambiguity_slack_blocks, Ambiguity, AmbiguityDetectionEngine, AmbiguityDetectionInput,
+    AmbiguityOption, AmbiguitySet, AmbiguitySeverity, AmbiguityType, DateMention, ProductMention,
+    QuantityMention,
 };
 pub mod approvals;
 pub mod archaeology;

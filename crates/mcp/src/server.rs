@@ -261,6 +261,50 @@ impl QuoteyMcpServer {
         &self.auth_manager
     }
 
+    async fn record_mcp_audit_event(
+        &self,
+        tool_name: &str,
+        quote_id: Option<&str>,
+        payload: serde_json::Value,
+    ) {
+        let payload_json = match serde_json::to_string(&payload) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(error = %error, tool_name = %tool_name, "failed to serialize MCP audit payload");
+                "{}".to_string()
+            }
+        };
+        let metadata_json = serde_json::json!({
+            "source": "quotey-mcp",
+            "tool_name": tool_name
+        })
+        .to_string();
+
+        if let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO audit_event (
+                id, timestamp, actor, actor_type, quote_id,
+                event_type, event_category, payload_json, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(format!("mcp-audit-{}", uuid::Uuid::new_v4()))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind("agent:mcp")
+        .bind("agent")
+        .bind(quote_id.map(str::to_string))
+        .bind(format!("mcp.{tool_name}.invoked"))
+        .bind("mcp_tool")
+        .bind(payload_json)
+        .bind(Some(metadata_json))
+        .execute(self.db())
+        .await
+        {
+            warn!(error = %error, tool_name = %tool_name, "failed to persist MCP audit_event");
+        }
+    }
+
     /// Validate the current request against the auth manager.
     ///
     /// Clients pass their key via the MCP `_meta` field on tool-call requests:
@@ -718,7 +762,7 @@ fn build_pdf_quote_payload(quote: &Quote) -> serde_json::Value {
     for line in &quote.lines {
         let unit_price = decimal_to_f64(&line.unit_price);
         let line_subtotal = unit_price * f64::from(line.quantity);
-        let discount_pct = line.discount_pct.max(0.0).min(100.0);
+        let discount_pct = line.discount_pct.clamp(0.0, 100.0);
         let line_discount = line_subtotal * discount_pct / 100.0;
         let line_total = line_subtotal - line_discount;
 
@@ -730,11 +774,11 @@ fn build_pdf_quote_payload(quote: &Quote) -> serde_json::Value {
             "product_name": line.product_id.0,
             "quantity": line.quantity,
             "unit_price": unit_price,
-            "subtotal": line_total,
+            "subtotal": line_subtotal,
             "discount_pct": discount_pct,
             "discount_amount": line_discount,
             "total_price": line_total,
-            "line_subtotal": line_total,
+            "line_subtotal": line_subtotal,
         }));
     }
 
@@ -913,6 +957,18 @@ impl QuoteyMcpServer {
     #[tool(description = "Search products by name, SKU, or description")]
     async fn catalog_search(&self, Parameters(input): Parameters<CatalogSearchInput>) -> String {
         debug!(query = %input.query, "catalog_search called");
+        self.record_mcp_audit_event(
+            "catalog_search",
+            None,
+            serde_json::json!({
+                "query": input.query,
+                "category": input.category,
+                "active_only": input.active_only,
+                "limit": input.limit,
+                "page": input.page
+            }),
+        )
+        .await;
 
         let query = input.query.trim().to_string();
         let category = normalize_optional_trimmed(&input.category);
@@ -942,7 +998,7 @@ impl QuoteyMcpServer {
             Ok(mut products) => {
                 if let Some(category_filter) = category.as_deref() {
                     products.retain(|product| {
-                        product.family_id.as_ref().is_none_or(|f| f.0 == category_filter)
+                        product.family_id.as_ref().map_or(true, |f| f.0 == category_filter)
                     });
                 }
 
@@ -985,6 +1041,15 @@ impl QuoteyMcpServer {
     #[tool(description = "Get detailed product information by ID")]
     async fn catalog_get(&self, Parameters(input): Parameters<CatalogGetInput>) -> String {
         debug!(product_id = %input.product_id, "catalog_get called");
+        self.record_mcp_audit_event(
+            "catalog_get",
+            None,
+            serde_json::json!({
+                "product_id": input.product_id,
+                "include_relationships": input.include_relationships
+            }),
+        )
+        .await;
 
         let product_id = match normalize_id(&input.product_id, "product_id") {
             Ok(value) => value,
@@ -1034,6 +1099,19 @@ impl QuoteyMcpServer {
     #[tool(description = "Create a new quote for a customer")]
     async fn quote_create(&self, Parameters(input): Parameters<QuoteCreateInput>) -> String {
         debug!(account_id = %input.account_id, "quote_create called");
+        self.record_mcp_audit_event(
+            "quote_create",
+            None,
+            serde_json::json!({
+                "account_id": input.account_id,
+                "deal_id": input.deal_id,
+                "currency": input.currency,
+                "term_months": input.term_months,
+                "line_items_count": input.line_items.len(),
+                "idempotency_key": input.idempotency_key
+            }),
+        )
+        .await;
 
         use quotey_core::domain::product::ProductId;
         use quotey_core::domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
@@ -1136,9 +1214,9 @@ impl QuoteyMcpServer {
                 );
             }
 
-            let unit_price = product.base_price.unwrap_or_else(|| Decimal::ZERO);
-            let subtotal = unit_price * Decimal::from(item.quantity as u32);
-            let discount_rate = Decimal::from_f64(discount_pct).unwrap_or_else(|| Decimal::ZERO);
+            let unit_price = product.base_price.unwrap_or(Decimal::ZERO);
+            let subtotal = unit_price * Decimal::from(item.quantity);
+            let discount_rate = Decimal::from_f64(discount_pct).unwrap_or(Decimal::ZERO);
             let discount_amount = subtotal * discount_rate / Decimal::from(100);
             let effective_subtotal = subtotal - discount_amount;
 
@@ -1205,6 +1283,16 @@ impl QuoteyMcpServer {
     #[tool(description = "Get detailed quote information")]
     async fn quote_get(&self, Parameters(input): Parameters<QuoteGetInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_get called");
+        let quote_id_for_audit = input.quote_id.trim().to_string();
+        self.record_mcp_audit_event(
+            "quote_get",
+            if quote_id_for_audit.is_empty() { None } else { Some(quote_id_for_audit.as_str()) },
+            serde_json::json!({
+                "quote_id": input.quote_id,
+                "include_pricing": input.include_pricing
+            }),
+        )
+        .await;
 
         let quote_id = match normalize_id(&input.quote_id, "quote_id") {
             Ok(value) => value,
@@ -1308,6 +1396,16 @@ impl QuoteyMcpServer {
     #[tool(description = "Run pricing engine on a quote")]
     async fn quote_price(&self, Parameters(input): Parameters<QuotePriceInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_price called");
+        let quote_id_for_audit = input.quote_id.trim().to_string();
+        self.record_mcp_audit_event(
+            "quote_price",
+            if quote_id_for_audit.is_empty() { None } else { Some(quote_id_for_audit.as_str()) },
+            serde_json::json!({
+                "quote_id": input.quote_id,
+                "requested_discount_pct": input.requested_discount_pct
+            }),
+        )
+        .await;
 
         let quote_id = match normalize_id(&input.quote_id, "quote_id") {
             Ok(value) => value,
@@ -1449,6 +1547,17 @@ impl QuoteyMcpServer {
     #[tool(description = "List quotes with optional filters")]
     async fn quote_list(&self, Parameters(input): Parameters<QuoteListInput>) -> String {
         debug!("quote_list called");
+        self.record_mcp_audit_event(
+            "quote_list",
+            None,
+            serde_json::json!({
+                "account_id": input.account_id,
+                "status": input.status,
+                "limit": input.limit,
+                "page": input.page
+            }),
+        )
+        .await;
 
         let account_id = normalize_optional_trimmed(&input.account_id);
         let status = normalize_optional_trimmed(&input.status);
@@ -1524,6 +1633,16 @@ impl QuoteyMcpServer {
         Parameters(input): Parameters<ApprovalRequestInput>,
     ) -> String {
         debug!(quote_id = %input.quote_id, "approval_request called");
+        let quote_id_for_audit = input.quote_id.trim().to_string();
+        self.record_mcp_audit_event(
+            "approval_request",
+            if quote_id_for_audit.is_empty() { None } else { Some(quote_id_for_audit.as_str()) },
+            serde_json::json!({
+                "quote_id": input.quote_id,
+                "approver_role": input.approver_role
+            }),
+        )
+        .await;
 
         use quotey_core::domain::approval::{
             ApprovalId, ApprovalRequest as DomainApproval, ApprovalStatus,
@@ -1662,6 +1781,15 @@ impl QuoteyMcpServer {
     #[tool(description = "Check approval status for a quote")]
     async fn approval_status(&self, Parameters(input): Parameters<ApprovalStatusInput>) -> String {
         debug!(quote_id = %input.quote_id, "approval_status called");
+        let quote_id_for_audit = input.quote_id.trim().to_string();
+        self.record_mcp_audit_event(
+            "approval_status",
+            if quote_id_for_audit.is_empty() { None } else { Some(quote_id_for_audit.as_str()) },
+            serde_json::json!({
+                "quote_id": input.quote_id
+            }),
+        )
+        .await;
 
         let quote_id = match normalize_id(&input.quote_id, "quote_id") {
             Ok(value) => value,
@@ -1727,6 +1855,15 @@ impl QuoteyMcpServer {
         Parameters(input): Parameters<ApprovalPendingInput>,
     ) -> String {
         debug!("approval_pending called");
+        self.record_mcp_audit_event(
+            "approval_pending",
+            None,
+            serde_json::json!({
+                "approver_role": input.approver_role,
+                "limit": input.limit
+            }),
+        )
+        .await;
 
         let limit = normalize_limit(input.limit);
         let approver_role = normalize_optional_trimmed(&input.approver_role);
@@ -1787,6 +1924,16 @@ impl QuoteyMcpServer {
     #[tool(description = "Generate PDF for a quote")]
     async fn quote_pdf(&self, Parameters(input): Parameters<QuotePdfInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_pdf called");
+        let quote_id_for_audit = input.quote_id.trim().to_string();
+        self.record_mcp_audit_event(
+            "quote_pdf",
+            if quote_id_for_audit.is_empty() { None } else { Some(quote_id_for_audit.as_str()) },
+            serde_json::json!({
+                "quote_id": input.quote_id,
+                "template": input.template
+            }),
+        )
+        .await;
         let quote_id = match normalize_id(&input.quote_id, "quote_id") {
             Ok(value) => value,
             Err(msg) => {
@@ -1836,7 +1983,7 @@ impl QuoteyMcpServer {
         };
 
         let generated_at = chrono::Utc::now().to_rfc3339();
-        let (dir, file_path, pdf_generated, file_size_bytes, checksum) = match &render_result {
+        let (_dir, file_path, pdf_generated, file_size_bytes, checksum) = match &render_result {
             PdfRenderResult::Pdf(bytes) => {
                 let (dir, file_path) = payload_to_output_path(&quote_id, &template, true);
                 if let Err(e) = std::fs::create_dir_all(&dir) {

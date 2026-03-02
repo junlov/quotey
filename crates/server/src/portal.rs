@@ -134,6 +134,7 @@ impl PortalError {
         }
     }
 
+    #[allow(dead_code)]
     fn rate_limited(retry_after: u32) -> Self {
         Self {
             error: "Too many requests".to_string(),
@@ -555,7 +556,7 @@ async fn view_quote_page(
                 .try_get::<Option<String>, _>("account_id")
                 .ok()
                 .flatten()
-                .map(|id| format!("{id}"))
+                .map(|id| id.to_string())
                 .unwrap_or_else(|| "Customer".to_string()),
             "email": "customer@example.com",
             "phone": "",
@@ -612,10 +613,7 @@ async fn download_quote_pdf(
     // Check if PDF generator is available
     let pdf_generator = state.pdf_generator.as_ref().ok_or_else(|| {
         error!("PDF generator not initialized");
-        (
-            StatusCode::SERVICE_UNAVAILABLE,
-            Json(PortalError::service_unavailable("PDF generator")),
-        )
+        (StatusCode::SERVICE_UNAVAILABLE, Json(PortalError::service_unavailable("PDF generator")))
     })?;
 
     // Fetch complete quote data for PDF generation
@@ -660,13 +658,10 @@ async fn fetch_quote_for_pdf(
     .fetch_one(pool)
     .await
     .map_err(|e| match e {
-        sqlx::Error::RowNotFound => {
-            (StatusCode::NOT_FOUND, Json(PortalError::not_found("quote")))
+        sqlx::Error::RowNotFound => (StatusCode::NOT_FOUND, Json(PortalError::not_found("quote"))),
+        _ => {
+            (StatusCode::INTERNAL_SERVER_ERROR, Json(PortalError::service_unavailable("database")))
         }
-        _ => (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Json(PortalError::service_unavailable("database")),
-        ),
     })?;
 
     // Fetch quote lines
@@ -718,7 +713,7 @@ async fn fetch_quote_for_pdf(
                 "product_sku": r.try_get::<String, _>("product_sku").unwrap_or_default(),
                 "quantity": quantity,
                 "unit_price": unit_price,
-                "subtotal": total_price,
+                "subtotal": base_subtotal,
                 "discount_pct": discount_pct,
                 "discount_amount": discount_amount,
                 "total_price": total_price,
@@ -863,16 +858,18 @@ async fn portal_index_page(
             .await
             .unwrap_or(0);
 
-    // Build quotes list
+    // Build quotes list — only include quotes with valid portal link tokens
     let quotes: Vec<serde_json::Value> = quote_rows
         .iter()
-        .map(|row: &sqlx::sqlite::SqliteRow| {
+        .filter_map(|row: &sqlx::sqlite::SqliteRow| {
             let quote_id: String = row.try_get("id").unwrap_or_default();
             let status = canonical_quote_status(&row.try_get::<String, _>("status").unwrap_or_default());
             let link_token: Option<String> = row.try_get::<Option<String>, _>("token").unwrap_or(None);
-            let token = link_token.unwrap_or_else(|| quote_id.clone());
 
-            serde_json::json!({
+            // Only show quotes that have a valid portal link token — never expose raw quote IDs
+            let token = link_token?;
+
+            Some(serde_json::json!({
                 "token": token,
                 "quote_id": quote_id,
                 "created_at": row.try_get::<String, _>("created_at").unwrap_or_default(),
@@ -880,7 +877,7 @@ async fn portal_index_page(
                 "status": status,
                 "total_amount": format_price(row.try_get::<f64, _>("computed_total").unwrap_or(0.0)),
                 "total_amount_raw": row.try_get::<f64, _>("computed_total").unwrap_or(0.0),
-            })
+            }))
         })
         .collect();
 
@@ -1099,10 +1096,7 @@ async fn add_comment(
                 .map_err(db_error)?;
 
         if parent_quote_id.is_none() {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(PortalError::not_found("parent comment")),
-            ));
+            return Err((StatusCode::NOT_FOUND, Json(PortalError::not_found("parent comment"))));
         }
     }
 
@@ -1221,10 +1215,7 @@ async fn add_line_comment(
             .await
             .map_err(db_error)?;
     if line_exists.is_none() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(PortalError::not_found("quote line")),
-        ));
+        return Err((StatusCode::NOT_FOUND, Json(PortalError::not_found("quote line"))));
     }
 
     if let Some(parent_id) = &body.parent_id {
@@ -1237,10 +1228,7 @@ async fn add_line_comment(
                 .map_err(db_error)?;
 
         if parent_quote_id.is_none() {
-            return Err((
-                StatusCode::NOT_FOUND,
-                Json(PortalError::not_found("parent comment")),
-            ));
+            return Err((StatusCode::NOT_FOUND, Json(PortalError::not_found("parent comment"))));
         }
     }
 
@@ -1295,10 +1283,7 @@ async fn create_link(
         .map_err(db_error)?;
 
     if exists.is_none() {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(PortalError::not_found("quote")),
-        ));
+        return Err((StatusCode::NOT_FOUND, Json(PortalError::not_found("quote"))));
     }
 
     let now = Utc::now();
@@ -1376,10 +1361,7 @@ async fn revoke_link(
         .map_err(db_error)?;
 
     if result.rows_affected() == 0 {
-        return Err((
-            StatusCode::NOT_FOUND,
-            Json(PortalError::not_found("portal link")),
-        ));
+        return Err((StatusCode::NOT_FOUND, Json(PortalError::not_found("portal link"))));
     }
 
     info!(event_name = "portal.link.revoked", "portal sharing link revoked");
@@ -1424,15 +1406,16 @@ async fn list_links(
 
 /// Resolve a sharing token to a quote ID.
 ///
-/// First checks the `portal_link` table for a valid (non-revoked, non-expired)
-/// link. Falls back to matching by raw quote ID for backward compatibility.
+/// Resolve a quote by portal link token. Strict token-only validation —
+/// no fallback to raw quote ID. Returns the quote_id on success, or an
+/// appropriate error with audit logging for all failure modes.
 async fn resolve_quote_by_token(
     pool: &DbPool,
     token: &str,
 ) -> Result<String, (StatusCode, Json<PortalError>)> {
     let now = Utc::now().to_rfc3339();
 
-    // Try portal_link table first
+    // Only accept valid portal_link tokens — no raw ID fallback
     let link_row: Option<sqlx::sqlite::SqliteRow> = sqlx::query(
         "SELECT quote_id FROM portal_link WHERE token = ? AND revoked = 0 AND expires_at > ?",
     )
@@ -1452,33 +1435,45 @@ async fn resolve_quote_by_token(
         return Ok(quote_id);
     }
 
-    // Check for expired/revoked link to give a better error
+    // Check for expired/revoked link to give a specific error and audit trail
     let expired_row: Option<sqlx::sqlite::SqliteRow> =
-        sqlx::query("SELECT revoked, expires_at FROM portal_link WHERE token = ?")
+        sqlx::query("SELECT quote_id, revoked, expires_at FROM portal_link WHERE token = ?")
             .bind(token)
             .fetch_optional(pool)
             .await
             .map_err(db_error)?;
 
     if let Some(r) = expired_row {
+        let quote_id: String = r.try_get("quote_id").unwrap_or_default();
         let revoked: bool = r.try_get("revoked").unwrap_or(false);
         if revoked {
+            warn!(
+                token = %token, quote_id = %quote_id,
+                reason = "revoked",
+                "portal: token access denied — link revoked"
+            );
+            record_audit_event(pool, &quote_id, "portal.token_denied", "link revoked").await;
             return Err((
                 StatusCode::GONE,
-                Json(PortalError { error: "this quote link has been revoked".to_string(), category: Some(PortalErrorCategory::NotFound), recovery_hint: Some("Contact the sender for a new link.".to_string()), retry_after_seconds: None }),
+                Json(PortalError {
+                    error: "this quote link has been revoked".to_string(),
+                    category: Some(PortalErrorCategory::NotFound),
+                    recovery_hint: Some("Contact the sender for a new link.".to_string()),
+                    retry_after_seconds: None,
+                }),
             ));
         }
-        return Err((
-            StatusCode::GONE,
-            Json(PortalError::expired()),
-        ));
+        warn!(
+            token = %token, quote_id = %quote_id,
+            reason = "expired",
+            "portal: token access denied — link expired"
+        );
+        record_audit_event(pool, &quote_id, "portal.token_denied", "link expired").await;
+        return Err((StatusCode::GONE, Json(PortalError::expired())));
     }
 
-    warn!(token = %token, "portal: invalid or expired quote token");
-    Err((
-        StatusCode::NOT_FOUND,
-        Json(PortalError::not_found("quote")),
-    ))
+    warn!(token = %token, reason = "unknown_token", "portal: access denied — token not found");
+    Err((StatusCode::NOT_FOUND, Json(PortalError::not_found("quote"))))
 }
 
 /// Record an audit event for traceability.
@@ -1516,10 +1511,7 @@ async fn record_audit_event(pool: &DbPool, quote_id: &str, event_type: &str, det
 
 fn db_error(error: sqlx::Error) -> (StatusCode, Json<PortalError>) {
     error!(error = %error, "portal database error");
-    (
-        StatusCode::INTERNAL_SERVER_ERROR,
-        Json(PortalError::service_unavailable("database")),
-    )
+    (StatusCode::INTERNAL_SERVER_ERROR, Json(PortalError::service_unavailable("database")))
 }
 
 /// Generate a URL-safe random-looking token for portal links.
@@ -2270,5 +2262,169 @@ mod tests {
         let comments = result.0;
         let arr = comments["comments"].as_array().expect("comments array");
         assert_eq!(arr.len(), 2);
+    }
+
+    // -----------------------------------------------------------------------
+    // Subtotal regression tests (quotey-ux-001-10)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn fetch_quote_for_pdf_line_subtotal_is_pre_discount() {
+        let (pool, quote_id, _token) = setup().await;
+
+        // Seed a product
+        sqlx::query(
+            "INSERT INTO product (id, name, sku, base_price, currency, active, created_at, updated_at)
+             VALUES ('PROD-1', 'Widget', 'SKU-1', '100.0', 'USD', 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed product");
+
+        // Seed two quote lines with discounts
+        let now_str = Utc::now().to_rfc3339();
+        // Line 1: qty 2, price 100, 10% discount => subtotal=200, total=180
+        sqlx::query(
+            "INSERT INTO quote_line (id, quote_id, product_id, quantity, unit_price, subtotal, discount_pct, created_at, updated_at)
+             VALUES ('QL-1', ?, 'PROD-1', 2, 100.0, 200.0, 10.0, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now_str)
+        .bind(&now_str)
+        .execute(&pool)
+        .await
+        .expect("seed line 1");
+
+        // Line 2: qty 3, price 50, 20% discount => subtotal=150, total=120
+        sqlx::query(
+            "INSERT INTO quote_line (id, quote_id, product_id, quantity, unit_price, subtotal, discount_pct, created_at, updated_at)
+             VALUES ('QL-2', ?, 'PROD-1', 3, 50.0, 150.0, 20.0, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now_str)
+        .bind(&now_str)
+        .execute(&pool)
+        .await
+        .expect("seed line 2");
+
+        let payload = fetch_quote_for_pdf(&pool, &quote_id).await.expect("fetch pdf");
+        let lines = payload["lines"].as_array().expect("lines array");
+        assert_eq!(lines.len(), 2);
+
+        // Line-level subtotal should be PRE-discount (unit_price * qty)
+        let line1_subtotal = lines[0]["subtotal"].as_f64().expect("line1 subtotal");
+        assert!(
+            (line1_subtotal - 200.0).abs() < 0.01,
+            "line 1 subtotal should be 200 (pre-discount), got {}",
+            line1_subtotal
+        );
+
+        let line2_subtotal = lines[1]["subtotal"].as_f64().expect("line2 subtotal");
+        assert!(
+            (line2_subtotal - 150.0).abs() < 0.01,
+            "line 2 subtotal should be 150 (pre-discount), got {}",
+            line2_subtotal
+        );
+
+        // Overall subtotal = sum of line subtotals (pre-discount)
+        let pricing_subtotal = payload["pricing"]["subtotal"].as_f64().expect("pricing subtotal");
+        assert!(
+            (pricing_subtotal - 350.0).abs() < 0.01,
+            "pricing.subtotal should be 350, got {}",
+            pricing_subtotal
+        );
+
+        // Sum of line subtotals must equal pricing subtotal
+        let sum_line_subtotals: f64 = lines.iter().map(|l| l["subtotal"].as_f64().unwrap()).sum();
+        assert!(
+            (sum_line_subtotals - pricing_subtotal).abs() < 0.01,
+            "SUM(line.subtotal) {} must equal pricing.subtotal {}",
+            sum_line_subtotals,
+            pricing_subtotal
+        );
+    }
+
+    // -----------------------------------------------------------------------
+    // Token hardening regression tests (quotey-ux-001-11)
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn resolve_token_unknown_returns_not_found() {
+        let (pool, _, _) = setup().await;
+
+        let result = resolve_quote_by_token(&pool, "completely-made-up-token").await;
+        assert!(result.is_err());
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resolve_token_revoked_records_audit_event() {
+        let (pool, quote_id, _token) = setup().await;
+
+        let link = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest {
+                quote_id: quote_id.clone(),
+                expires_in_days: Some(7),
+                created_by: None,
+            }),
+        )
+        .await
+        .expect("create link");
+
+        let _ = revoke_link(
+            state(pool.clone()),
+            Json(RevokeLinkRequest { token: link.0.token.clone() }),
+        )
+        .await
+        .expect("revoke");
+
+        let _ = resolve_quote_by_token(&pool, &link.0.token).await;
+
+        // Verify audit event was recorded for the revoked access attempt
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event WHERE quote_id = ? AND event_type = 'portal.token_denied'",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count audit events");
+        assert!(
+            audit_count >= 1,
+            "expected at least 1 audit event for revoked token, got {audit_count}"
+        );
+    }
+
+    #[tokio::test]
+    async fn resolve_token_expired_records_audit_event() {
+        let (pool, quote_id, _token) = setup().await;
+
+        let past = (Utc::now() - chrono::Duration::days(1)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO portal_link (id, quote_id, token, expires_at, created_by, created_at)
+             VALUES ('PL-AUD-EXP', ?, 'audit-expired-tok', ?, 'test', ?)",
+        )
+        .bind(&quote_id)
+        .bind(&past)
+        .bind(&past)
+        .execute(&pool)
+        .await
+        .expect("insert expired link");
+
+        let _ = resolve_quote_by_token(&pool, "audit-expired-tok").await;
+
+        // Verify audit event was recorded for the expired access attempt
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event WHERE quote_id = ? AND event_type = 'portal.token_denied'",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count audit events");
+        assert!(
+            audit_count >= 1,
+            "expected at least 1 audit event for expired token, got {audit_count}"
+        );
     }
 }
