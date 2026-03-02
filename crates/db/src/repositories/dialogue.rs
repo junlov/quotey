@@ -221,10 +221,8 @@ fn parse_session_row(row: sqlx::sqlite::SqliteRow) -> Result<DialogueSession, Re
     let slack_thread_id: String =
         row.try_get("slack_thread_id").map_err(RepositoryError::Database)?;
     let user_id: String = row.try_get("user_id").map_err(RepositoryError::Database)?;
-    let created_at_raw: String =
-        row.try_get("created_at").map_err(RepositoryError::Database)?;
-    let expires_at_raw: String =
-        row.try_get("expires_at").map_err(RepositoryError::Database)?;
+    let created_at_raw: String = row.try_get("created_at").map_err(RepositoryError::Database)?;
+    let expires_at_raw: String = row.try_get("expires_at").map_err(RepositoryError::Database)?;
     let context_json: Option<String> =
         row.try_get("current_intent_json").map_err(RepositoryError::Database)?;
     let pending_clarifications_json: Option<String> =
@@ -235,13 +233,13 @@ fn parse_session_row(row: sqlx::sqlite::SqliteRow) -> Result<DialogueSession, Re
 
     let created_at = parse_datetime("created_at", &created_at_raw)?;
     let expires_at = parse_datetime("expires_at", &expires_at_raw)?;
-    let status = DialogueSessionStatus::from_str(&status_raw).map_err(|e| {
-        RepositoryError::Decode(format!("invalid dialogue session status: {e}"))
-    })?;
+    let status = DialogueSessionStatus::from_str(&status_raw)
+        .map_err(|e| RepositoryError::Decode(format!("invalid dialogue session status: {e}")))?;
 
     let current_state = match &context_json {
-        Some(json) => serde_json::from_str::<SlackQuoteState>(json)
-            .unwrap_or(SlackQuoteState::IntentCapture),
+        Some(json) => {
+            serde_json::from_str::<SlackQuoteState>(json).unwrap_or(SlackQuoteState::IntentCapture)
+        }
         None => SlackQuoteState::IntentCapture,
     };
 
@@ -300,10 +298,7 @@ mod tests {
         let session = test_session("thread-123");
 
         repo.save(&session).await.map_err(|e| e.to_string())?;
-        let loaded = repo
-            .find_by_thread_id("thread-123")
-            .await
-            .map_err(|e| e.to_string())?;
+        let loaded = repo.find_by_thread_id("thread-123").await.map_err(|e| e.to_string())?;
 
         let loaded = loaded.expect("session should be found");
         assert_eq!(loaded.id, session.id);
@@ -327,10 +322,7 @@ mod tests {
             .await
             .map_err(|e| e.to_string())?;
 
-        let loaded = repo
-            .find_by_id(&session.id)
-            .await
-            .map_err(|e| e.to_string())?;
+        let loaded = repo.find_by_id(&session.id).await.map_err(|e| e.to_string())?;
         let loaded = loaded.expect("session should exist");
         assert_eq!(loaded.status, DialogueSessionStatus::Completed);
 
@@ -343,10 +335,7 @@ mod tests {
         run_pending(&pool).await.map_err(|e| e.to_string())?;
 
         let repo = SqlDialogueSessionRepository::new(pool);
-        let result = repo
-            .find_by_thread_id("nonexistent")
-            .await
-            .map_err(|e| e.to_string())?;
+        let result = repo.find_by_thread_id("nonexistent").await.map_err(|e| e.to_string())?;
 
         assert!(result.is_none());
 

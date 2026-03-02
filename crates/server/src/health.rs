@@ -8,7 +8,7 @@ use chrono::Utc;
 use quotey_core::config::CrmConfig;
 use quotey_db::DbPool;
 use serde::{Deserialize, Serialize};
-use tracing::{error, info};
+use tracing::{error, info, warn};
 
 #[derive(Clone)]
 pub struct HealthState {
@@ -194,15 +194,17 @@ async fn database_check(pool: &DbPool) -> HealthCheck {
     match sqlx::query_scalar::<_, i64>("SELECT 1").fetch_one(pool).await {
         Ok(_) => HealthCheck { status: "ready", detail: "database query succeeded".to_string() },
         Err(error) => {
-            HealthCheck { status: "degraded", detail: format!("database query failed: {error}") }
+            warn!(error = %error, "database health check failed");
+            HealthCheck { status: "degraded", detail: "database query failed".to_string() }
         }
     }
 }
 
 fn internal_api_error(error: sqlx::Error) -> (StatusCode, Json<ApiErrorResponse>) {
+    error!(error = %error, "similar_deals database query failed");
     (
         StatusCode::INTERNAL_SERVER_ERROR,
-        Json(ApiErrorResponse { error: format!("database query failed: {error}") }),
+        Json(ApiErrorResponse { error: "database query failed".to_string() }),
     )
 }
 

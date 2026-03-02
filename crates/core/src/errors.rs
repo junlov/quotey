@@ -72,10 +72,12 @@ impl From<ApplicationError> for InterfaceError {
             | ApplicationError::Domain(DomainError::FlowTransition(_))
             | ApplicationError::Domain(DomainError::InvariantViolation(_))
             | ApplicationError::Domain(DomainError::InvalidEnumValue { .. })
-            | ApplicationError::Domain(DomainError::InvalidStateTransition { .. }) => Self::BadRequest {
-                message: "domain validation failed".to_owned(),
-                correlation_id: "unassigned".to_owned(),
-            },
+            | ApplicationError::Domain(DomainError::InvalidStateTransition { .. }) => {
+                Self::BadRequest {
+                    message: "domain validation failed".to_owned(),
+                    correlation_id: "unassigned".to_owned(),
+                }
+            }
             ApplicationError::Persistence(message) | ApplicationError::Integration(message) => {
                 Self::ServiceUnavailable { message, correlation_id: "unassigned".to_owned() }
             }

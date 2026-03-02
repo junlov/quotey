@@ -120,7 +120,7 @@ impl AuthManager {
             .collect();
 
         let mut manager = Self::with_keys(keys);
-        manager.rate_limit_window = Duration::from_secs(config.rate_limit_window_secs);
+        manager.rate_limit_window = Duration::from_secs(config.rate_limit_window_secs.max(1));
         manager
     }
 
@@ -175,7 +175,14 @@ impl AuthManager {
 
         if request_count > limit {
             // Rate limit exceeded
-            let retry_after = self.rate_limit_window.as_secs() as u32;
+            let retry_after = limit_entry
+                .requests
+                .first()
+                .map(|oldest| {
+                    let elapsed = oldest.elapsed();
+                    self.rate_limit_window.saturating_sub(elapsed).as_secs().max(1) as u32
+                })
+                .unwrap_or(self.rate_limit_window.as_secs().max(1) as u32);
             warn!(
                 key_name = %entry.name,
                 request_count = request_count,
@@ -207,7 +214,15 @@ impl AuthManager {
     /// Revoke an API key
     pub async fn revoke_key(&self, key: &str) -> bool {
         let mut keys = self.api_keys.write().await;
-        keys.remove(key).is_some()
+        let removed = keys.remove(key).is_some();
+        drop(keys);
+
+        if removed {
+            let mut limits = self.rate_limits.write().await;
+            limits.remove(key);
+        }
+
+        removed
     }
 
     /// List all API keys (without the actual key values)

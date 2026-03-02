@@ -2631,7 +2631,10 @@ fn set_nested_value(target: &mut Value, field: &str, value: Value) {
     let Some(first) = segments.first() else {
         return;
     };
-    let mut cursor = target.as_object_mut().expect("target guaranteed object");
+    let mut cursor = match target.as_object_mut() {
+        Some(obj) => obj,
+        None => return,
+    };
     if segments.len() == 1 {
         cursor.insert((*first).to_string(), value);
         return;
@@ -2639,10 +2642,14 @@ fn set_nested_value(target: &mut Value, field: &str, value: Value) {
 
     for segment in segments.iter().take(segments.len() - 1) {
         let seg = segment.to_string();
-        if !cursor.contains_key(&seg) {
-            cursor.insert(seg.clone(), json!({}));
+        let next = cursor.entry(seg).or_insert_with(|| json!({}));
+        if !next.is_object() {
+            *next = json!({});
         }
-        cursor = cursor.get_mut(&seg).and_then(|v| v.as_object_mut()).expect("nested object");
+        let Some(next_obj) = next.as_object_mut() else {
+            return;
+        };
+        cursor = next_obj;
     }
 
     cursor.insert(segments[segments.len() - 1].to_string(), value);
@@ -2749,7 +2756,7 @@ async fn simulate_crm_sync_attempt(
         if let Some(refresh_token) = &integration.refresh_token {
             info!(
                 provider = integration.provider.as_str(),
-                refresh_token_hint = &refresh_token[..std::cmp::min(4, refresh_token.len())],
+                refresh_token_available = !refresh_token.is_empty(),
                 "crm token is expired; best effort sync"
             );
             return Err(SyncAttemptResult {

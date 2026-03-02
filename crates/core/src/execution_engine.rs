@@ -316,8 +316,12 @@ impl DeterministicExecutionEngine {
 
         if should_retry {
             // Calculate next available time with exponential backoff
-            let backoff_seconds = self.config.retry_base_delay_seconds
-                * (self.config.retry_backoff_multiplier.pow(task.retry_count) as i64);
+            let exponent = task.retry_count.min(20);
+            let base_delay = self.config.retry_base_delay_seconds.max(0) as u64;
+            let multiplier =
+                u64::from(self.config.retry_backoff_multiplier).saturating_pow(exponent);
+            let backoff_u64 = base_delay.saturating_mul(multiplier).min(i64::MAX as u64);
+            let backoff_seconds = i64::try_from(backoff_u64).unwrap_or(i64::MAX);
             let available_at = now + Duration::seconds(backoff_seconds);
 
             task.state = ExecutionTaskState::RetryableFailed;

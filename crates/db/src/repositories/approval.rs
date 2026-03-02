@@ -58,13 +58,30 @@ fn row_to_approval(row: &sqlx::sqlite::SqliteRow) -> Result<ApprovalRequest, Rep
 
     let created_at = DateTime::parse_from_rfc3339(&created_at_str)
         .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now());
+        .map_err(|e| {
+            RepositoryError::Decode(format!(
+                "invalid created_at `{created_at_str}` for approval `{id}`: {e}"
+            ))
+        })?;
     let updated_at = DateTime::parse_from_rfc3339(&updated_at_str)
         .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now());
-    let expires_at = expires_at_str
-        .and_then(|s| DateTime::parse_from_rfc3339(&s).ok())
-        .map(|dt| dt.with_timezone(&Utc));
+        .map_err(|e| {
+            RepositoryError::Decode(format!(
+                "invalid updated_at `{updated_at_str}` for approval `{id}`: {e}"
+            ))
+        })?;
+    let expires_at = match expires_at_str {
+        Some(s) => Some(
+            DateTime::parse_from_rfc3339(&s)
+                .map(|dt| dt.with_timezone(&Utc))
+                .map_err(|e| {
+                    RepositoryError::Decode(format!(
+                        "invalid expires_at `{s}` for approval `{id}`: {e}"
+                    ))
+                })?,
+        ),
+        None => None,
+    };
 
     Ok(ApprovalRequest {
         id: ApprovalId(id),

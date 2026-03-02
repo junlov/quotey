@@ -21,6 +21,20 @@
 use anyhow::Result;
 use tracing::info;
 
+fn redact_database_url(database_url: &str) -> String {
+    let Some((scheme, remainder)) = database_url.split_once("://") else {
+        return database_url.to_string();
+    };
+    let Some((authority, tail)) = remainder.split_once('@') else {
+        return database_url.to_string();
+    };
+    if authority.contains(':') {
+        format!("{scheme}://***:***@{tail}")
+    } else {
+        format!("{scheme}://***@{tail}")
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Initialize tracing
@@ -32,7 +46,7 @@ async fn main() -> Result<()> {
     let database_url =
         std::env::var("DATABASE_URL").unwrap_or_else(|_| "sqlite://quotey.db".to_string());
 
-    info!("Connecting to database: {}", database_url);
+    info!("Connecting to database: {}", redact_database_url(&database_url));
 
     // Connect to database
     let db_pool = quotey_db::connect(&database_url).await?;

@@ -46,9 +46,20 @@ fn row_to_feedback(row: &sqlx::sqlite::SqliteRow) -> Result<SuggestionFeedback, 
 
     let suggested_at = DateTime::parse_from_rfc3339(&suggested_at_str)
         .map(|dt| dt.with_timezone(&Utc))
-        .unwrap_or_else(|_| Utc::now());
+        .map_err(|e| {
+            RepositoryError::Decode(format!(
+                "invalid suggested_at `{suggested_at_str}` for suggestion_feedback `{id}`: {e}"
+            ))
+        })?;
 
-    let context = context_str.and_then(|s| serde_json::from_str(&s).ok());
+    let context = match context_str {
+        Some(s) => Some(serde_json::from_str(&s).map_err(|e| {
+            RepositoryError::Decode(format!(
+                "invalid context JSON for suggestion_feedback `{id}`: {e}"
+            ))
+        })?),
+        None => None,
+    };
 
     Ok(SuggestionFeedback {
         id,

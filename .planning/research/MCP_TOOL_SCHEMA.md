@@ -557,7 +557,7 @@ Generate a quote artifact (mock PDF placeholder for now).
   "file_path": "/tmp/quotey-mcp/pdf/quote-Q-....pdf",
   "file_size_bytes": 3120,
   "checksum": "mock-checksum:4f3a...",
-  "template_used": "standard",
+  "template_used": "detailed",
   "generated_at": "2026-02-26T11:45:00Z"
 }
 ```

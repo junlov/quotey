@@ -635,7 +635,7 @@ async fn download_quote_pdf(
     info!(
         event_name = "portal.pdf.download_requested",
         quote_id = %quote_id,
-        token = %token,
+        token = %redact_token(&token),
         "PDF download requested"
     );
 
@@ -1010,7 +1010,7 @@ async fn approve_quote(
     // Record audit event
     record_audit_event(
         &state.db_pool,
-        &quote_id,
+        Some(&quote_id),
         "portal.approval",
         &format!("Quote approved by {} ({}) via web portal", approver_name, approver_email),
     )
@@ -1078,7 +1078,7 @@ async fn reject_quote(
     // Record audit event
     record_audit_event(
         &state.db_pool,
-        &quote_id,
+        Some(&quote_id),
         "portal.rejection",
         &format!("Quote declined via web portal: {reason}"),
     )
@@ -1148,7 +1148,7 @@ async fn add_comment(
     // Record audit event as a comment
     record_audit_event(
         &state.db_pool,
-        &quote_id,
+        Some(&quote_id),
         "portal.comment",
         &format!("Customer comment: {text}"),
     )
@@ -1282,7 +1282,7 @@ async fn add_line_comment(
 
     record_audit_event(
         &state.db_pool,
-        &quote_id,
+        Some(&quote_id),
         "portal.comment.line",
         &format!("Customer comment on line {line_id}: {text}"),
     )
@@ -1308,7 +1308,8 @@ async fn update_assumptions(
     // Fetch current quote data
     let current = sqlx::query(
         "SELECT currency, tax_rate_value, payment_terms, billing_country,
-                currency_explicit, tax_rate_explicit, payment_terms_explicit, billing_country_explicit
+                currency_explicit, tax_rate_explicit, payment_terms_explicit, billing_country_explicit,
+                version
          FROM quote WHERE id = ?",
     )
     .bind(&quote_id)
@@ -1342,7 +1343,7 @@ async fn update_assumptions(
     }
 
     // Validate tax rate (0-100%)
-    if new_tax_rate < 0.0 || new_tax_rate > 1.0 {
+    if !(0.0..=1.0).contains(&new_tax_rate) {
         return Err((
             StatusCode::BAD_REQUEST,
             Json(PortalError::validation("tax_rate", "must be between 0.0 and 1.0 (0% to 100%)")),
@@ -1442,7 +1443,7 @@ async fn update_assumptions(
     .bind(tax_amount)
     .bind(total)
     .bind(&new_currency)
-    .bind(&pricing_trace.to_string())
+    .bind(pricing_trace.to_string())
     .bind(now.to_rfc3339())
     .bind("portal")
     .execute(&state.db_pool)
@@ -1458,7 +1459,7 @@ async fn update_assumptions(
     });
     record_audit_event(
         &state.db_pool,
-        &quote_id,
+        Some(&quote_id),
         "portal.assumptions_updated",
         &format!("Assumptions updated via portal: {}", changes),
     )
@@ -1578,7 +1579,7 @@ async fn create_link(
 
     record_audit_event(
         &state.db_pool,
-        quote_id,
+        Some(quote_id),
         "portal.link_created",
         &format!("Portal link generated (expires in {expires_in_days} days)"),
     )
@@ -1706,11 +1707,11 @@ async fn resolve_quote_by_token(
         let revoked: bool = r.try_get("revoked").unwrap_or(false);
         if revoked {
             warn!(
-                token = %token, quote_id = %quote_id,
+                token = %redact_token(token), quote_id = %quote_id,
                 reason = "revoked",
                 "portal: token access denied — link revoked"
             );
-            record_audit_event(pool, &quote_id, "portal.token_denied", "link revoked").await;
+            record_audit_event(pool, Some(&quote_id), "portal.token_denied", "link revoked").await;
             return Err((
                 StatusCode::GONE,
                 Json(PortalError {
@@ -1722,15 +1723,20 @@ async fn resolve_quote_by_token(
             ));
         }
         warn!(
-            token = %token, quote_id = %quote_id,
+            token = %redact_token(token), quote_id = %quote_id,
             reason = "expired",
             "portal: token access denied — link expired"
         );
-        record_audit_event(pool, &quote_id, "portal.token_denied", "link expired").await;
+        record_audit_event(pool, Some(&quote_id), "portal.token_denied", "link expired").await;
         return Err((StatusCode::GONE, Json(PortalError::expired())));
     }
 
-    warn!(token = %token, reason = "unknown_token", "portal: access denied — token not found");
+    warn!(
+        token = %redact_token(token),
+        reason = "unknown_token",
+        "portal: access denied — token not found"
+    );
+    record_audit_event(pool, None, "portal.token_denied", "unknown token").await;
     Err((StatusCode::NOT_FOUND, Json(PortalError::not_found("quote"))))
 }
 
@@ -1738,7 +1744,7 @@ async fn resolve_quote_by_token(
 ///
 /// Uses the existing `audit_event` schema from migration 0001:
 ///   id, timestamp, actor, actor_type, quote_id, event_type, event_category, payload_json
-async fn record_audit_event(pool: &DbPool, quote_id: &str, event_type: &str, detail: &str) {
+async fn record_audit_event(pool: &DbPool, quote_id: Option<&str>, event_type: &str, detail: &str) {
     let now = Utc::now();
     let audit_id = format!("PAUD-{}", &uuid_v4()[..12]);
 
@@ -1760,11 +1766,16 @@ async fn record_audit_event(pool: &DbPool, quote_id: &str, event_type: &str, det
     if let Err(e) = result {
         error!(
             event_name = "portal.audit.write_failed",
-            quote_id = %quote_id,
+            quote_id = ?quote_id,
             error = %e,
             "failed to write portal audit event"
         );
     }
+}
+
+fn redact_token(token: &str) -> String {
+    let keep = token.len().min(8);
+    format!("{}***", &token[..keep])
 }
 
 fn db_error(error: sqlx::Error) -> (StatusCode, Json<PortalError>) {
@@ -2614,6 +2625,25 @@ mod tests {
         assert!(result.is_err());
         let (status, _) = result.unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
+    }
+
+    #[tokio::test]
+    async fn resolve_token_unknown_records_audit_event_without_quote() {
+        let (pool, _, _) = setup().await;
+
+        let _ = resolve_quote_by_token(&pool, "missing-token-for-audit").await;
+
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event WHERE quote_id IS NULL AND event_type = 'portal.token_denied'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count unknown token denial audits");
+
+        assert!(
+            audit_count >= 1,
+            "expected at least one unknown-token denial audit row, got {audit_count}"
+        );
     }
 
     #[tokio::test]
