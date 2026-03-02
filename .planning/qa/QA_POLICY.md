@@ -53,7 +53,7 @@ All fake-only exceptions MUST have:
 
 | ID | Path | Rationale | Owner | Expiry | Compensating Control | Follow-up Bead |
 |----|------|-----------|-------|--------|---------------------|----------------|
-| EX-001 | `core/audit.rs` InMemoryAuditSink | Audit sink trait is new; SQL impl not yet written | GentleSpring | 2026-04-01 | Audit events verified in flow engine tests | quotey-115.3 G-003 |
+| ~~EX-001~~ | ~~`core/audit.rs` InMemoryAuditSink~~ | **RESOLVED** — `SqlAuditEventRepository` + 4 real-DB tests added in quotey-115.3 G-003 | GentleSpring | — | — | — |
 | EX-002 | `core/ghost/mod.rs` InMemoryGhostQuoteStore | Ghost quotes are speculative feature; no SQL schema yet | — | 2026-04-01 | Pure logic tests cover scoring | quotey-115.3 (if promoted to production) |
 | EX-003 | `core/dna/mod.rs` InMemoryLifecycleStore | DNA analysis is speculative feature; no SQL schema yet | — | 2026-04-01 | Pure logic tests cover analysis | quotey-115.3 (if promoted to production) |
 | EX-004 | `core/approvals/mod.rs` InMemoryCalendarAvailabilityClient | External API boundary; no real calendar service | — | Permanent (external) | Calendar logic tested via pure unit tests | N/A |

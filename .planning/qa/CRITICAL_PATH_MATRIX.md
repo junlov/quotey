@@ -18,11 +18,11 @@ A "critical path" is any code path where incorrect behavior causes:
 
 | Path | Module(s) | Current Coverage | Status |
 |------|-----------|-----------------|--------|
-| Quote pricing | `core/cpq/pricing.rs`, `core/cpq/policy.rs` | 1 pure unit test each | **GAP** — needs real-DB pricing round-trip |
+| Quote pricing | `core/cpq/pricing.rs`, `core/cpq/policy.rs` | 4 real-DB tests (G-001) | **CLOSED** |
 | Discount calculation | `core/cpq/pricing.rs` | Tested via MCP `quote_price` (real DB) | **OK** |
 | Tax computation | `server/portal.rs` | Portal tests with real DB | **OK** |
 | Quote line subtotals | `server/portal.rs` | Portal tests with real DB | **OK** |
-| Constraint enforcement | `core/cpq/constraints.rs` | 1 pure unit test | **GAP** — needs real-DB constraint violation test |
+| Constraint enforcement | `core/cpq/constraints.rs` | 5 real-DB tests (G-002) | **CLOSED** |
 
 ### Tier 2: State Integrity (MUST have real-DB tests)
 
@@ -48,7 +48,7 @@ A "critical path" is any code path where incorrect behavior causes:
 |------|-----------|-----------------|--------|
 | Approval audit events | `server/portal.rs` | Real DB tests | **OK** |
 | Execution transition log | `db/repositories/execution_queue.rs` | Real DB tests | **OK** |
-| Quote change audit | `core/audit.rs` | InMemoryAuditSink only | **GAP** — needs real sink test |
+| Quote change audit | `core/audit.rs`, `db/repositories/audit.rs` | 4 real-DB tests (G-003) | **CLOSED** |
 | Pricing snapshot persistence | `db/repositories/pricing_snapshot.rs` | Real DB tests | **OK** |
 
 ### Tier 5: Data Persistence (MUST have real-DB tests)
@@ -56,7 +56,7 @@ A "critical path" is any code path where incorrect behavior causes:
 | Path | Module(s) | Current Coverage | Status |
 |------|-----------|-----------------|--------|
 | Product catalog CRUD | `db/repositories/product.rs` | Via MCP tool tests (real DB) | **OK** |
-| Product FTS search | `db/repositories/product.rs` | **Known broken** (FTS5 column name mismatch) | **GAP** — FTS5 schema fix needed |
+| Product FTS search | `db/repositories/product.rs` | 3 real-DB tests + migration 0027 fix (G-004) | **CLOSED** |
 | Quote persistence | `db/repositories/quote.rs` | Real DB round-trip tests | **OK** |
 | Customer data | `db/repositories/customer.rs` | No tests found | **GAP** |
 | Suggestion feedback | `db/repositories/suggestion_feedback.rs` | Real DB tests | **OK** |
@@ -72,20 +72,27 @@ A "critical path" is any code path where incorrect behavior causes:
 
 ## Gap Summary
 
-| Gap ID | Path | Priority | Effort | Blocked By |
-|--------|------|----------|--------|------------|
-| G-001 | Pricing engine real-DB round-trip | P0 | Medium | None |
-| G-002 | Constraint engine real-DB test | P1 | Low | None |
-| G-003 | Audit sink real persistence test | P1 | Low | None |
-| G-004 | FTS5 schema fix + search test | P1 | Medium | Schema migration |
-| G-005 | Customer repository tests | P2 | Low | None |
-| G-006 | CRM sync tests | P2 | Medium | External API contract definition |
+| Gap ID | Path | Priority | Effort | Status |
+|--------|------|----------|--------|--------|
+| G-001 | Pricing engine real-DB round-trip | P0 | Medium | **CLOSED** — 4 tests in `critical_path_coverage.rs` |
+| G-002 | Constraint engine real-DB test | P1 | Low | **CLOSED** — 5 tests in `critical_path_coverage.rs` |
+| G-003 | Audit sink real persistence test | P1 | Low | **CLOSED** — SqlAuditEventRepository + 4 tests |
+| G-004 | FTS5 schema fix + search test | P1 | Medium | **CLOSED** — migration 0027 + query quoting fix + 3 tests |
+| G-005 | Customer repository tests | P2 | Low | **BLOCKED** — no customer table in schema (see EX-002/EX-003 in QA_POLICY.md) |
+| G-006 | CRM sync tests | P2 | Medium | **DEFERRED** — external API boundary, no trait abstraction (see EX-006 in QA_POLICY.md) |
 
-## Required Actions (quotey-115.3)
+## Completed Actions (quotey-115.3)
 
-1. **G-001**: Add integration test that creates quote → prices it → verifies pricing snapshot persisted correctly
-2. **G-002**: Add integration test that creates products with constraints → attempts invalid configuration → verifies rejection
-3. **G-003**: Add SQL-backed audit sink test that writes events and reads them back
-4. **G-004**: Fix FTS5 `product_id` vs `id` column mismatch in migration 0019, add product search test
-5. **G-005**: Add basic customer repository CRUD tests
-6. **G-006**: Add CRM sync unit tests with mock HTTP client
+All P0/P1 gaps closed. Remaining P2 gaps documented with exceptions.
+
+### Deliverables
+
+- `crates/db/src/repositories/audit.rs` — SqlAuditEventRepository (save, find_by_quote_id, find_by_type, count)
+- `crates/db/tests/critical_path_coverage.rs` — 16 integration tests (4× G-001, 5× G-002, 4× G-003, 3× G-004)
+- `crates/db/src/repositories/product.rs` — FTS search query quoting fix (prevents FTS5 operator injection)
+- `migrations/0027_fix_product_fts.{up,down}.sql` — standalone FTS5 table (fixes content-table column mismatch)
+
+### Remaining Actions (future beads)
+
+1. **G-005**: Create customer table migration + implement SqlCustomerRepository (if customer feature promoted)
+2. **G-006**: Extract CRM HTTP client trait + add unit tests with mock client

@@ -8,6 +8,7 @@
 /// Coverage targets:
 ///   G-001  Pricing engine real-DB round-trip
 ///   G-002  Constraint engine real-DB validation
+///   G-003  Audit event real-DB persistence
 ///   G-004  Product FTS search real-DB test
 use quotey_core::cpq::constraints::{
     ConstraintEngine, ConstraintInput, DeterministicConstraintEngine,
@@ -516,6 +517,213 @@ async fn g004_product_round_trip_preserves_fields() -> TestResult {
     assert_eq!(loaded.base_price, Some(Decimal::new(4299, 2)));
     assert_eq!(loaded.description.as_deref(), Some("Test product for round-trip"));
     assert!(loaded.active);
+
+    Ok(())
+}
+
+// ── G-003: Audit event real-DB persistence ──────────────────────────────
+
+#[tokio::test]
+async fn g003_audit_event_save_and_read_back() -> TestResult {
+    use quotey_core::audit::{AuditCategory, AuditEvent, AuditOutcome};
+    use quotey_db::repositories::SqlAuditEventRepository;
+
+    let pool = setup_pool().await?;
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let audit_repo = SqlAuditEventRepository::new(pool.clone());
+
+    // Insert a quote first (FK constraint on audit_event.quote_id)
+    let quote = make_quote("Q-G003-001", vec![line("prod-audit", 1, 1000)]);
+    quote_repo.save(quote).await.map_err(|e| format!("save quote: {e}"))?;
+
+    // Emit and persist an audit event
+    let event = AuditEvent::new(
+        Some(QuoteId("Q-G003-001".to_string())),
+        Some("1730000000.0100".to_string()),
+        "req-g003-1",
+        "flow.transition_applied",
+        AuditCategory::Flow,
+        "flow-engine",
+        AuditOutcome::Success,
+    )
+    .with_metadata("from", "Draft")
+    .with_metadata("to", "Validated");
+
+    audit_repo.save(&event).await.map_err(|e| format!("save audit: {e}"))?;
+
+    // Read it back
+    let events = audit_repo
+        .find_by_quote_id(&QuoteId("Q-G003-001".to_string()))
+        .await
+        .map_err(|e| format!("find audit: {e}"))?;
+
+    assert_eq!(events.len(), 1, "expected 1 audit event");
+    assert_eq!(events[0].event_id, event.event_id);
+    assert_eq!(events[0].event_type, "flow.transition_applied");
+    assert_eq!(events[0].correlation_id, "req-g003-1");
+    assert_eq!(events[0].thread_id.as_deref(), Some("1730000000.0100"));
+    assert_eq!(events[0].actor, "flow-engine");
+    assert_eq!(events[0].category, AuditCategory::Flow);
+    assert_eq!(events[0].outcome, AuditOutcome::Success);
+    assert_eq!(events[0].metadata.get("from").map(|s| s.as_str()), Some("Draft"));
+    assert_eq!(events[0].metadata.get("to").map(|s| s.as_str()), Some("Validated"));
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn g003_audit_multiple_events_for_quote() -> TestResult {
+    use quotey_core::audit::{AuditCategory, AuditEvent, AuditOutcome};
+    use quotey_db::repositories::SqlAuditEventRepository;
+
+    let pool = setup_pool().await?;
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let audit_repo = SqlAuditEventRepository::new(pool.clone());
+
+    let quote = make_quote("Q-G003-002", vec![line("prod-audit2", 2, 5000)]);
+    quote_repo.save(quote).await.map_err(|e| format!("save quote: {e}"))?;
+
+    // Emit several events in sequence — simulating a flow lifecycle
+    let e1 = AuditEvent::new(
+        Some(QuoteId("Q-G003-002".to_string())),
+        None,
+        "req-g003-2a",
+        "flow.transition_applied",
+        AuditCategory::Flow,
+        "flow-engine",
+        AuditOutcome::Success,
+    );
+    let e2 = AuditEvent::new(
+        Some(QuoteId("Q-G003-002".to_string())),
+        None,
+        "req-g003-2b",
+        "pricing.calculated",
+        AuditCategory::Pricing,
+        "pricing-engine",
+        AuditOutcome::Success,
+    )
+    .with_metadata("total", "100.00");
+    let e3 = AuditEvent::new(
+        Some(QuoteId("Q-G003-002".to_string())),
+        None,
+        "req-g003-2c",
+        "policy.evaluated",
+        AuditCategory::Policy,
+        "policy-engine",
+        AuditOutcome::Rejected,
+    )
+    .with_metadata("reason", "discount exceeds cap");
+
+    audit_repo.save(&e1).await.map_err(|e| format!("save e1: {e}"))?;
+    audit_repo.save(&e2).await.map_err(|e| format!("save e2: {e}"))?;
+    audit_repo.save(&e3).await.map_err(|e| format!("save e3: {e}"))?;
+
+    let events = audit_repo
+        .find_by_quote_id(&QuoteId("Q-G003-002".to_string()))
+        .await
+        .map_err(|e| format!("find audits: {e}"))?;
+
+    assert_eq!(events.len(), 3, "expected 3 audit events");
+
+    // Verify ordering by timestamp
+    assert_eq!(events[0].event_type, "flow.transition_applied");
+    assert_eq!(events[1].event_type, "pricing.calculated");
+    assert_eq!(events[2].event_type, "policy.evaluated");
+
+    // Verify rejected outcome survives round-trip
+    assert_eq!(events[2].outcome, AuditOutcome::Rejected);
+    assert_eq!(events[2].metadata.get("reason").map(|s| s.as_str()), Some("discount exceeds cap"));
+
+    // Count should match
+    let count = audit_repo
+        .count_by_quote_id(&QuoteId("Q-G003-002".to_string()))
+        .await
+        .map_err(|e| format!("count: {e}"))?;
+    assert_eq!(count, 3);
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn g003_audit_find_by_event_type() -> TestResult {
+    use quotey_core::audit::{AuditCategory, AuditEvent, AuditOutcome};
+    use quotey_db::repositories::SqlAuditEventRepository;
+
+    let pool = setup_pool().await?;
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let audit_repo = SqlAuditEventRepository::new(pool.clone());
+
+    let quote = make_quote("Q-G003-003", vec![line("prod-audit3", 1, 3000)]);
+    quote_repo.save(quote).await.map_err(|e| format!("save quote: {e}"))?;
+
+    // Two flow events, one pricing event
+    let e1 = AuditEvent::new(
+        Some(QuoteId("Q-G003-003".to_string())),
+        None,
+        "req-a",
+        "flow.transition_applied",
+        AuditCategory::Flow,
+        "flow-engine",
+        AuditOutcome::Success,
+    );
+    let e2 = AuditEvent::new(
+        Some(QuoteId("Q-G003-003".to_string())),
+        None,
+        "req-b",
+        "pricing.calculated",
+        AuditCategory::Pricing,
+        "pricing-engine",
+        AuditOutcome::Success,
+    );
+
+    audit_repo.save(&e1).await.map_err(|e| format!("save: {e}"))?;
+    audit_repo.save(&e2).await.map_err(|e| format!("save: {e}"))?;
+
+    // Query by type
+    let flow_events = audit_repo
+        .find_by_type("flow.transition_applied")
+        .await
+        .map_err(|e| format!("find by type: {e}"))?;
+
+    assert!(flow_events.iter().any(|e| e.event_id == e1.event_id), "expected to find flow event");
+    assert!(
+        !flow_events.iter().any(|e| e.event_id == e2.event_id),
+        "pricing event should not appear in flow query"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn g003_audit_event_without_quote_id() -> TestResult {
+    use quotey_core::audit::{AuditCategory, AuditEvent, AuditOutcome};
+    use quotey_db::repositories::SqlAuditEventRepository;
+
+    let pool = setup_pool().await?;
+    let audit_repo = SqlAuditEventRepository::new(pool.clone());
+
+    // System-level audit event with no quote association
+    let event = AuditEvent::new(
+        None,
+        None,
+        "req-system-1",
+        "system.startup",
+        AuditCategory::System,
+        "server",
+        AuditOutcome::Success,
+    )
+    .with_metadata("version", "0.1.0");
+
+    audit_repo.save(&event).await.map_err(|e| format!("save: {e}"))?;
+
+    // Verify we can find it by type
+    let events =
+        audit_repo.find_by_type("system.startup").await.map_err(|e| format!("find: {e}"))?;
+
+    assert_eq!(events.len(), 1);
+    assert!(events[0].quote_id.is_none());
+    assert_eq!(events[0].category, AuditCategory::System);
+    assert_eq!(events[0].metadata.get("version").map(|s| s.as_str()), Some("0.1.0"));
 
     Ok(())
 }

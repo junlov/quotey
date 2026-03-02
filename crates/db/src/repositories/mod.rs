@@ -11,6 +11,7 @@ use quotey_core::domain::quote::{Quote, QuoteId};
 use quotey_core::suggestions::{ProductAcceptanceRate, SuggestionFeedback};
 
 pub mod approval;
+pub mod audit;
 pub mod customer;
 pub mod dialogue;
 pub mod execution_queue;
@@ -25,6 +26,7 @@ pub mod simulation;
 pub mod suggestion_feedback;
 
 pub use approval::SqlApprovalRepository;
+pub use audit::SqlAuditEventRepository;
 pub use customer::SqlCustomerRepository;
 pub use dialogue::{DialogueSessionRepository, SqlDialogueSessionRepository};
 pub use execution_queue::SqlExecutionQueueRepository;
