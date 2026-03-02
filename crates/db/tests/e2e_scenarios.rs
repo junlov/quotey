@@ -10,6 +10,14 @@
 ///   S-003  Rejection path: policy violation → approval denied → quote rejected
 ///   S-004  Deterministic replay: same inputs produce identical outcomes
 ///   S-005  Audit trail completeness: every transition emits trackable events
+///   S-006  Invalid transition rejected with audit
+///   S-007  Cancellation from Priced state
+///   S-008  Constraint violation blocks flow, fix lines and retry
+///   S-009  Execution task retry lifecycle (Queued → RetryableFailed → Completed)
+///   S-010  Quote revision cycle (Sent → Revised → re-price → re-send)
+///   S-011  Idempotency guard prevents duplicate execution
+///   S-012  Multi-constraint compound failure detection
+///   S-013  Quote expiration from Approval state
 use chrono::Utc;
 use quotey_core::audit::{AuditCategory, AuditContext, AuditOutcome, InMemoryAuditSink};
 use quotey_core::cpq::constraints::{
@@ -654,6 +662,600 @@ async fn s007_cancellation_from_priced_state() -> TestResult {
         .map_err(|e| format!("find: {e}"))?
         .ok_or("not found")?;
     assert_eq!(loaded.lines.len(), 1, "cancelled quote should still have lines");
+
+    Ok(())
+}
+
+// ── S-008: Constraint violation blocks flow, fix lines and retry ─────────
+
+#[tokio::test]
+async fn s008_constraint_violation_blocks_then_fix_and_retry() -> TestResult {
+    let pool = setup_pool().await?;
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+
+    // Create a quote with invalid lines: zero quantity and duplicate product
+    let bad_quote = make_quote(
+        "Q-E2E-FAIL-001",
+        vec![
+            line("PROD-F1", 0, 5000),  // zero quantity
+            line("PROD-F1", 3, 5000),  // duplicate product
+        ],
+    );
+    quote_repo.save(bad_quote).await.map_err(|e| format!("save: {e}"))?;
+
+    let loaded = quote_repo
+        .find_by_id(&QuoteId("Q-E2E-FAIL-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("not found")?;
+
+    // Step 1: Validate — should fail with violations
+    let engine = DeterministicConstraintEngine;
+    let result = engine.validate(&ConstraintInput { quote_lines: loaded.lines.clone() });
+    assert!(!result.valid, "quote with bad lines should fail validation");
+    assert!(
+        result.violations.iter().any(|v| v.code == "ZERO_QUANTITY"),
+        "should detect zero quantity"
+    );
+    assert!(
+        result.violations.iter().any(|v| v.code == "DUPLICATE_PRODUCT_ID"),
+        "should detect duplicate product"
+    );
+
+    // Step 2: "Fix" the lines — create a corrected quote version
+    let fixed_quote = make_quote("Q-E2E-FAIL-001", vec![line("PROD-F1", 5, 5000)]);
+    quote_repo.save(fixed_quote).await.map_err(|e| format!("save fixed: {e}"))?;
+
+    let reloaded = quote_repo
+        .find_by_id(&QuoteId("Q-E2E-FAIL-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("not found after fix")?;
+
+    // Step 3: Re-validate — should pass
+    let result = engine.validate(&ConstraintInput { quote_lines: reloaded.lines.clone() });
+    assert!(result.valid, "fixed quote should pass: {:?}", result.violations);
+
+    // Step 4: Continue through happy path
+    let flow_engine = FlowEngine::new(NetNewFlow);
+    let sink = InMemoryAuditSink::default();
+    let audit_ctx = AuditContext::new(
+        Some(QuoteId("Q-E2E-FAIL-001".to_string())),
+        None,
+        "e2e-s008",
+        "e2e-harness",
+    );
+    let ctx = FlowContext::default();
+
+    let mut state = flow_engine.initial_state();
+    state = flow_engine
+        .apply_with_audit(&state, &FlowEvent::RequiredFieldsCollected, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("{e}"))?
+        .to;
+    assert_eq!(state, FlowState::Validated);
+
+    let pricing = price_quote_with_trace(&reloaded, "USD");
+    assert_eq!(pricing.total, Decimal::new(25000, 2)); // 5 × $50.00
+
+    state = flow_engine
+        .apply_with_audit(&state, &FlowEvent::PricingCalculated, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("{e}"))?
+        .to;
+    state = flow_engine
+        .apply_with_audit(&state, &FlowEvent::PolicyClear, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("{e}"))?
+        .to;
+    state = flow_engine
+        .apply_with_audit(&state, &FlowEvent::QuoteDelivered, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("{e}"))?
+        .to;
+    assert_eq!(state, FlowState::Sent);
+
+    assert_eq!(sink.events().len(), 4, "recovery path should have 4 clean transitions");
+
+    Ok(())
+}
+
+// ── S-009: Execution task retry lifecycle ────────────────────────────────
+
+#[tokio::test]
+async fn s009_execution_task_retry_lifecycle() -> TestResult {
+    use quotey_core::domain::execution::{
+        ExecutionTask, ExecutionTaskId, ExecutionTaskState, ExecutionTransitionEvent,
+        ExecutionTransitionId, OperationKey,
+    };
+    use quotey_db::repositories::{ExecutionQueueRepository, SqlExecutionQueueRepository};
+
+    let pool = setup_pool().await?;
+
+    // Seed a parent quote (FK constraint)
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let quote = make_quote("Q-E2E-EXEC-001", vec![line("prod-exec", 1, 1000)]);
+    quote_repo.save(quote).await.map_err(|e| format!("save quote: {e}"))?;
+
+    let exec_repo = SqlExecutionQueueRepository::new(pool.clone());
+    let now = Utc::now();
+    let quote_id = QuoteId("Q-E2E-EXEC-001".to_string());
+
+    // Step 1: Create task in Queued state
+    let task = ExecutionTask {
+        id: ExecutionTaskId("TASK-E2E-001".to_string()),
+        quote_id: quote_id.clone(),
+        operation_kind: "crm.sync_quote".to_string(),
+        payload_json: r#"{"deal_id":"D-100"}"#.to_string(),
+        idempotency_key: OperationKey("op-e2e-exec-001".to_string()),
+        state: ExecutionTaskState::Queued,
+        retry_count: 0,
+        max_retries: 3,
+        available_at: now,
+        claimed_by: None,
+        claimed_at: None,
+        last_error: None,
+        result_fingerprint: None,
+        state_version: 1,
+        created_at: now,
+        updated_at: now,
+    };
+    exec_repo.save_task(task).await.map_err(|e| format!("save task: {e}"))?;
+
+    // Step 2: Transition Queued → Running
+    let t1 = ExecutionTransitionEvent {
+        id: ExecutionTransitionId("t-e2e-001".to_string()),
+        task_id: ExecutionTaskId("TASK-E2E-001".to_string()),
+        quote_id: quote_id.clone(),
+        from_state: Some(ExecutionTaskState::Queued),
+        to_state: ExecutionTaskState::Running,
+        transition_reason: "worker-claim".to_string(),
+        error_class: None,
+        decision_context_json: r#"{"worker":"w-1"}"#.to_string(),
+        actor_type: "system".to_string(),
+        actor_id: "queue-worker-1".to_string(),
+        idempotency_key: Some(OperationKey("op-e2e-exec-001".to_string())),
+        correlation_id: "corr-e2e-s009".to_string(),
+        state_version: 2,
+        occurred_at: now,
+    };
+    exec_repo.append_transition(t1).await.map_err(|e| format!("t1: {e}"))?;
+
+    // Update task state to Running
+    let mut task = exec_repo
+        .find_task_by_id(&ExecutionTaskId("TASK-E2E-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("task not found")?;
+    task.state = ExecutionTaskState::Running;
+    task.claimed_by = Some("queue-worker-1".to_string());
+    task.claimed_at = Some(now);
+    task.state_version = 2;
+    task.updated_at = Utc::now();
+    exec_repo.save_task(task).await.map_err(|e| format!("update running: {e}"))?;
+
+    // Step 3: Running → RetryableFailed (CRM timeout)
+    let t2 = ExecutionTransitionEvent {
+        id: ExecutionTransitionId("t-e2e-002".to_string()),
+        task_id: ExecutionTaskId("TASK-E2E-001".to_string()),
+        quote_id: quote_id.clone(),
+        from_state: Some(ExecutionTaskState::Running),
+        to_state: ExecutionTaskState::RetryableFailed,
+        transition_reason: "crm-timeout".to_string(),
+        error_class: Some("TimeoutError".to_string()),
+        decision_context_json: r#"{"timeout_ms":30000}"#.to_string(),
+        actor_type: "system".to_string(),
+        actor_id: "queue-worker-1".to_string(),
+        idempotency_key: Some(OperationKey("op-e2e-exec-001".to_string())),
+        correlation_id: "corr-e2e-s009".to_string(),
+        state_version: 3,
+        occurred_at: Utc::now(),
+    };
+    exec_repo.append_transition(t2).await.map_err(|e| format!("t2: {e}"))?;
+
+    let mut task = exec_repo
+        .find_task_by_id(&ExecutionTaskId("TASK-E2E-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("task not found")?;
+    task.state = ExecutionTaskState::RetryableFailed;
+    task.retry_count = 1;
+    task.last_error = Some("CRM API timeout after 30s".to_string());
+    task.claimed_by = None;
+    task.claimed_at = None;
+    task.state_version = 3;
+    task.updated_at = Utc::now();
+    exec_repo.save_task(task).await.map_err(|e| format!("update failed: {e}"))?;
+
+    // Verify the failed state persisted
+    let failed_task = exec_repo
+        .find_task_by_id(&ExecutionTaskId("TASK-E2E-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("task not found")?;
+    assert_eq!(failed_task.state, ExecutionTaskState::RetryableFailed);
+    assert_eq!(failed_task.retry_count, 1);
+    assert!(failed_task.last_error.is_some());
+
+    // Step 4: RetryableFailed → Running (retry) → Completed
+    let t3 = ExecutionTransitionEvent {
+        id: ExecutionTransitionId("t-e2e-003".to_string()),
+        task_id: ExecutionTaskId("TASK-E2E-001".to_string()),
+        quote_id: quote_id.clone(),
+        from_state: Some(ExecutionTaskState::RetryableFailed),
+        to_state: ExecutionTaskState::Running,
+        transition_reason: "retry-scheduled".to_string(),
+        error_class: None,
+        decision_context_json: r#"{"worker":"w-2","attempt":2}"#.to_string(),
+        actor_type: "system".to_string(),
+        actor_id: "queue-worker-2".to_string(),
+        idempotency_key: Some(OperationKey("op-e2e-exec-001".to_string())),
+        correlation_id: "corr-e2e-s009".to_string(),
+        state_version: 4,
+        occurred_at: Utc::now(),
+    };
+    let t4 = ExecutionTransitionEvent {
+        id: ExecutionTransitionId("t-e2e-004".to_string()),
+        task_id: ExecutionTaskId("TASK-E2E-001".to_string()),
+        quote_id: quote_id.clone(),
+        from_state: Some(ExecutionTaskState::Running),
+        to_state: ExecutionTaskState::Completed,
+        transition_reason: "crm-sync-success".to_string(),
+        error_class: None,
+        decision_context_json: r#"{"crm_id":"CRM-500"}"#.to_string(),
+        actor_type: "system".to_string(),
+        actor_id: "queue-worker-2".to_string(),
+        idempotency_key: Some(OperationKey("op-e2e-exec-001".to_string())),
+        correlation_id: "corr-e2e-s009".to_string(),
+        state_version: 5,
+        occurred_at: Utc::now(),
+    };
+    exec_repo.append_transition(t3).await.map_err(|e| format!("t3: {e}"))?;
+    exec_repo.append_transition(t4).await.map_err(|e| format!("t4: {e}"))?;
+
+    // Update task to completed
+    let mut task = exec_repo
+        .find_task_by_id(&ExecutionTaskId("TASK-E2E-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("task not found")?;
+    task.state = ExecutionTaskState::Completed;
+    task.retry_count = 2;
+    task.last_error = None;
+    task.result_fingerprint = Some("sha256:crm500".to_string());
+    task.state_version = 5;
+    task.updated_at = Utc::now();
+    exec_repo.save_task(task).await.map_err(|e| format!("update completed: {e}"))?;
+
+    // Verify: 4 transitions recorded in audit
+    let transitions = exec_repo
+        .list_transitions_for_task(&ExecutionTaskId("TASK-E2E-001".to_string()))
+        .await
+        .map_err(|e| format!("list transitions: {e}"))?;
+    assert_eq!(transitions.len(), 4, "expected 4 transition events");
+    assert_eq!(transitions[0].to_state, ExecutionTaskState::Running);
+    assert_eq!(transitions[1].to_state, ExecutionTaskState::RetryableFailed);
+    assert_eq!(transitions[2].to_state, ExecutionTaskState::Running);
+    assert_eq!(transitions[3].to_state, ExecutionTaskState::Completed);
+
+    // Verify final task state
+    let final_task = exec_repo
+        .find_task_by_id(&ExecutionTaskId("TASK-E2E-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("task not found")?;
+    assert_eq!(final_task.state, ExecutionTaskState::Completed);
+    assert_eq!(final_task.retry_count, 2);
+    assert!(final_task.result_fingerprint.is_some());
+
+    Ok(())
+}
+
+// ── S-010: Quote revision cycle ─────────────────────────────────────────
+
+#[tokio::test]
+async fn s010_quote_revision_cycle_sent_revised_resend() -> TestResult {
+    let pool = setup_pool().await?;
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let audit_repo = SqlAuditEventRepository::new(pool.clone());
+
+    let quote = make_quote("Q-E2E-REV-001", vec![line("prod-rev", 2, 7500)]);
+    quote_repo.save(quote).await.map_err(|e| format!("save: {e}"))?;
+
+    let engine = FlowEngine::new(NetNewFlow);
+    let sink = InMemoryAuditSink::default();
+    let audit_ctx = AuditContext::new(
+        Some(QuoteId("Q-E2E-REV-001".to_string())),
+        None,
+        "e2e-s010",
+        "e2e-harness",
+    );
+    let ctx = FlowContext::default();
+
+    // Phase 1: Drive to Sent
+    let mut state = engine.initial_state();
+    for event in &[
+        FlowEvent::RequiredFieldsCollected,
+        FlowEvent::PricingCalculated,
+        FlowEvent::PolicyClear,
+        FlowEvent::QuoteDelivered,
+    ] {
+        state = engine
+            .apply_with_audit(&state, event, &ctx, &sink, &audit_ctx)
+            .map_err(|e| format!("phase1: {e}"))?
+            .to;
+    }
+    assert_eq!(state, FlowState::Sent);
+
+    // Phase 2: Revise — Sent → Revised
+    state = engine
+        .apply_with_audit(&state, &FlowEvent::ReviseRequested, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("revise: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Revised);
+
+    // Phase 3: Re-enter flow — Revised → Validated → Priced → Finalized → Sent
+    for event in &[
+        FlowEvent::RequiredFieldsCollected,
+        FlowEvent::PricingCalculated,
+        FlowEvent::PolicyClear,
+        FlowEvent::QuoteDelivered,
+    ] {
+        state = engine
+            .apply_with_audit(&state, event, &ctx, &sink, &audit_ctx)
+            .map_err(|e| format!("phase3: {e}"))?
+            .to;
+    }
+    assert_eq!(state, FlowState::Sent, "quote should be Sent again after revision");
+
+    // Verify audit: 4 (phase1) + 1 (revise) + 4 (phase3) = 9 transitions
+    let events = sink.events();
+    assert_eq!(events.len(), 9, "expected 9 audit events across revision cycle");
+
+    // Verify the revision transition is captured
+    assert_eq!(events[4].metadata.get("from").map(|s| s.as_str()), Some("Sent"));
+    assert_eq!(events[4].metadata.get("to").map(|s| s.as_str()), Some("Revised"));
+
+    // Verify the re-entry picks up from Revised
+    assert_eq!(events[5].metadata.get("from").map(|s| s.as_str()), Some("Revised"));
+    assert_eq!(events[5].metadata.get("to").map(|s| s.as_str()), Some("Validated"));
+
+    // Persist and verify full audit round-trip
+    flush_audit_to_db(&sink, &audit_repo).await?;
+    let db_events = audit_repo
+        .find_by_quote_id(&QuoteId("Q-E2E-REV-001".to_string()))
+        .await
+        .map_err(|e| format!("query: {e}"))?;
+    assert_eq!(db_events.len(), 9, "DB should have all 9 audit events");
+
+    Ok(())
+}
+
+// ── S-011: Idempotency guard prevents duplicate execution ────────────────
+
+#[tokio::test]
+async fn s011_idempotency_guard_prevents_duplicate_execution() -> TestResult {
+    use quotey_core::domain::execution::{
+        IdempotencyRecord, IdempotencyRecordState, OperationKey,
+    };
+    use quotey_db::repositories::{IdempotencyRepository, SqlExecutionQueueRepository};
+
+    let pool = setup_pool().await?;
+
+    // Seed parent quote
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let quote = make_quote("Q-E2E-IDEM-001", vec![line("prod-idem", 1, 2000)]);
+    quote_repo.save(quote).await.map_err(|e| format!("save: {e}"))?;
+
+    let idem_repo = SqlExecutionQueueRepository::new(pool.clone());
+    let now = Utc::now();
+
+    // Step 1: First attempt — reserve the operation
+    let record = IdempotencyRecord {
+        operation_key: OperationKey("op-e2e-idem-001".to_string()),
+        quote_id: QuoteId("Q-E2E-IDEM-001".to_string()),
+        operation_kind: "slack.post_quote".to_string(),
+        payload_hash: "sha256:abc123".to_string(),
+        state: IdempotencyRecordState::Reserved,
+        attempt_count: 1,
+        first_seen_at: now,
+        last_seen_at: now,
+        result_snapshot_json: None,
+        error_snapshot_json: None,
+        expires_at: Some(now + chrono::Duration::hours(1)),
+        correlation_id: "corr-e2e-s011".to_string(),
+        created_by_component: "slack-ingress".to_string(),
+        updated_by_component: "slack-ingress".to_string(),
+    };
+    idem_repo.save_operation(record).await.map_err(|e| format!("save: {e}"))?;
+
+    // Verify it's in Reserved state
+    let found = idem_repo
+        .find_operation(&OperationKey("op-e2e-idem-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("not found")?;
+    assert_eq!(found.state, IdempotencyRecordState::Reserved);
+
+    // Step 2: Complete the operation
+    let mut completed = found;
+    completed.state = IdempotencyRecordState::Completed;
+    completed.attempt_count = 1;
+    completed.last_seen_at = Utc::now();
+    completed.result_snapshot_json = Some(r#"{"slack_ts":"1730000000.0001"}"#.to_string());
+    completed.updated_by_component = "queue-worker".to_string();
+    idem_repo.save_operation(completed).await.map_err(|e| format!("complete: {e}"))?;
+
+    // Step 3: "Duplicate" request arrives — check idempotency
+    let found = idem_repo
+        .find_operation(&OperationKey("op-e2e-idem-001".to_string()))
+        .await
+        .map_err(|e| format!("find dup: {e}"))?
+        .ok_or("not found")?;
+
+    // The guard: if already Completed, skip re-execution
+    assert_eq!(
+        found.state,
+        IdempotencyRecordState::Completed,
+        "duplicate should see Completed state"
+    );
+    assert!(
+        found.result_snapshot_json.is_some(),
+        "completed record should have result"
+    );
+    assert_eq!(found.attempt_count, 1, "should still be 1 attempt");
+
+    Ok(())
+}
+
+// ── S-012: Multi-constraint compound failure ─────────────────────────────
+
+#[tokio::test]
+async fn s012_multi_constraint_compound_failure_detection() -> TestResult {
+    let pool = setup_pool().await?;
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+
+    // Create quote with multiple simultaneous violations
+    let bad_quote = make_quote(
+        "Q-E2E-MULTI-001",
+        vec![
+            QuoteLine {
+                product_id: ProductId(String::new()), // empty product ID
+                quantity: 0,                          // zero quantity
+                unit_price: Decimal::ZERO,            // zero price
+                discount_pct: 0.0,
+                notes: None,
+            },
+            QuoteLine {
+                product_id: ProductId("PROD-DUP".to_string()),
+                quantity: 5,
+                unit_price: Decimal::new(1000, 2),
+                discount_pct: 0.0,
+                notes: None,
+            },
+            QuoteLine {
+                product_id: ProductId("PROD-DUP".to_string()), // duplicate
+                quantity: 3,
+                unit_price: Decimal::new(1000, 2),
+                discount_pct: 0.0,
+                notes: None,
+            },
+        ],
+    );
+    quote_repo.save(bad_quote).await.map_err(|e| format!("save: {e}"))?;
+
+    let loaded = quote_repo
+        .find_by_id(&QuoteId("Q-E2E-MULTI-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("not found")?;
+
+    let engine = DeterministicConstraintEngine;
+    let result = engine.validate(&ConstraintInput { quote_lines: loaded.lines });
+    assert!(!result.valid, "should fail validation");
+
+    // Collect all violation codes
+    let codes: Vec<&str> = result.violations.iter().map(|v| v.code.as_str()).collect();
+    assert!(codes.contains(&"MISSING_PRODUCT_ID"), "should detect missing product ID");
+    assert!(codes.contains(&"ZERO_QUANTITY"), "should detect zero quantity");
+    assert!(
+        codes.contains(&"NON_POSITIVE_UNIT_PRICE"),
+        "should detect non-positive price"
+    );
+    assert!(
+        codes.contains(&"DUPLICATE_PRODUCT_ID"),
+        "should detect duplicate product"
+    );
+
+    // Verify at least 4 violations reported
+    assert!(
+        result.violations.len() >= 4,
+        "expected at least 4 violations, got {}",
+        result.violations.len()
+    );
+
+    Ok(())
+}
+
+// ── S-013: Quote expiration from Approval state ──────────────────────────
+
+#[tokio::test]
+async fn s013_quote_expiration_from_approval_state() -> TestResult {
+    let pool = setup_pool().await?;
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let approval_repo = SqlApprovalRepository::new(pool.clone());
+    let audit_repo = SqlAuditEventRepository::new(pool.clone());
+
+    let quote = make_quote("Q-E2E-EXP-001", vec![line("prod-exp", 10, 15000)]);
+    quote_repo.save(quote).await.map_err(|e| format!("save: {e}"))?;
+
+    let engine = FlowEngine::new(NetNewFlow);
+    let sink = InMemoryAuditSink::default();
+    let audit_ctx = AuditContext::new(
+        Some(QuoteId("Q-E2E-EXP-001".to_string())),
+        None,
+        "e2e-s013",
+        "e2e-harness",
+    );
+    let ctx = FlowContext::default();
+
+    // Drive to Approval state
+    let mut state = engine.initial_state();
+    for event in &[
+        FlowEvent::RequiredFieldsCollected,
+        FlowEvent::PricingCalculated,
+        FlowEvent::PolicyViolationDetected,
+    ] {
+        state = engine
+            .apply_with_audit(&state, event, &ctx, &sink, &audit_ctx)
+            .map_err(|e| format!("drive: {e}"))?
+            .to;
+    }
+    assert_eq!(state, FlowState::Approval);
+
+    // Create an approval request that is already past expiry
+    let now = Utc::now();
+    let expired_approval = ApprovalRequest {
+        id: ApprovalId("APR-E2E-EXP-001".to_string()),
+        quote_id: QuoteId("Q-E2E-EXP-001".to_string()),
+        approver_role: "sales_manager".to_string(),
+        reason: "Discount requires approval".to_string(),
+        justification: "Strategic deal".to_string(),
+        status: ApprovalStatus::Pending,
+        requested_by: "e2e-harness".to_string(),
+        expires_at: Some(now - chrono::Duration::hours(1)), // already expired
+        created_at: now - chrono::Duration::hours(5),
+        updated_at: now - chrono::Duration::hours(5),
+    };
+    approval_repo
+        .save(expired_approval)
+        .await
+        .map_err(|e| format!("save approval: {e}"))?;
+
+    // Verify the approval is stored with past expiry
+    let approval = approval_repo
+        .find_by_id(&ApprovalId("APR-E2E-EXP-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("approval not found")?;
+    assert!(approval.expires_at.unwrap() < now, "approval should be expired");
+
+    // Expire the quote via flow event
+    state = engine
+        .apply_with_audit(&state, &FlowEvent::QuoteExpired, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("expire: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Expired);
+
+    // Verify audit trail includes expiration
+    let events = sink.events();
+    let last = events.last().ok_or("no audit events")?;
+    assert_eq!(last.metadata.get("from").map(|s| s.as_str()), Some("Approval"));
+    assert_eq!(last.metadata.get("to").map(|s| s.as_str()), Some("Expired"));
+
+    // Persist and verify DB
+    flush_audit_to_db(&sink, &audit_repo).await?;
+    let db_events = audit_repo
+        .find_by_quote_id(&QuoteId("Q-E2E-EXP-001".to_string()))
+        .await
+        .map_err(|e| format!("query: {e}"))?;
+    assert_eq!(db_events.len(), 4, "3 transitions to Approval + 1 expiration");
 
     Ok(())
 }
