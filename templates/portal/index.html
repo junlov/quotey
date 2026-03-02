@@ -251,11 +251,18 @@
             display: flex;
             justify-content: space-between;
             align-items: center;
+            gap: 12px;
         }
 
         .section-header h2 {
             font-size: 18px;
             font-weight: 600;
+        }
+
+        .section-meta {
+            font-size: 13px;
+            color: var(--text-light);
+            font-weight: 500;
         }
 
         .quotes-table {
@@ -325,6 +332,7 @@
             color: #1d4ed8;
         }
 
+        .status-rejected,
         .status-declined {
             background: #fee2e2;
             color: #dc2626;
@@ -373,6 +381,17 @@
             background: var(--border-color);
         }
 
+        .btn-tertiary {
+            background: transparent;
+            color: var(--text-light);
+            border: 1px dashed var(--border-color);
+        }
+
+        .btn-tertiary:hover {
+            color: var(--text-dark);
+            border-color: var(--text-light);
+        }
+
         /* Empty State */
         .empty-state {
             text-align: center;
@@ -395,6 +414,10 @@
         .empty-state p {
             color: var(--text-light);
             font-size: 14px;
+        }
+
+        .table-row-link {
+            cursor: pointer;
         }
 
         /* Mobile Responsive */
@@ -511,7 +534,7 @@
                     <option value="all" {% if status_filter == "all" %}selected{% endif %}>All Quotes</option>
                     <option value="pending" {% if status_filter == "pending" %}selected{% endif %}>Pending</option>
                     <option value="approved" {% if status_filter == "approved" %}selected{% endif %}>Approved</option>
-                    <option value="declined" {% if status_filter == "declined" %}selected{% endif %}>Declined</option>
+                    <option value="rejected" {% if status_filter == "rejected" %}selected{% endif %}>Rejected</option>
                     <option value="expired" {% if status_filter == "expired" %}selected{% endif %}>Expired</option>
                 </select>
             </div>
@@ -540,12 +563,16 @@
                     >
                 </div>
             </div>
+            <div class="filter-group">
+                <button type="button" class="btn btn-tertiary" onclick="resetQuoteFilters()">Reset Filters</button>
+            </div>
         </div>
 
         <!-- Quotes List -->
         <section class="quotes-section">
             <div class="section-header">
                 <h2>All Quotes</h2>
+                <span class="section-meta" id="results-count"></span>
             </div>
             
             {% if quotes and quotes | length > 0 %}
@@ -562,14 +589,16 @@
                 </thead>
                 <tbody>
                     {% for quote in quotes %}
-                    <tr data-status="{{ quote.status }}" data-amount="{{ quote.total_amount_raw | default(value=0) }}">
+                    <tr class="table-row-link" data-status="{% if quote.status == 'declined' %}rejected{% else %}{{ quote.status }}{% endif %}" data-amount="{{ quote.total_amount_raw | default(value=0) }}" data-href="/quote/{{ quote.token }}">
                         <td>
                             <a href="/quote/{{ quote.token }}" class="quote-link">{{ quote.quote_id }}</a>
                         </td>
                         <td>{{ quote.created_at }}</td>
                         <td>{{ quote.valid_until }}</td>
                         <td>
-                            <span class="status-badge status-{{ quote.status }}">{{ quote.status }}</span>
+                            <span class="status-badge status-{% if quote.status == 'declined' %}rejected{% else %}{{ quote.status }}{% endif %}">
+                                {% if quote.status == "declined" %}rejected{% else %}{{ quote.status }}{% endif %}
+                            </span>
                         </td>
                         <td class="amount text-right">{{ quote.total_amount }}</td>
                         <td>
@@ -581,6 +610,13 @@
                     {% endfor %}
                 </tbody>
             </table>
+            <div id="no-results-state" class="empty-state" style="display: none;">
+                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M15.5 15.5L19 19m-6-1a6 6 0 110-12 6 6 0 010 12z"/>
+                </svg>
+                <h3>No matching quotes</h3>
+                <p>Try a different filter, search term, or sort option.</p>
+            </div>
             {% else %}
             <div class="empty-state">
                 <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -594,72 +630,131 @@
     </main>
 
     <script>
-        function filterQuotes(status) {
-            const rows = document.querySelectorAll('.quotes-table tbody tr');
-            rows.forEach(row => {
-                if (status === 'all' || row.dataset.status === status) {
-                    row.style.display = '';
-                } else {
-                    row.style.display = 'none';
-                }
+        let currentStatusFilter = 'all';
+        let currentSearchQuery = '';
+        let currentSortBy = 'date-desc';
+
+        function parseAmount(value) {
+            if (!value) return 0;
+            const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
+            return Number.isFinite(parsed) ? parsed : 0;
+        }
+
+        function parseDate(value) {
+            const ts = Date.parse(value || '');
+            return Number.isFinite(ts) ? ts : 0;
+        }
+
+        function updateNoResultsState(rows) {
+            const noResults = document.getElementById('no-results-state');
+            if (!noResults) return;
+            const visibleCount = rows.filter((row) => row.style.display !== 'none').length;
+            noResults.style.display = visibleCount === 0 ? '' : 'none';
+            const resultsCount = document.getElementById('results-count');
+            if (resultsCount) {
+                const total = rows.length;
+                resultsCount.textContent =
+                    visibleCount === total ? `${total} quotes` : `${visibleCount} of ${total} quotes`;
+            }
+        }
+
+        function applyFilters(rows) {
+            rows.forEach((row) => {
+                const statusOk =
+                    currentStatusFilter === 'all' || (row.dataset.status || '') === currentStatusFilter;
+                const textOk = row.textContent.toLowerCase().includes(currentSearchQuery);
+                row.style.display = statusOk && textOk ? '' : 'none';
             });
         }
 
-        function sortQuotes(sortBy) {
-            const tbody = document.querySelector('.quotes-table tbody');
-            const rows = Array.from(tbody.querySelectorAll('tr'));
-
-            const parseAmount = (value) => {
-                if (!value) {
-                    return 0;
-                }
-                const parsed = parseFloat(String(value).replace(/[^0-9.-]/g, ''));
-                return Number.isFinite(parsed) ? parsed : 0;
-            };
-            
+        function applySort(rows, tbody) {
             rows.sort((a, b) => {
                 const amountA = parseAmount(a.dataset.amount);
                 const amountB = parseAmount(b.dataset.amount);
-                switch(sortBy) {
-                    case 'date-desc':
-                        return new Date(b.cells[1].textContent) - new Date(a.cells[1].textContent);
+                const dateA = parseDate(a.cells[1]?.textContent);
+                const dateB = parseDate(b.cells[1]?.textContent);
+
+                switch (currentSortBy) {
                     case 'date-asc':
-                        return new Date(a.cells[1].textContent) - new Date(b.cells[1].textContent);
+                        return dateA - dateB;
                     case 'amount-desc':
                         return amountB - amountA;
                     case 'amount-asc':
                         return amountA - amountB;
+                    case 'date-desc':
                     default:
-                        return 0;
+                        return dateB - dateA;
                 }
             });
-            
-            rows.forEach(row => tbody.appendChild(row));
+
+            rows.forEach((row) => tbody.appendChild(row));
+        }
+
+        function applyTableState() {
+            const tbody = document.querySelector('.quotes-table tbody');
+            if (!tbody) return;
+            const rows = Array.from(tbody.querySelectorAll('tr'));
+            if (rows.length === 0) return;
+
+            applySort(rows, tbody);
+            applyFilters(rows);
+            updateNoResultsState(rows);
+        }
+
+        function filterQuotes(status) {
+            currentStatusFilter = status || 'all';
+            applyTableState();
+        }
+
+        function sortQuotes(sortBy) {
+            currentSortBy = sortBy || 'date-desc';
+            applyTableState();
         }
 
         function searchQuotes(query) {
-            const rows = document.querySelectorAll('.quotes-table tbody tr');
-            const lowerQuery = query.toLowerCase();
-            
-            rows.forEach(row => {
-                const text = row.textContent.toLowerCase();
-                if (text.includes(lowerQuery)) {
-                    row.style.display = '';
-                } else {
-                    row.style.display = 'none';
-                }
-            });
+            currentSearchQuery = (query || '').toLowerCase();
+            applyTableState();
+        }
+
+        function resetQuoteFilters() {
+            const statusFilter = document.getElementById('status-filter');
+            const sortSelect = document.getElementById('sort-quotes');
+            const searchInput = document.getElementById('search-input');
+
+            currentStatusFilter = 'all';
+            currentSortBy = 'date-desc';
+            currentSearchQuery = '';
+
+            if (statusFilter) statusFilter.value = 'all';
+            if (sortSelect) sortSelect.value = 'date-desc';
+            if (searchInput) searchInput.value = '';
+
+            applyTableState();
         }
 
         document.addEventListener('DOMContentLoaded', () => {
             const statusFilter = document.getElementById('status-filter');
             const searchInput = document.getElementById('search-input');
             if (statusFilter) {
-                filterQuotes(statusFilter.value || 'all');
+                currentStatusFilter = statusFilter.value || 'all';
+            }
+            const sortQuotesSelect = document.getElementById('sort-quotes');
+            if (sortQuotesSelect) {
+                currentSortBy = sortQuotesSelect.value || 'date-desc';
             }
             if (searchInput) {
-                searchQuotes(searchInput.value || '');
+                currentSearchQuery = (searchInput.value || '').toLowerCase();
             }
+            applyTableState();
+
+            document.querySelectorAll('.table-row-link').forEach((row) => {
+                row.addEventListener('click', (event) => {
+                    const interactiveTarget = event.target.closest('a, button, input, select, textarea');
+                    if (interactiveTarget) return;
+                    const href = row.dataset.href;
+                    if (href) window.location.href = href;
+                });
+            });
         });
     </script>
 </body>

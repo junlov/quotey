@@ -36,7 +36,7 @@ The interaction contract is fixed to the five sections below. All UX stories mus
 | `priced` | Pricing calculated, ready for review | 💰 Priced | Priced | Green |
 | `approval` | Requires approval before proceeding | 🔔 Approval Required | Approval Required | Orange |
 | `approved` | Approved, ready to finalize | ✓ Approved | Approved | Green |
-| `rejected` | Approval denied | ✗ Rejected | Declined | Red |
+| `rejected` | Approval denied | ✗ Rejected | Rejected | Red |
 | `finalized` | Locked, ready to send | 🔒 Finalized | Finalized | Blue |
 | `sent` | Delivered to customer | 📧 Sent | Sent | Purple |
 | `expired` | Past valid_until date | ⏰ Expired | Expired | Gray |

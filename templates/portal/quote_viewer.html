@@ -9,6 +9,7 @@
         :root {
             --primary-color: {{ branding.primary_color | default(value="#2563eb") }};
             --primary-hover: {{ branding.primary_hover | default(value="#1d4ed8") }};
+            --primary-light: rgba(37, 99, 235, 0.08);
             --secondary-color: #64748b;
             --success-color: #10b981;
             --success-hover: #059669;
@@ -20,18 +21,25 @@
             --warning-light: #fef3c7;
             --info-color: #3b82f6;
             --info-light: #dbeafe;
-            --bg-light: #f8fafc;
-            --bg-white: #ffffff;
-            --text-dark: #1e293b;
-            --text-light: #64748b;
+            --bg-page: #f1f5f9;
+            --bg-card: #ffffff;
+            --bg-elevated: #f8fafc;
+            --text-primary: #0f172a;
+            --text-secondary: #475569;
+            --text-tertiary: #94a3b8;
             --border-color: #e2e8f0;
-            --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.05);
-            --shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.1);
+            --border-light: #f1f5f9;
+            --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
+            --shadow: 0 1px 3px rgba(0, 0, 0, 0.08);
+            --shadow-md: 0 4px 6px -1px rgba(0, 0, 0, 0.08);
+            --shadow-lg: 0 10px 15px -3px rgba(0, 0, 0, 0.08);
             --radius-sm: 6px;
             --radius: 8px;
             --radius-lg: 12px;
-            --transition: all 0.2s ease;
+            --radius-xl: 16px;
+            --transition: all 0.2s cubic-bezier(0.4, 0, 0.2, 1);
+            --header-height: 64px;
+            --totals-band-height: 80px;
         }
 
         * {
@@ -47,11 +55,12 @@
         body {
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
             line-height: 1.6;
-            color: var(--text-dark);
-            background: var(--bg-light);
+            color: var(--text-primary);
+            background: var(--bg-page);
             min-height: 100vh;
             -webkit-font-smoothing: antialiased;
             -moz-osx-font-smoothing: grayscale;
+            padding-bottom: 120px; /* Space for sticky action rail on mobile */
         }
 
         /* Focus styles for accessibility */
@@ -63,17 +72,18 @@
         button:focus-visible,
         a:focus-visible,
         input:focus-visible,
-        textarea:focus-visible {
+        textarea:focus-visible,
+        select:focus-visible {
             outline: 2px solid var(--primary-color);
             outline-offset: 2px;
-            box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.2);
+            box-shadow: 0 0 0 4px rgba(37, 99, 235, 0.15);
         }
 
-        /* Header */
+        /* ========== HEADER ========== */
         .portal-header {
-            background: var(--bg-white);
+            background: var(--bg-card);
             border-bottom: 1px solid var(--border-color);
-            padding: 16px 24px;
+            height: var(--header-height);
             position: sticky;
             top: 0;
             z-index: 100;
@@ -81,13 +91,14 @@
         }
 
         .header-content {
-            max-width: 1000px;
+            max-width: 1200px;
             margin: 0 auto;
+            padding: 0 24px;
+            height: 100%;
             display: flex;
             justify-content: space-between;
             align-items: center;
-            flex-wrap: wrap;
-            gap: 12px;
+            gap: 16px;
         }
 
         .company-branding {
@@ -103,32 +114,39 @@
         }
 
         .company-name {
-            font-size: 18px;
+            font-size: 16px;
             font-weight: 700;
             color: var(--primary-color);
+            letter-spacing: -0.2px;
         }
 
-        .quote-badge {
-            display: inline-flex;
+        .header-quote-info {
+            display: flex;
             align-items: center;
-            gap: 8px;
-            padding: 6px 12px;
-            background: var(--bg-light);
-            border-radius: 20px;
+            gap: 12px;
+            font-size: 14px;
+        }
+
+        .quote-id {
+            font-family: 'SF Mono', Monaco, monospace;
             font-size: 13px;
-            font-weight: 500;
+            color: var(--text-secondary);
+            background: var(--bg-elevated);
+            padding: 4px 10px;
+            border-radius: var(--radius-sm);
+            border: 1px solid var(--border-light);
         }
 
         .status-badge {
             display: inline-flex;
             align-items: center;
-            gap: 4px;
-            padding: 4px 10px;
-            border-radius: 12px;
+            gap: 6px;
+            padding: 6px 12px;
+            border-radius: 20px;
             font-size: 12px;
             font-weight: 600;
             text-transform: uppercase;
-            letter-spacing: 0.3px;
+            letter-spacing: 0.4px;
         }
 
         .status-badge::before {
@@ -139,280 +157,262 @@
             background: currentColor;
         }
 
-        .status-draft { background: var(--warning-light); color: #d97706; }
-        .status-sent { background: var(--info-light); color: var(--info-color); }
-        .status-pending { background: #fef3c7; color: #d97706; }
-        .status-approved { background: var(--success-light); color: var(--success-color); }
-        .status-declined { background: var(--danger-light); color: var(--danger-color); }
-        .status-expired { background: #f3f4f6; color: var(--text-light); }
+        .status-draft { background: var(--warning-light); color: #b45309; }
+        .status-sent { background: var(--info-light); color: #1d4ed8; }
+        .status-pending { background: var(--warning-light); color: #b45309; }
+        .status-approved { background: var(--success-light); color: #047857; }
+        .status-declined { background: var(--danger-light); color: #b91c1c; }
+        .status-expired { background: var(--bg-elevated); color: var(--text-tertiary); }
 
-        /* Main Content */
-        .portal-main {
-            max-width: 1000px;
-            margin: 0 auto;
-            padding: 24px;
-        }
-
-        /* Toast Notifications */
-        .toast-container {
-            position: fixed;
-            top: 80px;
-            right: 24px;
-            z-index: 300;
-            display: flex;
-            flex-direction: column;
-            gap: 8px;
-            max-width: 400px;
-        }
-
-        .toast {
-            background: var(--bg-white);
-            border-radius: var(--radius);
-            padding: 16px 20px;
-            box-shadow: var(--shadow-lg);
-            display: flex;
-            align-items: flex-start;
-            gap: 12px;
-            animation: slideIn 0.3s ease;
-            border-left: 4px solid var(--primary-color);
-        }
-
-        .toast.success { border-left-color: var(--success-color); }
-        .toast.error { border-left-color: var(--danger-color); }
-        .toast.warning { border-left-color: var(--warning-color); }
-
-        @keyframes slideIn {
-            from {
-                transform: translateX(100%);
-                opacity: 0;
-            }
-            to {
-                transform: translateX(0);
-                opacity: 1;
-            }
-        }
-
-        @keyframes slideOut {
-            to {
-                transform: translateX(100%);
-                opacity: 0;
-            }
-        }
-
-        .toast.hiding {
-            animation: slideOut 0.3s ease forwards;
-        }
-
-        .toast-icon {
-            flex-shrink: 0;
-            width: 20px;
-            height: 20px;
-        }
-
-        .toast-content {
-            flex: 1;
-        }
-
-        .toast-title {
-            font-weight: 600;
-            font-size: 14px;
-            margin-bottom: 2px;
-        }
-
-        .toast-message {
-            font-size: 13px;
-            color: var(--text-light);
-        }
-
-        .toast-close {
-            background: none;
-            border: none;
-            cursor: pointer;
-            padding: 4px;
-            color: var(--text-light);
-            transition: var(--transition);
-        }
-
-        .toast-close:hover {
-            color: var(--text-dark);
-        }
-
-        /* Alert Banners */
-        .alert {
-            border-radius: var(--radius);
-            padding: 16px 20px;
-            margin-bottom: 24px;
-            display: flex;
-            align-items: flex-start;
-            gap: 12px;
-        }
-
-        .alert-warning {
-            background: var(--warning-light);
-            border: 1px solid #fbbf24;
-            color: #92400e;
-        }
-
-        .alert-success {
-            background: var(--success-light);
-            border: 1px solid var(--success-color);
-            color: #065f46;
-        }
-
-        .alert-icon {
-            flex-shrink: 0;
-            width: 20px;
-            height: 20px;
-        }
-
-        .alert-content p {
-            font-size: 14px;
-            line-height: 1.5;
-        }
-
-        /* Quote Card */
-        .quote-card {
-            background: var(--bg-white);
-            border-radius: var(--radius-lg);
-            box-shadow: var(--shadow);
-            overflow: hidden;
-            margin-bottom: 24px;
-        }
-
-        .quote-card-header {
-            padding: 24px;
+        /* ========== HERO SECTION ========== */
+        .hero-section {
+            background: linear-gradient(135deg, var(--bg-card) 0%, var(--bg-elevated) 100%);
             border-bottom: 1px solid var(--border-color);
+            padding: 32px 24px;
         }
 
-        .quote-title-section {
+        .hero-content {
+            max-width: 1200px;
+            margin: 0 auto;
+        }
+
+        .hero-customer {
+            font-size: 14px;
+            font-weight: 500;
+            color: var(--text-secondary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+            margin-bottom: 8px;
+        }
+
+        .hero-title {
+            font-size: 32px;
+            font-weight: 800;
+            color: var(--text-primary);
+            letter-spacing: -0.5px;
+            line-height: 1.2;
+            margin-bottom: 16px;
+        }
+
+        .hero-meta {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 24px;
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        .hero-meta-item {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .hero-meta-item svg {
+            width: 16px;
+            height: 16px;
+            color: var(--text-tertiary);
+        }
+
+        /* ========== TOTALS BAND (Sticky) ========== */
+        .totals-band {
+            background: var(--bg-card);
+            border-bottom: 1px solid var(--border-color);
+            padding: 20px 24px;
+            position: sticky;
+            top: var(--header-height);
+            z-index: 90;
+            box-shadow: var(--shadow-sm);
+        }
+
+        .totals-band-content {
+            max-width: 1200px;
+            margin: 0 auto;
             display: flex;
             justify-content: space-between;
-            align-items: flex-start;
-            flex-wrap: wrap;
-            gap: 16px;
-        }
-
-        .quote-title-section h1 {
-            font-size: 24px;
-            font-weight: 700;
-            color: var(--text-dark);
-            line-height: 1.3;
-        }
-
-        .quote-meta {
-            display: flex;
+            align-items: center;
             gap: 24px;
-            margin-top: 16px;
             flex-wrap: wrap;
         }
 
-        .meta-item {
+        .totals-breakdown {
+            display: flex;
+            align-items: center;
+            gap: 24px;
+            flex-wrap: wrap;
+        }
+
+        .total-item {
             display: flex;
             flex-direction: column;
             gap: 2px;
         }
 
-        .meta-label {
+        .total-item.compact {
+            padding: 8px 16px;
+            background: var(--bg-elevated);
+            border-radius: var(--radius);
+        }
+
+        .total-label {
             font-size: 11px;
-            color: var(--text-light);
+            font-weight: 600;
+            color: var(--text-tertiary);
             text-transform: uppercase;
             letter-spacing: 0.5px;
-            font-weight: 500;
         }
 
-        .meta-value {
+        .total-value {
             font-size: 14px;
             font-weight: 600;
-            color: var(--text-dark);
+            color: var(--text-primary);
+            font-family: 'SF Mono', Monaco, monospace;
         }
 
-        /* Customer Section */
-        .customer-section {
-            display: grid;
-            grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-            gap: 24px;
-            padding: 24px;
-            background: var(--bg-light);
+        .total-value.discount {
+            color: var(--success-color);
         }
 
-        .info-block h3 {
+        .total-grand {
+            text-align: right;
+        }
+
+        .total-grand .total-label {
             font-size: 12px;
-            text-transform: uppercase;
-            letter-spacing: 0.5px;
-            color: var(--text-light);
-            margin-bottom: 8px;
-            font-weight: 600;
+            color: var(--text-secondary);
         }
 
-        .info-block p {
-            font-size: 14px;
-            color: var(--text-dark);
-            margin-bottom: 4px;
+        .total-grand .total-value {
+            font-size: 28px;
+            font-weight: 800;
+            color: var(--primary-color);
+            letter-spacing: -0.5px;
         }
 
-        .info-block p.text-light {
-            color: var(--text-light);
+        .totals-divider {
+            width: 1px;
+            height: 40px;
+            background: var(--border-color);
         }
 
-        /* Line Items */
-        .line-items-section {
-            padding: 24px;
-            overflow-x: auto;
+        /* ========== MAIN CONTENT ========== */
+        .portal-main {
+            max-width: 1200px;
+            margin: 0 auto;
+            padding: 32px 24px;
+            display: grid;
+            grid-template-columns: 1fr 380px;
+            gap: 32px;
+            align-items: start;
         }
 
-        .section-title {
+        .content-primary {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+        }
+
+        .content-secondary {
+            display: flex;
+            flex-direction: column;
+            gap: 24px;
+            position: sticky;
+            top: calc(var(--header-height) + var(--totals-band-height) + 32px);
+        }
+
+        /* ========== CARDS ========== */
+        .card {
+            background: var(--bg-card);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow);
+            overflow: hidden;
+        }
+
+        .card-header {
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-light);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+        }
+
+        .card-title {
             font-size: 16px;
-            font-weight: 600;
-            margin-bottom: 16px;
-            color: var(--text-dark);
+            font-weight: 700;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 10px;
         }
 
+        .card-title svg {
+            width: 20px;
+            height: 20px;
+            color: var(--primary-color);
+        }
+
+        .card-body {
+            padding: 24px;
+        }
+
+        .card-body.no-padding {
+            padding: 0;
+        }
+
+        /* ========== LINE ITEMS TABLE ========== */
         .line-items-table {
             width: 100%;
             border-collapse: collapse;
             font-size: 14px;
-            min-width: 500px;
+        }
+
+        .line-items-table thead {
+            background: var(--bg-elevated);
         }
 
         .line-items-table th {
             text-align: left;
-            padding: 12px;
+            padding: 14px 24px;
             font-weight: 600;
-            color: var(--text-light);
-            border-bottom: 2px solid var(--border-color);
-            font-size: 12px;
+            color: var(--text-secondary);
+            font-size: 11px;
             text-transform: uppercase;
             letter-spacing: 0.5px;
             white-space: nowrap;
         }
 
         .line-items-table td {
-            padding: 16px 12px;
-            border-bottom: 1px solid var(--border-color);
+            padding: 20px 24px;
+            border-bottom: 1px solid var(--border-light);
             vertical-align: top;
         }
 
-        .line-items-table tr:last-child td {
+        .line-items-table tbody tr:last-child td {
             border-bottom: none;
+        }
+
+        .line-items-table tbody tr:hover {
+            background: var(--bg-elevated);
         }
 
         .product-info h4 {
             font-weight: 600;
+            font-size: 14px;
             margin-bottom: 4px;
-            color: var(--text-dark);
+            color: var(--text-primary);
         }
 
         .product-description {
             font-size: 13px;
-            color: var(--text-light);
+            color: var(--text-secondary);
             line-height: 1.4;
         }
 
         .product-sku {
             font-size: 11px;
-            color: var(--text-light);
+            color: var(--text-tertiary);
             font-family: monospace;
-            margin-top: 4px;
+            margin-top: 6px;
         }
 
         .text-right {
@@ -427,66 +427,78 @@
             font-family: 'SF Mono', Monaco, 'Cascadia Code', monospace;
         }
 
-        /* Assumptions Card */
-        .assumptions-card {
-            margin: 24px;
-            padding: 20px;
-            background: linear-gradient(135deg, #fef3c7 0%, #fde68a 100%);
-            border: 1px solid #f59e0b;
-            border-radius: var(--radius);
-            border-left: 4px solid #f59e0b;
+        /* ========== ASSUMPTIONS SECTION ========== */
+        .assumptions-section {
+            padding: 20px 24px;
+            background: linear-gradient(135deg, #fffbeb 0%, #fef3c7 100%);
+            border-top: 1px solid #fcd34d;
         }
 
-        .assumptions-card.assumptions-resolved {
-            background: linear-gradient(135deg, #d1fae5 0%, #a7f3d0 100%);
-            border-color: #10b981;
-            border-left-color: #10b981;
+        .assumptions-section.resolved {
+            background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%);
+            border-top-color: #6ee7b7;
         }
 
         .assumptions-header {
             display: flex;
             align-items: center;
-            gap: 10px;
-            margin-bottom: 12px;
-            font-weight: 600;
-            color: #92400e;
+            gap: 12px;
+            margin-bottom: 16px;
         }
 
-        .assumptions-card.assumptions-resolved .assumptions-header {
+        .assumptions-header svg {
+            width: 20px;
+            height: 20px;
+            color: #d97706;
+            flex-shrink: 0;
+        }
+
+        .assumptions-section.resolved .assumptions-header svg {
+            color: #059669;
+        }
+
+        .assumptions-title {
+            font-weight: 700;
+            font-size: 14px;
+            color: #92400e;
+            flex: 1;
+        }
+
+        .assumptions-section.resolved .assumptions-title {
             color: #065f46;
         }
 
         .assumptions-list {
             list-style: none;
-            margin: 0;
-            padding: 0;
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
         }
 
         .assumption-item {
             display: flex;
             align-items: flex-start;
-            gap: 10px;
-            padding: 8px 0;
-            border-bottom: 1px solid rgba(245, 158, 11, 0.2);
+            gap: 12px;
+            padding: 12px 16px;
+            background: rgba(255, 255, 255, 0.6);
+            border-radius: var(--radius);
+            border: 1px solid rgba(245, 158, 11, 0.2);
         }
 
-        .assumptions-card.assumptions-resolved .assumption-item {
-            border-bottom-color: rgba(16, 185, 129, 0.2);
-        }
-
-        .assumption-item:last-child {
-            border-bottom: none;
+        .assumptions-section.resolved .assumption-item {
+            border-color: rgba(16, 185, 129, 0.2);
         }
 
         .assumption-icon {
+            width: 16px;
+            height: 16px;
+            color: #d97706;
             flex-shrink: 0;
-            width: 20px;
-            height: 20px;
-            color: #f59e0b;
+            margin-top: 2px;
         }
 
-        .assumptions-card.assumptions-resolved .assumption-icon {
-            color: #10b981;
+        .assumptions-section.resolved .assumption-icon {
+            color: #059669;
         }
 
         .assumption-content {
@@ -495,13 +507,17 @@
 
         .assumption-label {
             font-weight: 600;
-            font-size: 14px;
-            color: var(--text-dark);
+            font-size: 13px;
+            color: var(--text-primary);
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            flex-wrap: wrap;
         }
 
         .assumption-description {
-            font-size: 13px;
-            color: var(--text-light);
+            font-size: 12px;
+            color: var(--text-secondary);
             margin-top: 2px;
         }
 
@@ -511,52 +527,57 @@
             padding: 2px 8px;
             background: rgba(245, 158, 11, 0.2);
             color: #92400e;
-            font-size: 12px;
+            font-size: 11px;
             font-weight: 600;
             border-radius: var(--radius-sm);
-            margin-left: 8px;
+            text-transform: uppercase;
+            letter-spacing: 0.3px;
         }
 
-        .assumptions-card.assumptions-resolved .assumption-badge {
+        .assumptions-section.resolved .assumption-badge {
             background: rgba(16, 185, 129, 0.2);
             color: #065f46;
         }
 
-        /* Totals */
-        .totals-section {
-            padding: 24px;
-            border-top: 1px solid var(--border-color);
-            background: var(--bg-light);
-        }
-
-        .totals-row {
-            display: flex;
-            justify-content: space-between;
-            padding: 8px 0;
-            font-size: 14px;
-        }
-
-        .totals-row.discount {
-            color: var(--success-color);
-        }
-
-        .totals-row.total {
-            font-size: 20px;
-            font-weight: 700;
+        .btn-text-small {
+            font-size: 12px;
+            font-weight: 600;
             color: var(--primary-color);
-            border-top: 2px solid var(--primary-color);
-            margin-top: 8px;
-            padding-top: 16px;
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 4px 8px;
+            border-radius: var(--radius-sm);
+            transition: var(--transition);
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
         }
 
-        /* Action Buttons */
-        .actions-section {
-            padding: 24px;
-            border-top: 1px solid var(--border-color);
+        .btn-text-small:hover {
+            background: var(--primary-light);
+        }
+
+        /* ========== ACTION RAIL ========== */
+        .action-rail {
             display: flex;
+            flex-direction: column;
             gap: 12px;
-            flex-wrap: wrap;
-            align-items: center;
+        }
+
+        .action-rail-card {
+            background: var(--bg-card);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-md);
+            padding: 20px;
+            border: 1px solid var(--border-color);
+        }
+
+        .action-rail-title {
+            font-size: 14px;
+            font-weight: 700;
+            color: var(--text-primary);
+            margin-bottom: 16px;
         }
 
         .btn {
@@ -564,7 +585,7 @@
             align-items: center;
             justify-content: center;
             gap: 8px;
-            padding: 12px 24px;
+            padding: 12px 20px;
             border-radius: var(--radius);
             font-size: 14px;
             font-weight: 600;
@@ -574,6 +595,7 @@
             text-decoration: none;
             white-space: nowrap;
             position: relative;
+            width: 100%;
         }
 
         .btn:disabled {
@@ -589,7 +611,7 @@
         .btn-primary:hover:not(:disabled) {
             background: var(--primary-hover);
             transform: translateY(-1px);
-            box-shadow: var(--shadow);
+            box-shadow: var(--shadow-md);
         }
 
         .btn-success {
@@ -600,7 +622,7 @@
         .btn-success:hover:not(:disabled) {
             background: var(--success-hover);
             transform: translateY(-1px);
-            box-shadow: var(--shadow);
+            box-shadow: var(--shadow-md);
         }
 
         .btn-danger {
@@ -611,32 +633,39 @@
         .btn-danger:hover:not(:disabled) {
             background: var(--danger-hover);
             transform: translateY(-1px);
-            box-shadow: var(--shadow);
+            box-shadow: var(--shadow-md);
         }
 
         .btn-secondary {
-            background: var(--bg-light);
-            color: var(--text-dark);
+            background: var(--bg-elevated);
+            color: var(--text-primary);
             border: 1px solid var(--border-color);
         }
 
         .btn-secondary:hover:not(:disabled) {
             background: var(--border-color);
+            border-color: var(--text-tertiary);
         }
 
         .btn-ghost {
             background: transparent;
-            color: var(--text-light);
+            color: var(--text-secondary);
         }
 
         .btn-ghost:hover:not(:disabled) {
-            color: var(--text-dark);
-            background: var(--bg-light);
+            color: var(--text-primary);
+            background: var(--bg-elevated);
         }
 
         .btn-large {
-            padding: 16px 32px;
-            font-size: 16px;
+            padding: 16px 24px;
+            font-size: 15px;
+        }
+
+        .btn-group {
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
         }
 
         /* Loading spinner */
@@ -662,91 +691,116 @@
             to { transform: rotate(360deg); }
         }
 
-        /* Comments Section */
-        .comments-section {
-            background: var(--bg-white);
+        /* ========== CONTACT CARD ========== */
+        .contact-list {
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
+        }
+
+        .contact-item {
+            display: flex;
+            flex-direction: column;
+            gap: 4px;
+        }
+
+        .contact-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .contact-value {
+            font-size: 14px;
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        .contact-value.secondary {
+            color: var(--text-secondary);
+            font-weight: 400;
+        }
+
+        /* ========== COMMENTS SECTION ========== */
+        .comments-card {
+            background: var(--bg-card);
             border-radius: var(--radius-lg);
             box-shadow: var(--shadow);
-            padding: 24px;
-            margin-bottom: 24px;
+            overflow: hidden;
         }
 
         .comment-form {
-            margin-top: 16px;
+            padding: 20px 24px;
+            background: var(--bg-elevated);
+            border-bottom: 1px solid var(--border-light);
         }
 
         .form-group {
-            margin-bottom: 16px;
+            margin-bottom: 12px;
+        }
+
+        .form-group:last-child {
+            margin-bottom: 0;
         }
 
         .form-label {
             display: block;
-            font-size: 14px;
-            font-weight: 500;
+            font-size: 13px;
+            font-weight: 600;
             margin-bottom: 6px;
-            color: var(--text-dark);
+            color: var(--text-secondary);
         }
 
         .form-label .required {
             color: var(--danger-color);
         }
 
-        .comment-input,
         .form-input,
-        .form-textarea {
+        .form-textarea,
+        select.form-input {
             width: 100%;
-            padding: 12px;
+            padding: 10px 14px;
             border: 1px solid var(--border-color);
             border-radius: var(--radius);
             font-size: 14px;
             font-family: inherit;
             transition: var(--transition);
-            background: var(--bg-white);
+            background: var(--bg-card);
         }
 
-        .comment-input {
+        .form-textarea {
             min-height: 80px;
             resize: vertical;
         }
 
-        .form-textarea {
-            min-height: 100px;
-            resize: vertical;
-        }
-
-        .comment-input:focus,
         .form-input:focus,
-        .form-textarea:focus {
+        .form-textarea:focus,
+        select.form-input:focus {
             outline: none;
             border-color: var(--primary-color);
             box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.1);
         }
 
-        .comment-input::placeholder,
-        .form-input::placeholder {
-            color: var(--text-light);
-        }
-
         .form-hint {
             font-size: 12px;
-            color: var(--text-light);
+            color: var(--text-tertiary);
             margin-top: 4px;
         }
 
         .comment-list {
-            margin-top: 24px;
+            padding: 20px 24px;
+            display: flex;
+            flex-direction: column;
+            gap: 16px;
         }
 
         .comment-item {
             padding: 16px;
-            background: var(--bg-light);
+            background: var(--bg-elevated);
             border-radius: var(--radius);
-            margin-bottom: 12px;
             border-left: 3px solid var(--primary-color);
-        }
-
-        .comment-item:last-child {
-            margin-bottom: 0;
         }
 
         .comment-header {
@@ -760,7 +814,7 @@
 
         .comment-author {
             font-weight: 600;
-            font-size: 14px;
+            font-size: 13px;
             display: flex;
             align-items: center;
             gap: 8px;
@@ -768,22 +822,23 @@
 
         .author-badge {
             font-size: 10px;
-            padding: 2px 6px;
+            padding: 2px 8px;
             border-radius: 4px;
             background: var(--primary-color);
             color: white;
             text-transform: uppercase;
-            font-weight: 600;
+            font-weight: 700;
+            letter-spacing: 0.3px;
         }
 
         .comment-time {
             font-size: 12px;
-            color: var(--text-light);
+            color: var(--text-tertiary);
         }
 
         .comment-text {
             font-size: 14px;
-            color: var(--text-dark);
+            color: var(--text-primary);
             line-height: 1.5;
             white-space: pre-wrap;
         }
@@ -791,7 +846,7 @@
         .empty-state {
             text-align: center;
             padding: 32px;
-            color: var(--text-light);
+            color: var(--text-tertiary);
         }
 
         .empty-state svg {
@@ -805,79 +860,47 @@
             font-size: 14px;
         }
 
-        /* Modal */
-        .modal-overlay {
-            display: none;
-            position: fixed;
-            top: 0;
-            left: 0;
-            right: 0;
-            bottom: 0;
-            background: rgba(0, 0, 0, 0.5);
-            z-index: 200;
-            align-items: center;
-            justify-content: center;
-            padding: 24px;
-            backdrop-filter: blur(4px);
-        }
-
-        .modal-overlay.active {
+        /* ========== ALERT BANNERS ========== */
+        .alert-banner {
+            padding: 16px 24px;
             display: flex;
-        }
-
-        .modal {
-            background: var(--bg-white);
-            border-radius: var(--radius-lg);
-            max-width: 500px;
-            width: 100%;
-            max-height: 90vh;
-            overflow-y: auto;
-            box-shadow: var(--shadow-lg);
-            animation: modalSlideIn 0.2s ease;
-        }
-
-        @keyframes modalSlideIn {
-            from {
-                transform: translateY(-20px);
-                opacity: 0;
-            }
-            to {
-                transform: translateY(0);
-                opacity: 1;
-            }
-        }
-
-        .modal-header {
-            padding: 24px 24px 0;
-        }
-
-        .modal-header h2 {
-            font-size: 20px;
-            font-weight: 700;
-            color: var(--text-dark);
-        }
-
-        .modal-body {
-            padding: 24px;
-        }
-
-        .modal-footer {
-            padding: 0 24px 24px;
-            display: flex;
+            align-items: flex-start;
             gap: 12px;
-            justify-content: flex-end;
-            flex-wrap: wrap;
         }
 
-        .modal-footer .btn {
+        .alert-warning {
+            background: var(--warning-light);
+            border-bottom: 1px solid #fcd34d;
+        }
+
+        .alert-success {
+            background: var(--success-light);
+            border-bottom: 1px solid #6ee7b7;
+        }
+
+        .alert-icon {
+            flex-shrink: 0;
+            width: 20px;
+            height: 20px;
+        }
+
+        .alert-content {
             flex: 1;
-            min-width: 120px;
         }
 
-        /* Success State */
-        .success-state {
+        .alert-content p {
+            font-size: 14px;
+            line-height: 1.5;
+            color: var(--text-primary);
+        }
+
+        /* ========== SUCCESS STATE ========== */
+        .success-panel {
+            background: var(--bg-card);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow);
+            padding: 48px;
             text-align: center;
-            padding: 48px 24px;
         }
 
         .success-icon {
@@ -892,148 +915,374 @@
             color: var(--success-color);
         }
 
-        .success-state h2 {
+        .success-panel h2 {
             font-size: 24px;
             font-weight: 700;
             margin-bottom: 8px;
-            color: var(--text-dark);
+            color: var(--text-primary);
         }
 
-        .success-state p {
-            color: var(--text-light);
-            margin-bottom: 24px;
+        .success-panel > p {
+            color: var(--text-secondary);
+            margin-bottom: 32px;
         }
 
         .approval-details {
-            background: var(--bg-light);
+            background: var(--bg-elevated);
             border-radius: var(--radius);
-            padding: 20px;
-            margin: 24px 0;
+            padding: 24px;
+            margin: 24px 0 32px;
             text-align: left;
+            max-width: 400px;
+            margin-left: auto;
+            margin-right: auto;
         }
 
         .approval-details-row {
             display: flex;
             justify-content: space-between;
-            padding: 8px 0;
-            border-bottom: 1px solid var(--border-color);
+            padding: 10px 0;
+            border-bottom: 1px solid var(--border-light);
+            font-size: 14px;
         }
 
         .approval-details-row:last-child {
             border-bottom: none;
         }
 
-        /* Mobile Responsive */
-        @media (max-width: 768px) {
-            .portal-header {
+        .approval-details-row span:first-child {
+            color: var(--text-secondary);
+        }
+
+        .approval-details-row strong {
+            color: var(--text-primary);
+            font-weight: 600;
+        }
+
+        /* ========== TOAST NOTIFICATIONS ========== */
+        .toast-container {
+            position: fixed;
+            top: 80px;
+            right: 24px;
+            z-index: 300;
+            display: flex;
+            flex-direction: column;
+            gap: 8px;
+            max-width: 400px;
+        }
+
+        .toast {
+            background: var(--bg-card);
+            border-radius: var(--radius);
+            padding: 16px 20px;
+            box-shadow: var(--shadow-lg);
+            display: flex;
+            align-items: flex-start;
+            gap: 12px;
+            animation: slideIn 0.3s ease;
+            border-left: 4px solid var(--primary-color);
+        }
+
+        .toast.success { border-left-color: var(--success-color); }
+        .toast.error { border-left-color: var(--danger-color); }
+        .toast.warning { border-left-color: var(--warning-color); }
+
+        @keyframes slideIn {
+            from { transform: translateX(100%); opacity: 0; }
+            to { transform: translateX(0); opacity: 1; }
+        }
+
+        @keyframes slideOut {
+            to { transform: translateX(100%); opacity: 0; }
+        }
+
+        .toast.hiding {
+            animation: slideOut 0.3s ease forwards;
+        }
+
+        .toast-icon {
+            flex-shrink: 0;
+            width: 20px;
+            height: 20px;
+        }
+
+        .toast-content {
+            flex: 1;
+        }
+
+        .toast-title {
+            font-weight: 600;
+            font-size: 14px;
+            margin-bottom: 2px;
+        }
+
+        .toast-message {
+            font-size: 13px;
+            color: var(--text-secondary);
+        }
+
+        .toast-close {
+            background: none;
+            border: none;
+            cursor: pointer;
+            padding: 4px;
+            color: var(--text-tertiary);
+            transition: var(--transition);
+        }
+
+        .toast-close:hover {
+            color: var(--text-primary);
+        }
+
+        /* ========== MODALS ========== */
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            top: 0;
+            left: 0;
+            right: 0;
+            bottom: 0;
+            background: rgba(15, 23, 42, 0.5);
+            z-index: 200;
+            align-items: center;
+            justify-content: center;
+            padding: 24px;
+            backdrop-filter: blur(4px);
+        }
+
+        .modal-overlay.active {
+            display: flex;
+        }
+
+        .modal {
+            background: var(--bg-card);
+            border-radius: var(--radius-xl);
+            max-width: 520px;
+            width: 100%;
+            max-height: 90vh;
+            overflow-y: auto;
+            box-shadow: 0 20px 25px -5px rgba(0, 0, 0, 0.1);
+            animation: modalSlideIn 0.2s ease;
+        }
+
+        @keyframes modalSlideIn {
+            from { transform: translateY(-20px) scale(0.98); opacity: 0; }
+            to { transform: translateY(0) scale(1); opacity: 1; }
+        }
+
+        .modal-header {
+            padding: 24px 24px 0;
+        }
+
+        .modal-header h2 {
+            font-size: 20px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .modal-body {
+            padding: 20px 24px;
+        }
+
+        .modal-footer {
+            padding: 0 24px 24px;
+            display: flex;
+            gap: 12px;
+            justify-content: flex-end;
+        }
+
+        .modal-footer .btn {
+            width: auto;
+            flex: 1;
+        }
+
+        /* ========== MOBILE RESPONSIVE ========== */
+        @media (max-width: 968px) {
+            .portal-main {
+                grid-template-columns: 1fr;
+                gap: 24px;
+            }
+
+            .content-secondary {
+                position: static;
+                order: -1;
+            }
+
+            .action-rail-card {
+                position: fixed;
+                bottom: 0;
+                left: 0;
+                right: 0;
+                border-radius: var(--radius-xl) var(--radius-xl) 0 0;
+                box-shadow: 0 -4px 20px rgba(0, 0, 0, 0.1);
+                z-index: 80;
+                padding: 20px 24px 24px;
+            }
+
+            .action-rail-title {
+                display: none;
+            }
+
+            .btn-group {
+                flex-direction: row;
+            }
+
+            .btn-group .btn-secondary,
+            .btn-group .btn-danger {
+                flex: 0 0 auto;
+                width: auto;
                 padding: 12px 16px;
             }
 
+            .btn-group .btn-success {
+                flex: 1;
+            }
+
+            body {
+                padding-bottom: 100px;
+            }
+
+            .totals-band {
+                position: static;
+            }
+
+            .totals-breakdown {
+                display: none;
+            }
+
+            .hero-title {
+                font-size: 24px;
+            }
+        }
+
+        @media (max-width: 640px) {
             .header-content {
-                flex-direction: column;
-                align-items: flex-start;
+                padding: 0 16px;
+            }
+
+            .header-quote-info .quote-id {
+                display: none;
+            }
+
+            .hero-section {
+                padding: 24px 16px;
+            }
+
+            .totals-band {
+                padding: 16px;
+            }
+
+            .total-grand .total-value {
+                font-size: 22px;
             }
 
             .portal-main {
                 padding: 16px;
             }
 
-            .quote-card-header {
-                padding: 20px;
+            .card-header,
+            .card-body,
+            .line-items-table th,
+            .line-items-table td,
+            .assumptions-section,
+            .comment-form,
+            .comment-list {
+                padding-left: 16px;
+                padding-right: 16px;
             }
 
-            .quote-title-section h1 {
-                font-size: 20px;
+            .line-items-table {
+                font-size: 13px;
             }
 
-            .quote-meta {
-                gap: 16px;
-            }
-
-            .customer-section {
-                padding: 20px;
-                grid-template-columns: 1fr;
-            }
-
-            .line-items-section {
-                padding: 20px;
-            }
-
-            .actions-section {
-                flex-direction: column;
-                padding: 20px;
-            }
-
-            .actions-section .btn {
-                width: 100%;
+            .line-items-table th,
+            .line-items-table td {
+                padding: 12px 8px;
             }
 
             .modal {
                 margin: 16px;
-            }
-
-            .modal-footer {
-                flex-direction: column;
-            }
-
-            .modal-footer .btn {
-                width: 100%;
+                max-height: calc(100vh - 32px);
             }
 
             .toast-container {
                 left: 16px;
                 right: 16px;
                 top: auto;
-                bottom: 16px;
+                bottom: 100px;
+                max-width: none;
             }
         }
 
-        /* Print Styles */
+        /* ========== PRINT STYLES ========== */
         @media print {
             .portal-header,
-            .actions-section,
-            .comments-section,
+            .totals-band,
+            .action-rail,
+            .comments-card,
             .modal-overlay,
-            .toast-container {
+            .toast-container,
+            .btn-text-small {
                 display: none !important;
-            }
-
-            .quote-card {
-                box-shadow: none;
-                border: 1px solid var(--border-color);
             }
 
             body {
                 background: white;
+                padding-bottom: 0;
+            }
+
+            .hero-section {
+                background: white;
+                border-bottom: 2px solid var(--border-color);
+            }
+
+            .card {
+                box-shadow: none;
+                border: 1px solid var(--border-color);
+                break-inside: avoid;
             }
 
             .portal-main {
+                display: block;
                 padding: 0;
                 max-width: 100%;
             }
+
+            .content-primary,
+            .content-secondary {
+                display: block;
+            }
+
+            .content-secondary {
+                margin-top: 24px;
+            }
+
+            .assumptions-section {
+                background: white !important;
+                border: 1px solid var(--border-color);
+            }
         }
 
-        /* Reduced motion */
+        /* ========== REDUCED MOTION ========== */
         @media (prefers-reduced-motion: reduce) {
-            *,
-            *::before,
-            *::after {
+            *, *::before, *::after {
                 animation-duration: 0.01ms !important;
                 animation-iteration-count: 1 !important;
                 transition-duration: 0.01ms !important;
             }
         }
 
-        /* High contrast mode */
+        /* ========== HIGH CONTRAST ========== */
         @media (prefers-contrast: high) {
             :root {
                 --border-color: #000;
-                --text-light: #000;
+                --text-secondary: #000;
             }
         }
     </style>
 </head>
 <body>
+    <!-- Header -->
     <header class="portal-header">
         <div class="header-content">
             <div class="company-branding">
@@ -1042,60 +1291,117 @@
                 {% endif %}
                 <span class="company-name">{{ branding.company_name | default(value="Your Company") }}</span>
             </div>
-            <div class="quote-badge">
-                <span>Quote {{ quote.quote_id | default(value="Q-0000") }}</span>
+            <div class="header-quote-info">
+                <span class="quote-id">{{ quote.quote_id | default(value="Q-0000") }}</span>
                 <span class="status-badge status-{{ quote.status | default(value="sent") }}">{{ quote.status | default(value="Sent") }}</span>
             </div>
         </div>
     </header>
 
+    <!-- Hero Section -->
+    <section class="hero-section">
+        <div class="hero-content">
+            <div class="hero-customer">Quote for</div>
+            <h1 class="hero-title">{{ customer.name | default(value="Customer Name") }}</h1>
+            <div class="hero-meta">
+                <div class="hero-meta-item">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 7V3m8 4V3m-9 8h10M5 21h14a2 2 0 002-2V7a2 2 0 00-2-2H5a2 2 0 00-2 2v12a2 2 0 002 2z"/></svg>
+                    <span>Created {{ quote.created_at | default(value="—") }}</span>
+                </div>
+                <div class="hero-meta-item">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                    <span>Valid until {{ quote.valid_until | default(value="—") }}</span>
+                </div>
+                <div class="hero-meta-item">
+                    <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12h6m-6 4h6m2 5H7a2 2 0 01-2-2V5a2 2 0 012-2h5.586a1 1 0 01.707.293l5.414 5.414a1 1 0 01.293.707V19a2 2 0 01-2 2z"/></svg>
+                    <span>{{ quote.term_months | default(value=12) }} month term</span>
+                </div>
+            </div>
+        </div>
+    </section>
+
+    <!-- Totals Band (Sticky) -->
+    {% if quote.status != "approved" and quote.status != "declined" and quote.status != "expired" %}
+    <div class="totals-band">
+        <div class="totals-band-content">
+            <div class="totals-breakdown">
+                <div class="total-item compact">
+                    <span class="total-label">Subtotal</span>
+                    <span class="total-value font-mono">{{ quote.subtotal | default(value="$0.00") }}</span>
+                </div>
+                {% if quote.discount_total %}
+                <div class="total-item compact">
+                    <span class="total-label">Discount</span>
+                    <span class="total-value font-mono discount">-{{ quote.discount_total }}</span>
+                </div>
+                {% endif %}
+                {% if quote.tax_amount %}
+                <div class="total-item compact">
+                    <span class="total-label">Tax ({{ quote.tax_rate | default(value="0%") }})</span>
+                    <span class="total-value font-mono">{{ quote.tax_amount }}</span>
+                </div>
+                {% endif %}
+            </div>
+            <div class="total-grand">
+                <span class="total-label">Total Amount</span>
+                <span class="total-value font-mono">{{ quote.total | default(value="$0.00") }}</span>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Toast Container -->
+    <div class="toast-container" id="toastContainer" role="status" aria-live="polite" aria-atomic="true"></div>
+
+    <!-- Alert Banners -->
+    {% if quote.expires_soon %}
+    <div class="alert-banner alert-warning" role="alert">
+        <svg class="alert-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+        </svg>
+        <div class="alert-content">
+            <p>This quote expires on <strong>{{ quote.valid_until }}</strong>. Please respond before the expiration date.</p>
+        </div>
+    </div>
+    {% endif %}
+
+    {% if quote.status == "approved" %}
+    <div class="alert-banner alert-success" role="alert">
+        <svg class="alert-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <div class="alert-content">
+            <p>This quote has been approved. Thank you for your business!</p>
+        </div>
+    </div>
+    {% elif quote.status == "declined" %}
+    <div class="alert-banner alert-warning" role="alert">
+        <svg class="alert-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <div class="alert-content">
+            <p>This quote has been declined.</p>
+        </div>
+    </div>
+    {% elif quote.status == "expired" %}
+    <div class="alert-banner alert-warning" role="alert">
+        <svg class="alert-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+        </svg>
+        <div class="alert-content">
+            <p>This quote has expired and can no longer be approved online.</p>
+        </div>
+    </div>
+    {% endif %}
+
+    <!-- Main Content -->
     <main class="portal-main">
-        <!-- Toast Container -->
-        <div class="toast-container" id="toastContainer" role="status" aria-live="polite" aria-atomic="true"></div>
-
-        {% if quote.expires_soon %}
-        <div class="alert alert-warning" role="alert">
-            <svg class="alert-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-            </svg>
-            <div class="alert-content">
-                <p>This quote expires on <strong>{{ quote.valid_until }}</strong>. Please respond before the expiration date.</p>
-            </div>
-        </div>
-        {% endif %}
-
         {% if quote.status == "approved" %}
-        <div class="alert alert-success" role="alert">
-            <svg class="alert-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
-            <div class="alert-content">
-                <p>This quote has been approved. Thank you for your business!</p>
-            </div>
-        </div>
-        {% elif quote.status == "declined" or quote.status == "expired" %}
-        <div class="alert alert-warning" role="alert">
-            <svg class="alert-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
-            </svg>
-            <div class="alert-content">
-                <p>
-                    {% if quote.status == "declined" %}
-                        This quote has been declined.
-                    {% else %}
-                        This quote has expired and can no longer be approved online.
-                    {% endif %}
-                </p>
-            </div>
-        </div>
-        {% endif %}
-
-        <article class="quote-card">
-            {% if quote.status == "approved" %}
-            <!-- Success State -->
-            <div class="success-state">
+        <!-- Approved State -->
+        <div class="content-primary">
+            <div class="success-panel">
                 <div class="success-icon">
-                    <svg width="40" height="40" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                    <svg width="40" height="40" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="3" d="M5 13l4 4L19 7"/>
                     </svg>
                 </div>
@@ -1121,248 +1427,248 @@
                     </div>
                 </div>
 
-                <a href="/quote/{{ quote.token }}/download" class="btn btn-primary btn-large">
-                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <a href="/quote/{{ quote.token }}/download" class="btn btn-primary btn-large" style="width: auto; display: inline-flex;">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
                     </svg>
                     Download PDF
                 </a>
             </div>
-            {% elif quote.status == "declined" or quote.status == "expired" %}
-            <div class="success-state">
-                <h2>
-                    {% if quote.status == "declined" %}
-                        Quote Declined
-                    {% else %}
-                        Quote Expired
-                    {% endif %}
-                </h2>
+        </div>
+        {% elif quote.status == "declined" or quote.status == "expired" %}
+        <!-- Declined/Expired State -->
+        <div class="content-primary">
+            <div class="success-panel">
+                <h2>{% if quote.status == "declined" %}Quote Declined{% else %}Quote Expired{% endif %}</h2>
                 <p>Download the PDF for a complete record of this quote.</p>
-
-                <a href="/quote/{{ quote.token }}/download" class="btn btn-secondary">
-                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                <a href="/quote/{{ quote.token }}/download" class="btn btn-secondary btn-large" style="width: auto; display: inline-flex; margin-top: 24px;">
+                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
                         <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
                     </svg>
                     Download PDF
                 </a>
             </div>
-            {% else %}
-            <!-- Quote Details -->
-            <div class="quote-card-header">
-                <div class="quote-title-section">
-                    <h1>Quote for {{ customer.name | default(value="Customer") }}</h1>
+        </div>
+        {% else %}
+        <!-- Quote Details (Primary Column) -->
+        <div class="content-primary">
+            <!-- Line Items Card -->
+            <article class="card">
+                <div class="card-header">
+                    <h2 class="card-title">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 5H7a2 2 0 00-2 2v12a2 2 0 002 2h10a2 2 0 002-2V7a2 2 0 00-2-2h-2M9 5a2 2 0 002 2h2a2 2 0 002-2M9 5a2 2 0 012-2h2a2 2 0 012 2"/></svg>
+                        Line Items
+                    </h2>
                 </div>
-                <div class="quote-meta">
-                    <div class="meta-item">
-                        <span class="meta-label">Quote Date</span>
-                        <span class="meta-value">{{ quote.created_at | default(value="—") }}</span>
-                    </div>
-                    <div class="meta-item">
-                        <span class="meta-label">Valid Until</span>
-                        <span class="meta-value">{{ quote.valid_until | default(value="—") }}</span>
-                    </div>
-                    <div class="meta-item">
-                        <span class="meta-label">Term</span>
-                        <span class="meta-value">{{ quote.term_months | default(value=12) }} months</span>
-                    </div>
+                <div class="card-body no-padding">
+                    <table class="line-items-table" role="table" aria-label="Quote line items">
+                        <thead>
+                            <tr role="row">
+                                <th role="columnheader" scope="col">Product/Service</th>
+                                <th role="columnheader" scope="col" class="text-center">Qty</th>
+                                <th role="columnheader" scope="col" class="text-right">Unit Price</th>
+                                <th role="columnheader" scope="col" class="text-right">Total</th>
+                            </tr>
+                        </thead>
+                        <tbody>
+                            {% for line in quote.lines | default(value=[]) %}
+                            <tr role="row">
+                                <td role="cell">
+                                    <div class="product-info">
+                                        <h4>{{ line.product_name }}</h4>
+                                        <p class="product-description">{{ line.description | default(value="") }}</p>
+                                        {% if line.sku %}
+                                        <p class="product-sku">SKU: {{ line.sku }}</p>
+                                        {% endif %}
+                                    </div>
+                                </td>
+                                <td role="cell" class="text-center font-mono">{{ line.quantity }}</td>
+                                <td role="cell" class="text-right font-mono">{{ line.unit_price }}</td>
+                                <td role="cell" class="text-right font-mono"><strong>{{ line.total }}</strong></td>
+                            </tr>
+                            {% endfor %}
+                        </tbody>
+                    </table>
                 </div>
-            </div>
 
-            <div class="customer-section">
-                <div class="info-block">
-                    <h3>Prepared For</h3>
-                    <p><strong>{{ customer.name | default(value="Customer Name") }}</strong></p>
-                    <p class="text-light">{{ customer.contact_name | default(value="") }}</p>
-                    <p class="text-light">{{ customer.email | default(value="") }}</p>
-                    <p class="text-light">{{ customer.phone | default(value="") }}</p>
-                </div>
-                <div class="info-block">
-                    <h3>Quote Details</h3>
-                    <p><strong>Sales Rep:</strong> {{ rep.name | default(value="—") }}</p>
-                    <p class="text-light"><strong>Email:</strong> {{ rep.email | default(value="—") }}</p>
-                    <p class="text-light"><strong>Payment Terms:</strong> {{ quote.payment_terms | default(value="Net 30") }}{% if not quote.payment_terms_explicit %} <span class="assumption-badge">Assumed</span>{% endif %}</p>
-                </div>
-            </div>
-
-            <div class="line-items-section">
-                <h2 class="section-title">Line Items</h2>
-                <table class="line-items-table" role="table" aria-label="Quote line items">
-                    <thead>
-                        <tr role="row">
-                            <th role="columnheader" scope="col">Product/Service</th>
-                            <th role="columnheader" scope="col" class="text-center">Qty</th>
-                            <th role="columnheader" scope="col" class="text-right">Unit Price</th>
-                            <th role="columnheader" scope="col" class="text-right">Total</th>
-                        </tr>
-                    </thead>
-                    <tbody>
-                        {% for line in quote.lines | default(value=[]) %}
-                        <tr role="row">
-                            <td role="cell">
-                                <div class="product-info">
-                                    <h4>{{ line.product_name }}</h4>
-                                    <p class="product-description">{{ line.description | default(value="") }}</p>
-                                    {% if line.sku %}
-                                    <p class="product-sku">SKU: {{ line.sku }}</p>
-                                    {% endif %}
+                <!-- Assumptions Section (Inside Card) -->
+                <div class="assumptions-section {% if not quote.has_assumptions %}resolved{% endif %}">
+                    <div class="assumptions-header">
+                        {% if quote.has_assumptions %}
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
+                        </svg>
+                        <span class="assumptions-title">Assumptions Made</span>
+                        {% else %}
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                        </svg>
+                        <span class="assumptions-title">All Values Confirmed</span>
+                        {% endif %}
+                        <button class="btn-text-small" onclick="openAssumptionsModal()">
+                            <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-right: 4px;">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
+                            </svg>
+                            Edit
+                        </button>
+                    </div>
+                    <ul class="assumptions-list">
+                        {% if quote.has_assumptions %}
+                            {% for assumption in quote.assumptions %}
+                            <li class="assumption-item">
+                                <svg class="assumption-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                </svg>
+                                <div class="assumption-content">
+                                    <span class="assumption-label">
+                                        {{ assumption.label }}: {{ assumption.value }}
+                                        <span class="assumption-badge">Assumed</span>
+                                    </span>
+                                    <p class="assumption-description">{{ assumption.description }}</p>
                                 </div>
-                            </td>
-                            <td role="cell" class="text-center font-mono">{{ line.quantity }}</td>
-                            <td role="cell" class="text-right font-mono">{{ line.unit_price }}</td>
-                            <td role="cell" class="text-right font-mono"><strong>{{ line.total }}</strong></td>
-                        </tr>
+                            </li>
+                            {% endfor %}
+                        {% else %}
+                            <li class="assumption-item">
+                                <svg class="assumption-icon" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                                </svg>
+                                <div class="assumption-content">
+                                    <span class="assumption-label">
+                                        All assumptions resolved
+                                        <span class="assumption-badge">Confirmed</span>
+                                    </span>
+                                    <p class="assumption-description">Currency, tax rate, payment terms, and billing country have all been explicitly set.</p>
+                                </div>
+                            </li>
+                        {% endif %}
+                    </ul>
+                </div>
+            </article>
+
+            <!-- Comments Section -->
+            <section class="comments-card" aria-labelledby="comments-heading">
+                <div class="comment-form">
+                    <h2 class="card-title" id="comments-heading" style="margin-bottom: 12px;">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/></svg>
+                        Questions or Comments
+                    </h2>
+                    <p style="color: var(--text-secondary); margin-bottom: 16px; font-size: 14px;">Have questions about this quote? Add a comment and your sales rep will be notified.</p>
+                    
+                    <form onsubmit="submitComment(event)" aria-label="Add a comment">
+                        <div class="form-group">
+                            <textarea 
+                                class="form-textarea" 
+                                placeholder="Type your question or comment here..." 
+                                required
+                                aria-label="Your comment"
+                                maxlength="2000"
+                            ></textarea>
+                            <p class="form-hint">Maximum 2000 characters</p>
+                        </div>
+                        <div style="display: flex; justify-content: flex-end;">
+                            <button type="submit" class="btn btn-primary" style="width: auto;">
+                                <span class="spinner" aria-hidden="true"></span>
+                                <span class="btn-text">Post Comment</span>
+                            </button>
+                        </div>
+                    </form>
+                </div>
+
+                <div class="comment-list" id="commentList" role="list" aria-label="Comments">
+                    {% if comments and comments | length > 0 %}
+                        {% for comment in comments %}
+                        <div class="comment-item" role="listitem">
+                            <div class="comment-header">
+                                <span class="comment-author">
+                                    {{ comment.author }}
+                                    {% if comment.is_customer %}
+                                    <span class="author-badge">Customer</span>
+                                    {% endif %}
+                                </span>
+                                <span class="comment-time">{{ comment.timestamp }}</span>
+                            </div>
+                            <p class="comment-text">{{ comment.text }}</p>
+                        </div>
                         {% endfor %}
-                    </tbody>
-                </table>
-            </div>
-
-            {% if quote.has_assumptions %}
-            <div class="assumptions-card">
-                <div class="assumptions-header">
-                    <svg class="assumption-icon" width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 9v2m0 4h.01m-6.938 4h13.856c1.54 0 2.502-1.667 1.732-3L13.732 4c-.77-1.333-2.694-1.333-3.464 0L3.34 16c-.77 1.333.192 3 1.732 3z"/>
-                    </svg>
-                    <span>Assumptions Made</span>
-                    <button class="btn btn-secondary btn-sm" onclick="openAssumptionsModal()" style="margin-left: auto; font-size: 12px; padding: 6px 12px;">
-                        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-right: 4px;">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-                        </svg>
-                        Edit Assumptions
-                    </button>
-                </div>
-                <ul class="assumptions-list">
-                    {% for assumption in quote.assumptions %}
-                    <li class="assumption-item">
-                        <svg class="assumption-icon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                        </svg>
-                        <div class="assumption-content">
-                            <span class="assumption-label">{{ assumption.label }}: {{ assumption.value }}<span class="assumption-badge">Assumed</span></span>
-                            <p class="assumption-description">{{ assumption.description }}</p>
+                    {% else %}
+                        <div class="empty-state">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
+                            </svg>
+                            <p>No comments yet. Be the first to ask a question!</p>
                         </div>
-                    </li>
-                    {% endfor %}
-                </ul>
-            </div>
-            {% else %}
-            <div class="assumptions-card assumptions-resolved">
-                <div class="assumptions-header">
-                    <svg class="assumption-icon" width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z"/>
-                    </svg>
-                    <span>All Values Confirmed</span>
-                    <span class="assumption-badge">No Assumptions</span>
-                    <button class="btn btn-secondary btn-sm" onclick="openAssumptionsModal()" style="margin-left: auto; font-size: 12px; padding: 6px 12px;">
-                        <svg width="14" height="14" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-right: 4px;">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M11 5H6a2 2 0 00-2 2v11a2 2 0 002 2h11a2 2 0 002-2v-5m-1.414-9.414a2 2 0 112.828 2.828L11.828 15H9v-2.828l8.586-8.586z"/>
-                        </svg>
-                        Edit
-                    </button>
+                    {% endif %}
                 </div>
-                <p class="assumption-description" style="margin-left: 30px;">Currency, tax rate, payment terms, and billing country have all been explicitly set.</p>
-            </div>
-            {% endif %}
+            </section>
+        </div>
 
-            <div class="totals-section">
-                <div class="totals-row">
-                    <span>Subtotal</span>
-                    <span class="font-mono">{{ quote.subtotal | default(value="$0.00") }}</span>
-                </div>
-                {% if quote.discount_total %}
-                <div class="totals-row discount">
-                    <span>Discount</span>
-                    <span class="font-mono">-{{ quote.discount_total }}</span>
-                </div>
-                {% endif %}
-                {% if quote.tax_amount %}
-                <div class="totals-row">
-                    <span>Tax ({{ quote.tax_rate | default(value="0%") }}){% if not quote.tax_rate_explicit %} <span class="assumption-badge">Assumed</span>{% endif %}</span>
-                    <span class="font-mono">{{ quote.tax_amount }}</span>
-                </div>
-                {% endif %}
-                <div class="totals-row total">
-                    <span>Total</span>
-                    <span class="font-mono">{{ quote.total | default(value="$0.00") }}</span>
-                </div>
-            </div>
-
-            <div class="actions-section">
-                <button class="btn btn-success btn-large" onclick="openApproveModal()">
-                    <span class="spinner" aria-hidden="true"></span>
-                    <span class="btn-text">
-                        <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
-                        </svg>
-                        Approve Quote
-                    </span>
-                </button>
-                <button class="btn btn-danger" onclick="openRejectModal()">
-                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
-                    </svg>
-                    Decline
-                </button>
-                <a href="/quote/{{ quote.token }}/download" class="btn btn-secondary">
-                    <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                        <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
-                    </svg>
-                    Download PDF
-                </a>
-            </div>
-            {% endif %}
-        </article>
-
-        <!-- Comments Section -->
-        {% if quote.status != "approved" and quote.status != "declined" and quote.status != "expired" %}
-        <section class="comments-section" aria-labelledby="comments-heading">
-            <h2 class="section-title" id="comments-heading">Questions or Comments</h2>
-            <p style="color: var(--text-light); margin-bottom: 16px; font-size: 14px;">Have questions about this quote? Add a comment and your sales rep will be notified.</p>
-            
-            <form class="comment-form" onsubmit="submitComment(event)" aria-label="Add a comment">
-                <div class="form-group">
-                    <textarea 
-                        class="comment-input" 
-                        placeholder="Type your question or comment here..." 
-                        required
-                        aria-label="Your comment"
-                        maxlength="2000"
-                    ></textarea>
-                    <p class="form-hint">Maximum 2000 characters</p>
-                </div>
-                <div style="display: flex; justify-content: flex-end;">
-                    <button type="submit" class="btn btn-primary">
-                        <span class="spinner" aria-hidden="true"></span>
-                        <span class="btn-text">Post Comment</span>
-                    </button>
-                </div>
-            </form>
-
-            <div class="comment-list" id="commentList" role="list" aria-label="Comments">
-                {% if comments and comments | length > 0 %}
-                    {% for comment in comments %}
-                    <div class="comment-item" role="listitem">
-                        <div class="comment-header">
-                            <span class="comment-author">
-                                {{ comment.author }}
-                                {% if comment.is_customer %}
-                                <span class="author-badge">Customer</span>
-                                {% endif %}
+        <!-- Action Rail (Secondary Column) -->
+        <aside class="content-secondary">
+            <!-- Primary Actions Card -->
+            <div class="action-rail">
+                <div class="action-rail-card">
+                    <h3 class="action-rail-title">Quote Actions</h3>
+                    <div class="btn-group">
+                        <button class="btn btn-success btn-large" onclick="openApproveModal()">
+                            <span class="spinner" aria-hidden="true"></span>
+                            <span class="btn-text">
+                                <svg width="20" height="20" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M5 13l4 4L19 7"/>
+                                </svg>
+                                Approve Quote
                             </span>
-                            <span class="comment-time">{{ comment.timestamp }}</span>
+                        </button>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn btn-danger" onclick="openRejectModal()" style="flex: 1;">
+                                <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M6 18L18 6M6 6l12 12"/>
+                                </svg>
+                                Decline
+                            </button>
+                            <a href="/quote/{{ quote.token }}/download" class="btn btn-secondary" style="flex: 1;">
+                                <svg width="18" height="18" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4"/>
+                                </svg>
+                                PDF
+                            </a>
                         </div>
-                        <p class="comment-text">{{ comment.text }}</p>
                     </div>
-                    {% endfor %}
-                {% else %}
-                    <div class="empty-state">
-                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
-                            <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M8 12h.01M12 12h.01M16 12h.01M21 12c0 4.418-4.03 8-9 8a9.863 9.863 0 01-4.255-.949L3 20l1.395-3.72C3.512 15.042 3 13.574 3 12c0-4.418 4.03-8 9-8s9 3.582 9 8z"/>
-                        </svg>
-                        <p>No comments yet. Be the first to ask a question!</p>
+                </div>
+
+                <!-- Contact Info Card -->
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M16 7a4 4 0 11-8 0 4 4 0 018 0zM12 14a7 7 0 00-7 7h14a7 7 0 00-7-7z"/></svg>
+                            Contact Information
+                        </h3>
                     </div>
-                {% endif %}
+                    <div class="card-body">
+                        <div class="contact-list">
+                            <div class="contact-item">
+                                <span class="contact-label">Prepared For</span>
+                                <span class="contact-value">{{ customer.name | default(value="—") }}</span>
+                                <span class="contact-value secondary">{{ customer.contact_name | default(value="") }}</span>
+                                <span class="contact-value secondary">{{ customer.email | default(value="") }}</span>
+                            </div>
+                            <div class="contact-item">
+                                <span class="contact-label">Sales Rep</span>
+                                <span class="contact-value">{{ rep.name | default(value="—") }}</span>
+                                <span class="contact-value secondary">{{ rep.email | default(value="—") }}</span>
+                            </div>
+                            <div class="contact-item">
+                                <span class="contact-label">Payment Terms</span>
+                                <span class="contact-value">
+                                    {{ quote.payment_terms | default(value="Net 30") }}
+                                    {% if not quote.payment_terms_explicit %}<span class="assumption-badge">Assumed</span>{% endif %}
+                                </span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
             </div>
-        </section>
+        </aside>
         {% endif %}
     </main>
 
@@ -1373,7 +1679,7 @@
                 <h2 id="approve-title">Approve Quote</h2>
             </div>
             <div class="modal-body">
-                <p style="margin-bottom: 16px; color: var(--text-light);">You are about to approve quote <strong>{{ quote.quote_id }}</strong> for <strong>{{ quote.total | default(value="$0.00") }}</strong>.</p>
+                <p style="margin-bottom: 20px; color: var(--text-secondary); font-size: 14px;">You are about to approve quote <strong>{{ quote.quote_id }}</strong> for <strong>{{ quote.total | default(value="$0.00") }}</strong>.</p>
                 <form id="approveForm" onsubmit="submitApproval(event)">
                     <div class="form-group">
                         <label class="form-label" for="approverName">
@@ -1433,7 +1739,7 @@
                 <h2 id="reject-title">Decline Quote</h2>
             </div>
             <div class="modal-body">
-                <p style="margin-bottom: 16px; color: var(--text-light);">Please let us know why you're declining this quote. Your feedback helps us serve you better.</p>
+                <p style="margin-bottom: 20px; color: var(--text-secondary); font-size: 14px;">Please let us know why you're declining this quote. Your feedback helps us serve you better.</p>
                 <form id="rejectForm" onsubmit="submitRejection(event)">
                     <div class="form-group">
                         <label class="form-label" for="rejectionReason">
@@ -1464,12 +1770,12 @@
 
     <!-- Edit Assumptions Modal -->
     <div class="modal-overlay" id="assumptionsModal" role="dialog" aria-labelledby="assumptions-title" aria-modal="true">
-        <div class="modal" style="max-width: 600px;">
+        <div class="modal" style="max-width: 560px;">
             <div class="modal-header">
                 <h2 id="assumptions-title">Edit Quote Assumptions</h2>
             </div>
             <div class="modal-body">
-                <p style="margin-bottom: 16px; color: var(--text-light);">Update the assumptions below. Changes will recalculate the quote totals immediately.</p>
+                <p style="margin-bottom: 20px; color: var(--text-secondary); font-size: 14px;">Update the assumptions below. Changes will recalculate the quote totals immediately.</p>
                 <form id="assumptionsForm" onsubmit="submitAssumptions(event)">
                     <div class="form-group">
                         <label class="form-label" for="taxRate">Tax Rate</label>
@@ -1518,12 +1824,6 @@
                         <p class="form-hint">Currency for this quote</p>
                     </div>
                 </form>
-                
-                <!-- Live preview of totals -->
-                <div id="assumptionsPreview" style="margin-top: 24px; padding: 16px; background: var(--bg-light); border-radius: var(--radius); display: none;">
-                    <h3 style="font-size: 14px; font-weight: 600; margin-bottom: 12px; color: var(--text-dark);">Updated Totals Preview</h3>
-                    <div id="assumptionsPreviewContent"></div>
-                </div>
             </div>
             <div class="modal-footer">
                 <button type="button" class="btn btn-secondary" onclick="closeModal('assumptionsModal')">Cancel</button>
@@ -1572,7 +1872,6 @@
             
             container.appendChild(toast);
             
-            // Auto-remove after duration
             setTimeout(() => {
                 toast.classList.add('hiding');
                 setTimeout(() => toast.remove(), 300);
@@ -1589,6 +1888,12 @@
         function openRejectModal() {
             document.getElementById('rejectModal').classList.add('active');
             document.getElementById('rejectionReason').focus();
+            document.body.style.overflow = 'hidden';
+        }
+
+        function openAssumptionsModal() {
+            document.getElementById('assumptionsModal').classList.add('active');
+            document.getElementById('taxRate').focus();
             document.body.style.overflow = 'hidden';
         }
 
@@ -1629,7 +1934,6 @@
                 if (data.success) {
                     showToast('Quote approved successfully!', 'success');
                     closeModal('approveModal');
-                    // Reload after a short delay to show success state
                     setTimeout(() => window.location.reload(), 1500);
                 } else {
                     const errorMsg = data.recovery_hint 
@@ -1708,10 +2012,8 @@
                 if (data.success) {
                     textarea.value = '';
                     
-                    // Add comment to list
                     const commentList = document.getElementById('commentList');
                     
-                    // Remove empty state if present
                     const emptyState = commentList.querySelector('.empty-state');
                     if (emptyState) {
                         emptyState.remove();
@@ -1737,6 +2039,58 @@
                     const errorMsg = data.recovery_hint 
                         ? `${data.message || 'Error'} ${data.recovery_hint}` 
                         : (data.message || 'Failed to post comment. Please try again.');
+                    showToast(errorMsg, 'error');
+                }
+            } catch (error) {
+                console.error('Error:', error);
+                showToast('Connection error. Please check your network and try again.', 'error');
+            } finally {
+                setLoading(submitBtn, false);
+            }
+        }
+
+        // Submit assumptions update
+        async function submitAssumptions(event) {
+            event.preventDefault();
+            const form = event.target;
+            const submitBtn = form.closest('.modal').querySelector('.btn-primary');
+            
+            setLoading(submitBtn, true);
+            
+            const formData = new FormData(form);
+            const taxRate = parseFloat(formData.get('taxRate'));
+            const paymentTerms = formData.get('paymentTerms');
+            const billingCountry = formData.get('billingCountry').trim().toUpperCase();
+            const currency = formData.get('currency');
+            
+            if (billingCountry && billingCountry.length !== 2) {
+                showToast('Billing country must be a 2-letter ISO code (e.g., US, UK, CA)', 'error');
+                setLoading(submitBtn, false);
+                return;
+            }
+            
+            try {
+                const response = await fetch(`/quote/{{ quote.token }}/assumptions`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        tax_rate: taxRate,
+                        payment_terms: paymentTerms,
+                        billing_country: billingCountry || null,
+                        currency: currency
+                    })
+                });
+                
+                const data = await response.json();
+                
+                if (data.success) {
+                    showToast(data.message, 'success');
+                    closeModal('assumptionsModal');
+                    setTimeout(() => window.location.reload(), 1000);
+                } else {
+                    const errorMsg = data.recovery_hint 
+                        ? `${data.message || 'Error'} ${data.recovery_hint}` 
+                        : (data.message || 'Failed to update assumptions. Please try again.');
                     showToast(errorMsg, 'error');
                 }
             } catch (error) {
@@ -1780,67 +2134,6 @@
         window.addEventListener('online', () => {
             showToast('You are back online!', 'success');
         });
-
-        // Assumptions modal functions
-        function openAssumptionsModal() {
-            document.getElementById('assumptionsModal').classList.add('active');
-            document.getElementById('taxRate').focus();
-            document.body.style.overflow = 'hidden';
-        }
-
-        // Submit assumptions update
-        async function submitAssumptions(event) {
-            event.preventDefault();
-            const form = event.target;
-            const submitBtn = form.closest('.modal').querySelector('.btn-primary');
-            
-            setLoading(submitBtn, true);
-            
-            const formData = new FormData(form);
-            const taxRate = parseFloat(formData.get('taxRate'));
-            const paymentTerms = formData.get('paymentTerms');
-            const billingCountry = formData.get('billingCountry').trim().toUpperCase();
-            const currency = formData.get('currency');
-            
-            // Validate billing country (2 letters if provided)
-            if (billingCountry && billingCountry.length !== 2) {
-                showToast('Billing country must be a 2-letter ISO code (e.g., US, UK, CA)', 'error');
-                setLoading(submitBtn, false);
-                return;
-            }
-            
-            try {
-                const response = await fetch(`/quote/{{ quote.token }}/assumptions`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
-                        tax_rate: taxRate,
-                        payment_terms: paymentTerms,
-                        billing_country: billingCountry || null,
-                        currency: currency
-                    })
-                });
-                
-                const data = await response.json();
-                
-                if (data.success) {
-                    showToast(data.message, 'success');
-                    closeModal('assumptionsModal');
-                    // Reload to show updated totals
-                    setTimeout(() => window.location.reload(), 1000);
-                } else {
-                    const errorMsg = data.recovery_hint 
-                        ? `${data.message || 'Error'} ${data.recovery_hint}` 
-                        : (data.message || 'Failed to update assumptions. Please try again.');
-                    showToast(errorMsg, 'error');
-                }
-            } catch (error) {
-                console.error('Error:', error);
-                showToast('Connection error. Please check your network and try again.', 'error');
-            } finally {
-                setLoading(submitBtn, false);
-            }
-        }
     </script>
 </body>
 </html>
