@@ -1607,13 +1607,77 @@ pub fn suggestion_message(view: &SuggestionCardView) -> MessageTemplate {
         .build()
 }
 
+/// Human-readable label for a dialogue session state.
+fn session_state_label(state: &quotey_core::domain::dialogue::SlackQuoteState) -> &'static str {
+    use quotey_core::domain::dialogue::SlackQuoteState;
+    match state {
+        SlackQuoteState::IntentCapture => "Intent Capture",
+        SlackQuoteState::ContextCollection => "Context Collection",
+        SlackQuoteState::AssumptionReview => "Assumption Review",
+        SlackQuoteState::PricingReady => "Pricing Ready",
+        SlackQuoteState::PricedReview => "Priced Review",
+        SlackQuoteState::ApprovalRequired => "Approval Required",
+        SlackQuoteState::Approved => "Approved",
+        SlackQuoteState::Finalized => "Finalized",
+        SlackQuoteState::Sent => "Sent",
+        SlackQuoteState::BlockedError => "Blocked (Error)",
+    }
+}
+
+/// Build a prompt offering the user to resume or restart an in-progress session.
+pub fn session_resume_prompt(
+    session_id: &str,
+    state: &quotey_core::domain::dialogue::SlackQuoteState,
+    started: &str,
+    last_active: &str,
+) -> MessageTemplate {
+    let label = session_state_label(state);
+    MessageBuilder::new(format!("Resume session {session_id}?"))
+        .section("session.resume.state.v1", |section| {
+            section.mrkdwn(format!(
+                "📝 *Resume Quote Session?*\nState: *{label}*\nStarted: {started}\nLast active: {last_active}"
+            ));
+        })
+        .actions("session.resume.actions.v1", |actions| {
+            actions.button(
+                ButtonElement::new("session.resume.v1", "Resume")
+                    .style(ButtonStyle::Primary)
+                    .value(format!("session={session_id};action=resume")),
+            );
+            actions.button(
+                ButtonElement::new("session.restart.v1", "Start Over")
+                    .value(format!("session={session_id};action=restart")),
+            );
+        })
+        .build()
+}
+
+/// Build a message for an expired session, offering to start fresh.
+pub fn session_expired_recovery_message(thread_ts: &str) -> MessageTemplate {
+    MessageBuilder::new("Your quote session has expired")
+        .section("session.expired.message.v1", |section| {
+            section.mrkdwn(
+                "⏰ Your previous quote session has expired.\nStart a new quote to continue.",
+            );
+        })
+        .actions("session.expired.actions.v1", |actions| {
+            actions.button(
+                ButtonElement::new("session.new.v1", "Start a new quote")
+                    .style(ButtonStyle::Primary)
+                    .value(format!("thread={thread_ts};action=new_quote")),
+            );
+        })
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{
         approval_request_message, error_message, execution_task_progress_message,
         policy_approval_packet_action_value, policy_approval_packet_message, preview_mode_message,
-        quote_status_message, simulation_comparison_message, simulation_promotion_action_value,
-        Block, ButtonStyle, DealDnaCard, DealDnaSimilarDeal, ExecutionTaskStatus, MessageBuilder,
+        quote_status_message, session_expired_recovery_message, session_resume_prompt,
+        simulation_comparison_message, simulation_promotion_action_value, Block, ButtonStyle,
+        DealDnaCard, DealDnaSimilarDeal, ExecutionTaskStatus, MessageBuilder,
         PolicyApprovalDecisionKind, PolicyApprovalPacketView, SimulationComparisonView,
         SimulationVariantView, TextObject,
     };
@@ -2538,5 +2602,62 @@ mod tests {
         assert!(super::score_bar(1.0).starts_with("█████"));
         assert!(super::score_bar(0.0).starts_with("░░░░░"));
         assert!(super::score_bar(0.5).contains("50%"));
+    }
+
+    #[test]
+    fn session_resume_prompt_shows_state_and_actions() {
+        use quotey_core::domain::dialogue::SlackQuoteState;
+
+        let message = session_resume_prompt(
+            "session-123",
+            &SlackQuoteState::ContextCollection,
+            "2026-02-23 10:00 UTC",
+            "2026-02-23 18:00 UTC",
+        );
+
+        assert!(message.fallback_text.contains("Resume"));
+        assert!(message.blocks.iter().any(|block| matches!(
+            block,
+            Block::Section { block_id, text: TextObject::Mrkdwn { text } }
+            if block_id == "session.resume.state.v1" && text.contains("Context Collection")
+        )));
+
+        let actions = message.blocks.iter().find_map(|block| {
+            if let Block::Actions { elements, .. } = block {
+                Some(elements)
+            } else {
+                None
+            }
+        });
+        assert!(actions.is_some(), "expected actions block");
+        let actions = actions.expect("actions block asserted above");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.first().and_then(|e| e.style.clone()), Some(ButtonStyle::Primary));
+        assert!(actions[0].value.as_ref().unwrap().contains("action=resume"));
+        assert!(actions[1].value.as_ref().unwrap().contains("action=restart"));
+    }
+
+    #[test]
+    fn session_expired_recovery_shows_safe_options() {
+        let message = session_expired_recovery_message("1234567890.123456");
+
+        assert!(message.fallback_text.contains("expired"));
+        assert!(message.blocks.iter().any(|block| matches!(
+            block,
+            Block::Section { block_id, text: TextObject::Mrkdwn { text } }
+            if block_id == "session.expired.message.v1" && text.contains("Start a new quote")
+        )));
+
+        let actions = message.blocks.iter().find_map(|block| {
+            if let Block::Actions { elements, .. } = block {
+                Some(elements)
+            } else {
+                None
+            }
+        });
+        assert!(actions.is_some(), "expected actions block");
+        let actions = actions.expect("actions block asserted above");
+        assert_eq!(actions.len(), 1);
+        assert_eq!(actions.first().and_then(|e| e.style.clone()), Some(ButtonStyle::Primary));
     }
 }
