@@ -140,8 +140,10 @@ impl ProductRepository for SqlProductRepository {
             };
             sqlx::query_as::<_, ProductRow>(sql).bind(limit as i64).fetch_all(&self.pool).await?
         } else {
-            // FTS search — append * for prefix matching.
-            let fts_query = format!("{}*", query.replace('"', ""));
+            // FTS search — quote the term and append * for prefix matching.
+            // Quoting prevents FTS5 operators (-, OR, AND) from being misinterpreted.
+            let sanitized = query.replace('"', "");
+            let fts_query = format!("\"{}\"*", sanitized);
             let sql = if active_only {
                 "SELECT p.id, p.sku, p.name, p.description, p.product_type, p.family_id, \
                  p.base_price, p.currency, p.active, p.created_at, p.updated_at \
