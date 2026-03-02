@@ -2883,8 +2883,13 @@ mod tests {
                 code, "INTERNAL_ERROR",
                 "Expected INTERNAL_ERROR from template render, got: {output}"
             );
+            // The hardening layer sanitizes INTERNAL_ERROR messages to hide
+            // implementation details, so we just verify the code is correct.
             let msg = v["error"]["message"].as_str().unwrap_or("");
-            assert!(msg.contains("render"), "Template render error expected, got: {msg}");
+            assert!(
+                msg.contains("render") || msg.contains("Internal server error"),
+                "Expected template render or sanitized internal error, got: {msg}"
+            );
         } else {
             // Full contract verification when template rendering succeeds
             assert_eq!(v["quote_id"].as_str().unwrap(), quote_id);

@@ -72,13 +72,11 @@ fn row_to_approval(row: &sqlx::sqlite::SqliteRow) -> Result<ApprovalRequest, Rep
         })?;
     let expires_at = match expires_at_str {
         Some(s) => Some(
-            DateTime::parse_from_rfc3339(&s)
-                .map(|dt| dt.with_timezone(&Utc))
-                .map_err(|e| {
-                    RepositoryError::Decode(format!(
-                        "invalid expires_at `{s}` for approval `{id}`: {e}"
-                    ))
-                })?,
+            DateTime::parse_from_rfc3339(&s).map(|dt| dt.with_timezone(&Utc)).map_err(|e| {
+                RepositoryError::Decode(format!(
+                    "invalid expires_at `{s}` for approval `{id}`: {e}"
+                ))
+            })?,
         ),
         None => None,
     };
