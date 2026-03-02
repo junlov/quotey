@@ -4,6 +4,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Quotey Analytics Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
     <style>
         :root {
@@ -21,6 +24,7 @@
             --text-secondary: #64748b;
             --text-muted: #94a3b8;
             --border: #e2e8f0;
+            --border-strong: #cbd5e1;
             --shadow-sm: 0 1px 2px 0 rgb(0 0 0 / 0.05);
             --shadow: 0 1px 3px 0 rgb(0 0 0 / 0.1), 0 1px 2px -1px rgb(0 0 0 / 0.1);
             --shadow-lg: 0 10px 15px -3px rgb(0 0 0 / 0.1), 0 4px 6px -4px rgb(0 0 0 / 0.1);
@@ -35,17 +39,18 @@
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             font-size: 14px;
             line-height: 1.5;
             color: var(--text-primary);
-            background: var(--bg-body);
+            background: radial-gradient(circle at 0% 0%, #e0e7ff 0%, #f1f5f9 38%, #eef2ff 100%);
             min-height: 100vh;
         }
 
         /* Header */
         .dashboard-header {
-            background: var(--bg-card);
+            background: rgba(255, 255, 255, 0.9);
+            backdrop-filter: blur(8px);
             border-bottom: 1px solid var(--border);
             padding: 16px 24px;
             position: sticky;
@@ -124,6 +129,17 @@
             background: var(--border);
         }
 
+        .btn-ghost {
+            background: transparent;
+            color: var(--text-secondary);
+            border: 1px solid var(--border);
+        }
+
+        .btn-ghost:hover {
+            background: var(--bg-light);
+            border-color: var(--border-strong);
+        }
+
         .btn-sm {
             padding: 6px 12px;
             font-size: 12px;
@@ -170,6 +186,53 @@
         .filter-select:focus, .filter-input:focus {
             outline: none;
             border-color: var(--primary);
+        }
+
+        .status-strip {
+            max-width: 1400px;
+            margin: 12px auto 0;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 12px;
+            flex-wrap: wrap;
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
+
+        .custom-date-range {
+            display: none;
+            gap: 8px;
+            align-items: center;
+        }
+
+        .custom-date-range.visible {
+            display: flex;
+        }
+
+        .inline-alert {
+            background: #fee2e2;
+            color: #991b1b;
+            border: 1px solid #fecaca;
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            margin-bottom: 16px;
+            font-size: 13px;
+        }
+
+        .inline-status {
+            background: #dbeafe;
+            color: #1d4ed8;
+            border: 1px solid #bfdbfe;
+            border-radius: var(--radius);
+            padding: 10px 12px;
+            margin-bottom: 16px;
+            font-size: 13px;
+        }
+
+        .dashboard-main.loading {
+            opacity: 0.75;
+            transition: opacity 0.15s ease;
         }
 
         /* Main Content */
@@ -543,13 +606,17 @@
                 <span class="badge">Live</span>
             </div>
             <div class="header-actions">
-                <button class="btn btn-secondary btn-sm" onclick="refreshData()">
+                <button class="btn btn-secondary btn-sm" id="refreshBtn" onclick="refreshData(event)">
                     🔄 Refresh
                 </button>
                 <button class="btn btn-primary btn-sm" onclick="exportData()">
                     📥 Export CSV
                 </button>
             </div>
+        </div>
+        <div class="status-strip">
+            <span id="lastUpdatedLabel">Last updated: --</span>
+            <span id="activeFiltersLabel">Viewing: Last 30 days · All Segments · All Regions · All Reps</span>
         </div>
     </header>
 
@@ -565,6 +632,11 @@
                     <option value="365">Last year</option>
                     <option value="custom">Custom</option>
                 </select>
+            </div>
+            <div class="custom-date-range" id="customDateRange">
+                <input class="filter-input" id="startDate" type="date" onchange="updateDashboard()">
+                <span class="filter-label">to</span>
+                <input class="filter-input" id="endDate" type="date" onchange="updateDashboard()">
             </div>
             <div class="filter-group">
                 <span class="filter-label">Segment:</span>
@@ -593,11 +665,17 @@
                     {% endfor %}
                 </select>
             </div>
+            <div class="filter-group">
+                <button class="btn btn-ghost btn-sm" onclick="resetFilters()">Reset filters</button>
+            </div>
         </div>
     </div>
 
     <!-- Main Content -->
     <main class="dashboard-main">
+        <div id="dashboardError" class="inline-alert" hidden></div>
+        <div id="dashboardLoading" class="inline-status" hidden>Loading fresh analytics…</div>
+
         <!-- Summary Cards -->
         <div class="summary-grid">
             <div class="summary-card success">
@@ -859,9 +937,11 @@
     <script>
         // Chart instances
         let pricingChart, velocityChart, revenueChart, winRateChart;
+        let dashboardRequestId = 0;
 
         // Initialize dashboard
         document.addEventListener('DOMContentLoaded', function() {
+            updateCustomDateVisibility();
             initCharts();
             loadDashboardData();
         });
@@ -1023,20 +1103,138 @@
             });
         }
 
-        function updateDashboard() {
+        function updateCustomDateVisibility() {
+            const dateRange = document.getElementById('dateRange').value;
+            const customDateRange = document.getElementById('customDateRange');
+            customDateRange.classList.toggle('visible', dateRange === 'custom');
+        }
+
+        function buildFilterSummary() {
             const dateRange = document.getElementById('dateRange').value;
             const segment = document.getElementById('segment').value;
             const region = document.getElementById('region').value;
             const rep = document.getElementById('rep').value;
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
 
-            // Fetch updated data
-            fetch(`/api/analytics/dashboard?days=${dateRange}&segment=${segment}&region=${region}&rep=${rep}`)
-                .then(response => response.json())
-                .then(data => {
-                    updateCharts(data);
-                    updateTables(data);
-                })
-                .catch(error => console.error('Error:', error));
+            const dateLabel = dateRange === 'custom' && startDate && endDate
+                ? `${startDate} to ${endDate}`
+                : `Last ${dateRange} days`;
+
+            const segmentLabel = segment === 'all' ? 'All Segments' : segment.replace('_', ' ');
+            const regionLabel = region === 'all' ? 'All Regions' : region.toUpperCase();
+            const repSelect = document.getElementById('rep');
+            const repLabel = rep === 'all' ? 'All Reps' : repSelect.options[repSelect.selectedIndex].text;
+
+            return `${dateLabel} · ${segmentLabel} · ${regionLabel} · ${repLabel}`;
+        }
+
+        function setLoading(isLoading) {
+            document.querySelectorAll('.filter-select, .filter-input').forEach(el => {
+                el.disabled = isLoading;
+            });
+            document.querySelector('.dashboard-main').classList.toggle('loading', isLoading);
+            const refreshBtn = document.getElementById('refreshBtn');
+            refreshBtn.disabled = isLoading;
+            refreshBtn.textContent = isLoading ? '🔄 Loading...' : '🔄 Refresh';
+            document.getElementById('dashboardLoading').hidden = !isLoading;
+        }
+
+        function showError(message) {
+            const errorEl = document.getElementById('dashboardError');
+            errorEl.textContent = message;
+            errorEl.hidden = false;
+        }
+
+        function clearError() {
+            document.getElementById('dashboardError').hidden = true;
+        }
+
+        function formatCurrency(value) {
+            const amount = Number(value || 0);
+            return new Intl.NumberFormat('en-US', {
+                style: 'currency',
+                currency: 'USD',
+                maximumFractionDigits: 0,
+            }).format(amount);
+        }
+
+        function formatPercent(value) {
+            return `${Number(value || 0).toFixed(1)}%`;
+        }
+
+        function escapeHtml(value) {
+            return String(value ?? '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        function renderEmptyStateRow(cols, text) {
+            return `<tr><td colspan="${cols}"><div class="empty-state" style="padding:24px 12px;">${escapeHtml(text)}</div></td></tr>`;
+        }
+
+        function updateSummaryMetrics(metrics = {}) {
+            document.getElementById('totalQuotes').textContent = Number(metrics.total_quotes || 0).toLocaleString();
+            document.getElementById('totalRevenue').textContent = formatCurrency(metrics.total_revenue || 0);
+            document.getElementById('avgDiscount').textContent = formatPercent(metrics.avg_discount || 0);
+            document.getElementById('winRate').textContent = formatPercent(metrics.win_rate || 0);
+            document.getElementById('avgCloseTime').textContent = `${Number(metrics.avg_close_days || 0).toFixed(1)}d`;
+            document.getElementById('pendingApprovals').textContent = Number(metrics.pending_approvals || 0).toLocaleString();
+        }
+
+        function applyDashboardData(data) {
+            updateSummaryMetrics(data.metrics || {});
+            updateCharts(data);
+            updateTables(data);
+        }
+
+        async function updateDashboard() {
+            updateCustomDateVisibility();
+            clearError();
+            document.getElementById('activeFiltersLabel').textContent = `Viewing: ${buildFilterSummary()}`;
+
+            const dateRange = document.getElementById('dateRange').value;
+            const segment = document.getElementById('segment').value;
+            const region = document.getElementById('region').value;
+            const rep = document.getElementById('rep').value;
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+
+            const params = new URLSearchParams({ segment, region, rep });
+            if (dateRange === 'custom') {
+                if (!startDate || !endDate) {
+                    showError('Choose both start and end dates for a custom range.');
+                    return;
+                }
+                params.set('start', startDate);
+                params.set('end', endDate);
+            } else {
+                params.set('days', dateRange);
+            }
+
+            const requestId = ++dashboardRequestId;
+            setLoading(true);
+            try {
+                const response = await fetch(`/api/analytics/dashboard?${params.toString()}`, { cache: 'no-store' });
+                if (!response.ok) {
+                    throw new Error(`Request failed (${response.status})`);
+                }
+                const data = await response.json();
+                if (requestId !== dashboardRequestId) {
+                    return;
+                }
+                applyDashboardData(data);
+                document.getElementById('lastUpdatedLabel').textContent = `Last updated: ${new Date().toLocaleString()}`;
+            } catch (error) {
+                showError(`Could not load dashboard data. ${error.message}`);
+            } finally {
+                if (requestId === dashboardRequestId) {
+                    setLoading(false);
+                }
+            }
         }
 
         function updateCharts(data) {
@@ -1058,35 +1256,119 @@
         }
 
         function updateTables(data) {
-            // Implementation for updating tables dynamically
-            console.log('Updating tables with:', data);
+            const productsTable = document.getElementById('productsTable');
+            const topProducts = Array.isArray(data.top_products) ? data.top_products : [];
+            if (!topProducts.length) {
+                productsTable.innerHTML = renderEmptyStateRow(4, 'No product activity for the selected filters.');
+            } else {
+                productsTable.innerHTML = topProducts.map(product => {
+                    const trend = product.trend === 'up' ? '↗️' : product.trend === 'down' ? '↘️' : '➡️';
+                    const trendClass = product.trend === 'up' ? 'up' : product.trend === 'down' ? 'down' : 'flat';
+                    return `
+                        <tr>
+                            <td>
+                                <strong>${escapeHtml(product.name || 'Unnamed Product')}</strong>
+                                <br><span style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(product.category || 'Uncategorized')}</span>
+                            </td>
+                            <td class="numeric">${Number(product.quote_count || 0).toLocaleString()}</td>
+                            <td class="numeric">${formatCurrency(product.revenue || 0)}</td>
+                            <td><span class="trend trend-${trendClass}">${trend}</span></td>
+                        </tr>
+                    `;
+                }).join('');
+            }
+
+            const approvalsTable = document.getElementById('approvalsTable');
+            const approverStats = Array.isArray(data.approver_stats) ? data.approver_stats : [];
+            if (!approverStats.length) {
+                approvalsTable.innerHTML = renderEmptyStateRow(4, 'No approval bottlenecks found for this range.');
+            } else {
+                approvalsTable.innerHTML = approverStats.map(approver => {
+                    const avgHours = Number(approver.avg_hours || 0);
+                    const perfClass = avgHours > 48 ? 'danger' : avgHours > 24 ? 'warning' : 'success';
+                    const width = Math.max(0, Math.min(100, Number(approver.performance_pct || 0)));
+                    return `
+                        <tr>
+                            <td>
+                                <strong>${escapeHtml(approver.name || 'Unknown')}</strong>
+                                <br><span style="font-size: 11px; color: var(--text-secondary);">${escapeHtml(approver.role || '')}</span>
+                            </td>
+                            <td class="numeric">${avgHours.toFixed(1)}h</td>
+                            <td class="numeric">${Number(approver.pending || 0).toLocaleString()}</td>
+                            <td>
+                                <div class="progress-bar" style="width: 100px;">
+                                    <div class="progress-fill ${perfClass}" style="width: ${width}%"></div>
+                                </div>
+                            </td>
+                        </tr>
+                    `;
+                }).join('');
+            }
+
+            const activityTable = document.getElementById('activityTable');
+            const recentActivity = Array.isArray(data.recent_activity) ? data.recent_activity : [];
+            if (!recentActivity.length) {
+                activityTable.innerHTML = renderEmptyStateRow(5, 'No recent activity for the selected filters.');
+            } else {
+                activityTable.innerHTML = recentActivity.map(event => `
+                    <tr>
+                        <td>${escapeHtml(event.timestamp || '--')}</td>
+                        <td><span class="badge badge-${escapeHtml(event.type || 'info')}">${escapeHtml(event.type || 'info')}</span></td>
+                        <td><a href="/quote/${encodeURIComponent(event.quote_id || '')}">${escapeHtml(event.quote_id || '--')}</a></td>
+                        <td>${escapeHtml(event.user || '--')}</td>
+                        <td>${escapeHtml(event.details || '--')}</td>
+                    </tr>
+                `).join('');
+            }
         }
 
-        function refreshData() {
-            const btn = event.target;
-            btn.textContent = '🔄 Loading...';
-            btn.disabled = true;
-
-            updateDashboard();
-
-            setTimeout(() => {
-                btn.textContent = '🔄 Refresh';
-                btn.disabled = false;
-            }, 1000);
+        async function refreshData(event) {
+            if (event && typeof event.preventDefault === 'function') {
+                event.preventDefault();
+            }
+            await updateDashboard();
         }
 
         function exportData() {
             const dateRange = document.getElementById('dateRange').value;
-            window.location.href = `/api/analytics/export?days=${dateRange}&format=csv`;
+            const startDate = document.getElementById('startDate').value;
+            const endDate = document.getElementById('endDate').value;
+            const params = new URLSearchParams({ format: 'csv' });
+            if (dateRange === 'custom' && startDate && endDate) {
+                params.set('start', startDate);
+                params.set('end', endDate);
+            } else {
+                params.set('days', dateRange);
+            }
+            window.location.href = `/api/analytics/export?${params.toString()}`;
         }
 
         function toggleChartType(chartId) {
             // Toggle between line and bar chart
-            const chart = pricingChart;
+            const chartMap = {
+                pricingChart,
+                velocityChart,
+                revenueChart,
+                winRateChart,
+            };
+            const chart = chartMap[chartId];
+            if (!chart || chart.config.type === 'doughnut') {
+                return;
+            }
             const newType = chart.config.type === 'line' ? 'bar' : 'line';
             
             chart.config.type = newType;
             chart.update();
+        }
+
+        function resetFilters() {
+            document.getElementById('dateRange').value = '30';
+            document.getElementById('segment').value = 'all';
+            document.getElementById('region').value = 'all';
+            document.getElementById('rep').value = 'all';
+            document.getElementById('startDate').value = '';
+            document.getElementById('endDate').value = '';
+            updateDashboard();
         }
 
         function loadDashboardData() {

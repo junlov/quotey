@@ -6,6 +6,9 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Quotey Dashboard</title>
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
     <style>
         :root {
             --primary: #2563eb;
@@ -26,11 +29,11 @@
         }
 
         body {
-            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            font-family: 'Plus Jakarta Sans', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             font-size: 14px;
             line-height: 1.5;
             color: var(--text);
-            background: var(--bg);
+            background: linear-gradient(180deg, #eef2ff 0%, var(--bg) 40%);
             max-width: 600px;
             margin: 0 auto;
             padding: 16px;
@@ -39,7 +42,7 @@
         .slack-widget {
             background: var(--card);
             border-radius: 8px;
-            box-shadow: 0 1px 3px rgba(0,0,0,0.1);
+            box-shadow: 0 6px 24px rgba(15, 23, 42, 0.12);
             overflow: hidden;
         }
 
@@ -153,6 +156,12 @@
             border-bottom: none;
         }
 
+        .empty-note {
+            color: var(--text-secondary);
+            font-size: 12px;
+            padding: 6px 0;
+        }
+
         .item-name {
             font-weight: 500;
         }
@@ -211,6 +220,10 @@
             margin-top: 8px;
         }
 
+        .btn:hover {
+            filter: brightness(0.95);
+        }
+
         .status-indicator {
             display: inline-flex;
             align-items: center;
@@ -246,17 +259,23 @@
             <div class="metric-box">
                 <div class="metric-value">{{ total_quotes | default(value="42") }}</div>
                 <div class="metric-label">Quotes</div>
-                <div class="metric-change positive">↑ 12%</div>
+                <div class="metric-change {% if quotes_change_pct | default(value=0) >= 0 %}positive{% else %}negative{% endif %}">
+                    {% if quotes_change_pct | default(value=0) >= 0 %}↑{% else %}↓{% endif %} {{ quotes_change_pct | default(value="0") }}%
+                </div>
             </div>
             <div class="metric-box">
                 <div class="metric-value success">{{ win_rate | default(value="68") }}%</div>
                 <div class="metric-label">Win Rate</div>
-                <div class="metric-change positive">↑ 5%</div>
+                <div class="metric-change {% if win_rate_change_pct | default(value=0) >= 0 %}positive{% else %}negative{% endif %}">
+                    {% if win_rate_change_pct | default(value=0) >= 0 %}↑{% else %}↓{% endif %} {{ win_rate_change_pct | default(value="0") }}%
+                </div>
             </div>
             <div class="metric-box">
-                <div class="metric-value warning">${{ avg_discount | default(value="12.5") }}k</div>
+                <div class="metric-value warning">${{ avg_deal_k | default(value="12.5") }}k</div>
                 <div class="metric-label">Avg Deal</div>
-                <div class="metric-change negative">↓ 3%</div>
+                <div class="metric-change {% if avg_deal_change_pct | default(value=0) >= 0 %}positive{% else %}negative{% endif %}">
+                    {% if avg_deal_change_pct | default(value=0) >= 0 %}↑{% else %}↓{% endif %} {{ avg_deal_change_pct | default(value="0") }}%
+                </div>
             </div>
         </div>
 
@@ -271,27 +290,24 @@
 
         <div class="widget-section">
             <div class="section-title">🏆 Top Products</div>
+            {% if top_products is defined and top_products | length > 0 %}
             <ul class="top-list">
-                {% for product in top_products | default(value=[
-                    {name: "Pro Plan", value: "$145K"},
-                    {name: "Enterprise", value: "$98K"},
-                    {name: "SSO Add-on", value: "$42K"}
-                ]) %}
+                {% for product in top_products %}
                 <li>
                     <span class="item-name">{{ product.name }}</span>
                     <span class="item-value">{{ product.value }}</span>
                 </li>
                 {% endfor %}
             </ul>
+            {% else %}
+            <div class="empty-note">No top products yet for this period.</div>
+            {% endif %}
         </div>
 
         <div class="widget-section">
             <div class="section-title">⏳ Approval Queue</div>
-            {% for approver in approval_queue | default(value=[
-                {name: "Sales Manager", pending: 5, max: 10},
-                {name: "VP Sales", pending: 2, max: 8},
-                {name: "Deal Desk", pending: 8, max: 12}
-            ]) %}
+            {% if approval_queue is defined and approval_queue | length > 0 %}
+            {% for approver in approval_queue %}
             <div class="progress-row">
                 <div class="progress-label">
                     <span>{{ approver.name }}</span>
@@ -303,11 +319,14 @@
                 </div>
             </div>
             {% endfor %}
+            {% else %}
+            <div class="empty-note">Approval queue is clear.</div>
+            {% endif %}
         </div>
 
         <div class="widget-footer">
             <p>Data refreshed {{ last_updated | default(value="5 min ago") }}</p>
-            <a href="{{ full_dashboard_url | default(value="/dashboard") }}" class="btn">View Full Dashboard →</a>
+            <a href="{{ full_dashboard_url | default(value="/dashboard") }}" class="btn">Open Full Analytics →</a>
         </div>
     </div>
 </body>

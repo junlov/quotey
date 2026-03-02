@@ -174,42 +174,106 @@ impl ContextBuilder {
 
 pub fn quote_status_message(quote_id: &str, status: &str) -> MessageTemplate {
     let status_tokens = status.to_ascii_lowercase();
-    let (status_icon, status_style, status_hint) = if status_tokens.contains("error")
-        || status_tokens.contains("failed")
-        || status_tokens.contains("rejected")
-        || status_tokens.contains("denied")
-    {
-        (
-            "🚨",
-            "requires your attention",
-            "Capture the details from this snapshot, then review the specific action path (approve/reject/discuss) before reattempting.",
-        )
-    } else if status_tokens.contains("approved")
-        || status_tokens.contains("complete")
-        || status_tokens.contains("finalized")
-        || status_tokens.contains("sent")
-    {
-        (
-            "✅",
-            "ready",
-            "Use `/quote send` or `/quote clone` from this thread context once stakeholders confirm.",
-        )
-    } else if status_tokens.contains("waiting")
-        || status_tokens.contains("pending")
-        || status_tokens.contains("requested")
-        || status_tokens.contains("processing")
-    {
-        (
-            "🕒",
-            "in progress",
-            "The workflow is moving through the next deterministic state. Refresh this card to see the latest state.",
-        )
+    let status_terms = status_tokens
+        .split(|ch: char| !ch.is_ascii_alphanumeric())
+        .filter(|term| !term.is_empty())
+        .collect::<Vec<_>>();
+    let has_term = |needle: &str| status_terms.contains(&needle);
+
+    let canonical_status = if has_term("draft") {
+        Some("draft")
+    } else if has_term("pending") || has_term("waiting") || has_term("requested") {
+        Some("pending")
+    } else if has_term("validated") {
+        Some("validated")
+    } else if has_term("priced") {
+        Some("priced")
+    } else if has_term("approval") {
+        Some("approval")
+    } else if has_term("approved") {
+        Some("approved")
+    } else if has_term("rejected") || has_term("denied") {
+        Some("rejected")
+    } else if has_term("finalized") || has_term("complete") {
+        Some("finalized")
+    } else if has_term("sent") {
+        Some("sent")
+    } else if has_term("expired") {
+        Some("expired")
+    } else if has_term("cancelled") || has_term("canceled") {
+        Some("cancelled")
+    } else if has_term("error") || has_term("failed") {
+        Some("error")
     } else {
-        (
+        None
+    };
+
+    let (status_icon, status_style, status_hint) = match canonical_status {
+        Some("draft") => (
+            "📝",
+            "draft",
+            "Add required fields, then run `/quote status <quote_id>` to confirm readiness for pricing.",
+        ),
+        Some("pending") => (
+            "⏳",
+            "pending",
+            "This quote is waiting on input or processing. Refresh status for the latest checkpoint.",
+        ),
+        Some("validated") => (
+            "✅",
+            "validated",
+            "Validation passed. Run pricing or continue with the next deterministic workflow action.",
+        ),
+        Some("priced") => (
+            "💰",
+            "priced",
+            "Review totals and assumptions. If policy is clear, finalize; otherwise request approval.",
+        ),
+        Some("approval") => (
+            "🔔",
+            "approval required",
+            "Approval is required before finalization. Use approval actions or route to the correct approver.",
+        ),
+        Some("approved") => (
+            "✅",
+            "approved",
+            "Approval captured. Finalize and generate/send delivery artifacts.",
+        ),
+        Some("rejected") => (
+            "🚨",
+            "rejected",
+            "Approval was rejected. Revise quote inputs, then re-run pricing or request a new review.",
+        ),
+        Some("finalized") => (
+            "🔒",
+            "finalized",
+            "Quote is locked and ready for delivery. Send artifacts to customer channels.",
+        ),
+        Some("sent") => (
+            "📧",
+            "sent",
+            "Quote has been delivered. Monitor responses or clone for a revision cycle.",
+        ),
+        Some("expired") => (
+            "⏰",
+            "expired",
+            "Quote validity ended. Clone or regenerate with updated dates before resending.",
+        ),
+        Some("cancelled") => (
+            "🚫",
+            "cancelled",
+            "This workflow was cancelled. Start a new quote or restore from the latest valid checkpoint.",
+        ),
+        Some("error") => (
+            "🚨",
+            "requires attention",
+            "A workflow error occurred. Re-run the explicit command/action with quote context to recover.",
+        ),
+        _ => (
             "📄",
             "active",
-            "You can still query the full thread history with `/quote status` if you'd like a replay trace.",
-        )
+            "Use `/quote status <quote_id>` for deterministic state details and recommended next actions.",
+        ),
     };
 
     MessageBuilder::new(format!("Quote {quote_id} status: {status}"))
@@ -1661,6 +1725,25 @@ mod tests {
             elements.first(),
             Some(element) if matches!(element.text, TextObject::Plain { ref text } if text == "Refresh status")
         ));
+    }
+
+    #[test]
+    fn quote_status_template_does_not_treat_incomplete_as_complete() {
+        let message = quote_status_message("Q-2026-0042", "incomplete");
+
+        let state_text = message.blocks.iter().find_map(|block| match block {
+            Block::Section { block_id, text: TextObject::Mrkdwn { text } }
+                if block_id == "quote.status.state.v1" =>
+            {
+                Some(text.clone())
+            }
+            _ => None,
+        });
+
+        assert!(state_text.is_some(), "expected quote status state section");
+        let state_text = state_text.expect("status section asserted above");
+        assert!(state_text.contains("active"));
+        assert!(!state_text.contains("ready"));
     }
 
     #[test]
