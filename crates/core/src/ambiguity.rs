@@ -397,6 +397,18 @@ impl AmbiguityDetectionEngine {
             return;
         }
 
+        // Check if no quantities at all (even without products)
+        if input.quantities.is_empty() {
+            set.add(Ambiguity {
+                ambiguity_type: AmbiguityType::MissingQuantity,
+                description: "No quantity specified".to_string(),
+                clarification_prompt: "How many units?".to_string(),
+                options: vec![],
+                field: "quantity".to_string(),
+                original_value: None,
+            });
+        }
+
         // Check if quantity count doesn't match product count
         let product_count =
             input.product_mentions.iter().filter(|p| !p.matched_products.is_empty()).count();

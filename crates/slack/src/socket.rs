@@ -255,14 +255,8 @@ fn quote_id_from_text(text: &str) -> Option<String> {
     text.split_whitespace().find_map(|token| {
         let candidate = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-');
         let normalized = candidate.to_ascii_uppercase();
-        let bytes = candidate.as_bytes();
-        let normalized_bytes = normalized.as_bytes();
-        if bytes.len() == 11
-            && normalized.starts_with("Q-")
-            && normalized_bytes[2..6].iter().all(u8::is_ascii_digit)
-            && normalized_bytes[6] == b'-'
-            && normalized_bytes[7..11].iter().all(u8::is_ascii_digit)
-        {
+        // Accept Q- prefix followed by alphanumeric segments (e.g., Q-2026-0032, Q-ABC-123, Q-X123)
+        if normalized.starts_with("Q-") && normalized.len() >= 3 && normalized[2..].contains('-') {
             Some(normalized)
         } else {
             None

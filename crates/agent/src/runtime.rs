@@ -100,9 +100,21 @@ impl AgentRuntime {
     }
 
     fn record_audit_event(&self, event: RuntimeAuditEvent) {
+        const MAX_AUDIT_EVENTS: usize = 10_000;
         match self.audit_events.lock() {
-            Ok(mut events) => events.push(event),
-            Err(poisoned) => poisoned.into_inner().push(event),
+            Ok(mut events) => {
+                if events.len() >= MAX_AUDIT_EVENTS {
+                    events.remove(0); // Remove oldest event to make room
+                }
+                events.push(event);
+            }
+            Err(poisoned) => {
+                let mut events = poisoned.into_inner();
+                if events.len() >= MAX_AUDIT_EVENTS {
+                    events.remove(0);
+                }
+                events.push(event);
+            }
         }
     }
 }

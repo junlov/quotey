@@ -28,13 +28,11 @@ pub struct ApiKeyEntry {
 struct RateLimitEntry {
     /// Request timestamps (within the current window)
     requests: Vec<Instant>,
-    /// When the window started
-    window_start: Instant,
 }
 
 impl RateLimitEntry {
     fn new() -> Self {
-        Self { requests: Vec::new(), window_start: Instant::now() }
+        Self { requests: Vec::new() }
     }
 
     /// Clean old requests outside the window and add new request
@@ -60,7 +58,6 @@ impl RateLimitEntry {
     /// Reset the window
     fn reset(&mut self) {
         self.requests.clear();
-        self.window_start = Instant::now();
     }
 }
 

@@ -157,7 +157,10 @@ fn register_quote_style_partials(tera: &mut Tera) {
 }
 
 fn decimal_to_f64(value: &rust_decimal::Decimal) -> f64 {
-    value.to_string().parse::<f64>().unwrap_or(0.0)
+    value.to_string().parse::<f64>().unwrap_or_else(|_| {
+        tracing::warn!(value = %value, "Failed to parse Decimal to f64, using 0.0");
+        0.0
+    })
 }
 
 fn build_quote_id(account_id: &str, input: &QuoteCreateInput) -> String {
