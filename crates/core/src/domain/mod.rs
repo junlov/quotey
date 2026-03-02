@@ -1,6 +1,7 @@
 pub mod approval;
 pub mod autopsy;
 pub mod customer;
+pub mod dialogue;
 pub mod execution;
 pub mod explanation;
 pub mod optimizer;

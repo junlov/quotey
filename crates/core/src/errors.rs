@@ -10,6 +10,10 @@ pub enum DomainError {
     FlowTransition(#[from] FlowTransitionError),
     #[error("domain invariant violation: {0}")]
     InvariantViolation(String),
+    #[error("invalid enum value for {enum_name}: {value}")]
+    InvalidEnumValue { enum_name: String, value: String },
+    #[error("invalid state transition from '{from}' to '{to}': {reason}")]
+    InvalidStateTransition { from: String, to: String, reason: String },
 }
 
 #[derive(Clone, Debug, Error, PartialEq, Eq)]
@@ -66,7 +70,9 @@ impl From<ApplicationError> for InterfaceError {
         match value {
             ApplicationError::Domain(DomainError::InvalidQuoteTransition { .. })
             | ApplicationError::Domain(DomainError::FlowTransition(_))
-            | ApplicationError::Domain(DomainError::InvariantViolation(_)) => Self::BadRequest {
+            | ApplicationError::Domain(DomainError::InvariantViolation(_))
+            | ApplicationError::Domain(DomainError::InvalidEnumValue { .. })
+            | ApplicationError::Domain(DomainError::InvalidStateTransition { .. }) => Self::BadRequest {
                 message: "domain validation failed".to_owned(),
                 correlation_id: "unassigned".to_owned(),
             },

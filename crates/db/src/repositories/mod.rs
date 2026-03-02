@@ -12,6 +12,7 @@ use quotey_core::suggestions::{ProductAcceptanceRate, SuggestionFeedback};
 
 pub mod approval;
 pub mod customer;
+pub mod dialogue;
 pub mod execution_queue;
 pub mod explanation;
 pub mod memory;
@@ -25,6 +26,7 @@ pub mod suggestion_feedback;
 
 pub use approval::SqlApprovalRepository;
 pub use customer::SqlCustomerRepository;
+pub use dialogue::{DialogueSessionRepository, SqlDialogueSessionRepository};
 pub use execution_queue::SqlExecutionQueueRepository;
 pub use explanation::{ExplanationRepository, SqlExplanationRepository};
 pub use memory::{
