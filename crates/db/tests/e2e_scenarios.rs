@@ -18,6 +18,7 @@
 ///   S-011  Idempotency guard prevents duplicate execution
 ///   S-012  Multi-constraint compound failure detection
 ///   S-013  Quote expiration from Approval state
+///   S-014  Renewal expansion: prior quote context, expansion lines, discount approval
 use chrono::Utc;
 use quotey_core::audit::{AuditCategory, AuditContext, AuditOutcome, InMemoryAuditSink};
 use quotey_core::cpq::constraints::{
@@ -36,8 +37,122 @@ use quotey_db::repositories::{
     SqlProductRepository, SqlQuoteRepository,
 };
 use rust_decimal::Decimal;
+use std::collections::BTreeSet;
 
 type TestResult<T = ()> = Result<T, String>;
+
+const E2E_LOG_SCHEMA_VERSION: &str = "1.0.0";
+
+#[derive(Debug, Clone)]
+struct E2ELogRecord {
+    schema_version: String,
+    correlation_id: String,
+    stage: String,
+    action: String,
+    assertion: String,
+    timing_ms: i64,
+    outcome: String,
+    error_class: Option<String>,
+}
+
+fn normalize_stage(event: &quotey_core::audit::AuditEvent) -> String {
+    event
+        .metadata
+        .get("to")
+        .or_else(|| event.metadata.get("from"))
+        .cloned()
+        .unwrap_or_else(|| "unknown".to_string())
+}
+
+fn normalize_assertion(event: &quotey_core::audit::AuditEvent) -> String {
+    if event.outcome == AuditOutcome::Success {
+        "transition_applied".to_string()
+    } else {
+        "transition_rejected".to_string()
+    }
+}
+
+fn build_e2e_log_records(events: &[quotey_core::audit::AuditEvent]) -> Vec<E2ELogRecord> {
+    let mut sorted = events.to_vec();
+    sorted.sort_by_key(|event| event.occurred_at);
+
+    let mut previous: Option<chrono::DateTime<Utc>> = None;
+    sorted
+        .into_iter()
+        .map(|event| {
+            let timing_ms: i64 = previous
+                .map(|ts: chrono::DateTime<Utc>| (event.occurred_at - ts).num_milliseconds().max(0))
+                .unwrap_or(0);
+            previous = Some(event.occurred_at);
+
+            E2ELogRecord {
+                schema_version: E2E_LOG_SCHEMA_VERSION.to_string(),
+                correlation_id: event.correlation_id.clone(),
+                stage: normalize_stage(&event),
+                action: event.event_type.clone(),
+                assertion: normalize_assertion(&event),
+                timing_ms,
+                outcome: format!("{:?}", event.outcome).to_ascii_lowercase(),
+                error_class: event.metadata.get("error").cloned(),
+            }
+        })
+        .collect()
+}
+
+fn validate_e2e_log_records(records: &[E2ELogRecord], expected_correlation: &str) -> TestResult {
+    if records.is_empty() {
+        return Err("e2e log validation failed: no records emitted".to_string());
+    }
+
+    let mut errors = Vec::new();
+    for (idx, record) in records.iter().enumerate() {
+        if record.schema_version != E2E_LOG_SCHEMA_VERSION {
+            errors.push(format!(
+                "record {idx}: schema_version '{}' != '{}'",
+                record.schema_version, E2E_LOG_SCHEMA_VERSION
+            ));
+        }
+        if record.correlation_id.trim().is_empty() {
+            errors.push(format!("record {idx}: correlation_id must be non-empty"));
+        }
+        if record.correlation_id != expected_correlation {
+            errors.push(format!(
+                "record {idx}: correlation_id '{}' != expected '{}'",
+                record.correlation_id, expected_correlation
+            ));
+        }
+        if record.stage.trim().is_empty()
+            || (record.stage == "unknown" && record.action != "flow.transition_rejected")
+        {
+            errors.push(format!("record {idx}: stage must be present"));
+        }
+        if record.action.trim().is_empty() {
+            errors.push(format!("record {idx}: action must be present"));
+        }
+        if record.assertion.trim().is_empty() {
+            errors.push(format!("record {idx}: assertion must be present"));
+        }
+        if record.timing_ms < 0 {
+            errors.push(format!("record {idx}: timing_ms must be >= 0"));
+        }
+        match record.outcome.as_str() {
+            "success" | "rejected" | "failed" => {}
+            other => errors.push(format!("record {idx}: invalid outcome '{other}'")),
+        }
+        if (record.outcome == "rejected" || record.outcome == "failed")
+            && record.error_class.as_deref().unwrap_or("").trim().is_empty()
+        {
+            errors
+                .push(format!("record {idx}: error_class required for outcome={}", record.outcome));
+        }
+    }
+
+    if errors.is_empty() {
+        Ok(())
+    } else {
+        Err(format!("e2e log validation failed:\n{}", errors.join("\n")))
+    }
+}
 
 // ── Test infrastructure ─────────────────────────────────────────────────
 
@@ -556,6 +671,18 @@ async fn s005_audit_trail_captures_every_transition_with_correlation() -> TestRe
         assert!(event.metadata.contains_key("to"), "event {i} missing 'to'");
     }
 
+    // Validate structured E2E log schema fields.
+    let log_records = build_e2e_log_records(&events);
+    validate_e2e_log_records(&log_records, "e2e-s005")?;
+    let stages: BTreeSet<String> = log_records.iter().map(|record| record.stage.clone()).collect();
+    for expected in ["Validated", "Priced", "Finalized", "Sent"] {
+        assert!(stages.contains(expected), "missing stage checkpoint: {expected}");
+    }
+    assert!(
+        log_records.iter().all(|record| record.action == "flow.transition_applied"),
+        "all happy-path records should use flow.transition_applied action"
+    );
+
     // Verify state progression in metadata
     assert_eq!(events[0].metadata["from"], "Draft");
     assert_eq!(events[0].metadata["to"], "Validated");
@@ -611,6 +738,13 @@ async fn s006_invalid_transition_emits_rejection_audit() -> TestResult {
     assert_eq!(events[0].event_type, "flow.transition_rejected");
     assert_eq!(events[0].outcome, AuditOutcome::Rejected);
     assert!(events[0].metadata.contains_key("error"));
+
+    // Rejected events must pass schema and include error_class.
+    let log_records = build_e2e_log_records(&events);
+    validate_e2e_log_records(&log_records, "e2e-s006")?;
+    assert_eq!(log_records.len(), 1);
+    assert_eq!(log_records[0].outcome, "rejected");
+    assert!(log_records[0].error_class.is_some());
 
     // Persist and verify DB
     flush_audit_to_db(&sink, &audit_repo).await?;
@@ -1242,6 +1376,318 @@ async fn s013_quote_expiration_from_approval_state() -> TestResult {
         .await
         .map_err(|e| format!("query: {e}"))?;
     assert_eq!(db_events.len(), 4, "3 transitions to Approval + 1 expiration");
+
+    Ok(())
+}
+
+// ── S-014: Renewal expansion with prior quote context ───────────────────
+
+#[tokio::test]
+async fn s014_renewal_expansion_prior_context_discount_approval() -> TestResult {
+    let pool = setup_pool().await?;
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let product_repo = SqlProductRepository::new(pool.clone());
+    let approval_repo = SqlApprovalRepository::new(pool.clone());
+    let audit_repo = SqlAuditEventRepository::new(pool.clone());
+
+    // ── Step 1: Seed catalog ───────────────────────────────────────────
+    seed_product(&product_repo, "PROD-REN-BASE", "SKU-REN-A", "Platform License", 10000).await?;
+    seed_product(&product_repo, "PROD-REN-ADD", "SKU-REN-B", "Add-On Module", 5000).await?;
+    seed_product(&product_repo, "PROD-REN-NEW", "SKU-REN-C", "Premium Support", 3000).await?;
+
+    // ── Step 2: Create and deliver the PRIOR quote (existing contract) ─
+    let prior_quote = make_quote(
+        "Q-E2E-REN-PRIOR",
+        vec![
+            line("PROD-REN-BASE", 10, 10000), // 10 × $100.00
+            line("PROD-REN-ADD", 5, 5000),    // 5 × $50.00
+        ],
+    );
+    quote_repo.save(prior_quote).await.map_err(|e| format!("save prior: {e}"))?;
+
+    let engine = FlowEngine::new(NetNewFlow);
+    let prior_sink = InMemoryAuditSink::default();
+    let prior_audit = AuditContext::new(
+        Some(QuoteId("Q-E2E-REN-PRIOR".to_string())),
+        Some("prior-thread-001".to_string()),
+        "e2e-s014-prior",
+        "e2e-harness",
+    );
+    let ctx = FlowContext::default();
+
+    // Drive prior quote to Sent: Draft → Validated → Priced → Finalized → Sent
+    let mut prior_state = engine.initial_state();
+    for event in &[
+        FlowEvent::RequiredFieldsCollected,
+        FlowEvent::PricingCalculated,
+        FlowEvent::PolicyClear,
+        FlowEvent::QuoteDelivered,
+    ] {
+        prior_state = engine
+            .apply_with_audit(&prior_state, event, &ctx, &prior_sink, &prior_audit)
+            .map_err(|e| format!("prior flow: {e}"))?
+            .to;
+    }
+    assert_eq!(prior_state, FlowState::Sent, "prior quote should reach Sent");
+
+    // Verify prior pricing: 10×$100 + 5×$50 = $1,250.00
+    let prior_loaded = quote_repo
+        .find_by_id(&QuoteId("Q-E2E-REN-PRIOR".to_string()))
+        .await
+        .map_err(|e| format!("find prior: {e}"))?
+        .ok_or("prior not found")?;
+    let prior_pricing = price_quote_with_trace(&prior_loaded, "USD");
+    assert_eq!(
+        prior_pricing.total,
+        Decimal::new(125000, 2),
+        "prior total: 10×$100 + 5×$50 = $1,250.00"
+    );
+
+    // Persist prior audit
+    flush_audit_to_db(&prior_sink, &audit_repo).await?;
+
+    // ── Step 3: Create the RENEWAL/EXPANSION quote ─────────────────────
+    // Same account, expanded quantities + new product line.
+    // References the prior quote context via notes.
+    let mut renewal_quote = make_quote(
+        "Q-E2E-REN-001",
+        vec![
+            line("PROD-REN-BASE", 15, 10000), // expanded: 10 → 15 licenses
+            line("PROD-REN-ADD", 10, 5000),   // expanded: 5 → 10 modules
+            line("PROD-REN-NEW", 3, 3000),    // new: Premium Support ×3
+        ],
+    );
+    renewal_quote.notes = Some("Renewal/expansion of Q-E2E-REN-PRIOR".to_string());
+    renewal_quote.deal_id = Some("DEAL-REN-2026-001".to_string());
+    quote_repo.save(renewal_quote).await.map_err(|e| format!("save renewal: {e}"))?;
+
+    // ── Step 4: Load and validate constraints ──────────────────────────
+    let loaded = quote_repo
+        .find_by_id(&QuoteId("Q-E2E-REN-001".to_string()))
+        .await
+        .map_err(|e| format!("find renewal: {e}"))?
+        .ok_or("renewal not found")?;
+
+    let constraint_engine = DeterministicConstraintEngine;
+    let constraints =
+        constraint_engine.validate(&ConstraintInput { quote_lines: loaded.lines.clone() });
+    assert!(
+        constraints.valid,
+        "renewal quote should pass constraints: {:?}",
+        constraints.violations
+    );
+
+    // ── Step 5: Price the renewal quote ────────────────────────────────
+    let pricing = price_quote_with_trace(&loaded, "USD");
+    // 15×$100 = $1,500 + 10×$50 = $500 + 3×$30 = $90 = $2,090.00
+    let expected_total = Decimal::new(209000, 2);
+    assert_eq!(pricing.total, expected_total, "renewal pricing: 15×$100 + 10×$50 + 3×$30");
+
+    // Verify expansion delta: renewal ($2,090) - prior ($1,250) = $840 uplift
+    let expansion_delta = pricing.total - prior_pricing.total;
+    assert_eq!(expansion_delta, Decimal::new(84000, 2), "expansion delta = $840.00");
+
+    // Verify pricing trace: 3 line_items + subtotal + discounts + tax + total = 7 steps
+    assert_eq!(
+        pricing.trace.steps.len(),
+        7,
+        "pricing trace: 3 lines + subtotal + discounts + tax + total"
+    );
+    let line_steps: Vec<_> =
+        pricing.trace.steps.iter().filter(|s| s.stage == "line_item").collect();
+    assert_eq!(line_steps.len(), 3, "should have a trace step per quote line");
+
+    // ── Step 6: Policy check — 25% discount triggers approval ──────────
+    let policy = evaluate_policy_input(&PolicyInput {
+        requested_discount_pct: Decimal::new(25, 0),
+        deal_value: pricing.total,
+        minimum_margin_pct: Decimal::new(75, 0),
+    });
+    assert!(policy.approval_required, "25% discount on renewal should require approval");
+    assert!(
+        policy.violations.iter().any(|v| v.policy_id == "discount-cap"),
+        "should flag discount-cap violation"
+    );
+    let required_role = policy.violations[0].required_approval.as_deref().unwrap_or("unknown");
+
+    // ── Step 7: Drive flow through approval path ───────────────────────
+    let renewal_sink = InMemoryAuditSink::default();
+    let renewal_audit = AuditContext::new(
+        Some(QuoteId("Q-E2E-REN-001".to_string())),
+        Some("renewal-thread-001".to_string()),
+        "e2e-s014-renewal",
+        "e2e-harness",
+    );
+
+    let mut state = engine.initial_state();
+    assert_eq!(state, FlowState::Draft);
+
+    // Draft → Validated → Priced
+    state = engine
+        .apply_with_audit(
+            &state,
+            &FlowEvent::RequiredFieldsCollected,
+            &ctx,
+            &renewal_sink,
+            &renewal_audit,
+        )
+        .map_err(|e| format!("ren-t1: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Validated);
+
+    state = engine
+        .apply_with_audit(
+            &state,
+            &FlowEvent::PricingCalculated,
+            &ctx,
+            &renewal_sink,
+            &renewal_audit,
+        )
+        .map_err(|e| format!("ren-t2: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Priced);
+
+    // Priced → Approval (policy violation)
+    state = engine
+        .apply_with_audit(
+            &state,
+            &FlowEvent::PolicyViolationDetected,
+            &ctx,
+            &renewal_sink,
+            &renewal_audit,
+        )
+        .map_err(|e| format!("ren-t3: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Approval);
+
+    // ── Step 8: Persist approval request ───────────────────────────────
+    let now = Utc::now();
+    let approval = ApprovalRequest {
+        id: ApprovalId("APR-E2E-REN-001".to_string()),
+        quote_id: QuoteId("Q-E2E-REN-001".to_string()),
+        approver_role: required_role.to_string(),
+        reason: format!(
+            "Renewal discount 25% on ${:.2} deal (expansion ${:.2} over prior)",
+            pricing.total, expansion_delta
+        ),
+        justification: "Strategic renewal — customer expanding usage significantly".to_string(),
+        status: ApprovalStatus::Pending,
+        requested_by: "e2e-harness".to_string(),
+        expires_at: Some(now + chrono::Duration::hours(24)),
+        created_at: now,
+        updated_at: now,
+    };
+    approval_repo.save(approval).await.map_err(|e| format!("save approval: {e}"))?;
+
+    // Verify approval round-trip
+    let pending = approval_repo
+        .find_by_id(&ApprovalId("APR-E2E-REN-001".to_string()))
+        .await
+        .map_err(|e| format!("find approval: {e}"))?
+        .ok_or("approval not found")?;
+    assert_eq!(pending.status, ApprovalStatus::Pending);
+    assert_eq!(pending.quote_id.0, "Q-E2E-REN-001");
+
+    // ── Step 9: Grant approval ─────────────────────────────────────────
+    let mut approved_req = pending;
+    approved_req.status = ApprovalStatus::Approved;
+    approved_req.updated_at = Utc::now();
+    approval_repo.save(approved_req).await.map_err(|e| format!("approve: {e}"))?;
+
+    let final_approval = approval_repo
+        .find_by_id(&ApprovalId("APR-E2E-REN-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("not found")?;
+    assert_eq!(final_approval.status, ApprovalStatus::Approved);
+
+    // Approval → Approved → Sent
+    state = engine
+        .apply_with_audit(&state, &FlowEvent::ApprovalGranted, &ctx, &renewal_sink, &renewal_audit)
+        .map_err(|e| format!("ren-t4: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Approved);
+
+    state = engine
+        .apply_with_audit(&state, &FlowEvent::QuoteDelivered, &ctx, &renewal_sink, &renewal_audit)
+        .map_err(|e| format!("ren-t5: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Sent);
+
+    // ── Step 10: Verify audit trail ────────────────────────────────────
+    let renewal_events = renewal_sink.events();
+    assert_eq!(
+        renewal_events.len(),
+        5,
+        "renewal: Draft→Validated→Priced→Approval→Approved→Sent = 5 transitions"
+    );
+    assert!(
+        renewal_events.iter().all(|e| e.correlation_id == "e2e-s014-renewal"),
+        "all renewal events should share correlation ID"
+    );
+    assert!(
+        renewal_events.iter().all(|e| e.thread_id.as_deref() == Some("renewal-thread-001")),
+        "all renewal events should share thread ID"
+    );
+
+    // Verify distinct correlation IDs between prior and renewal
+    let prior_events = prior_sink.events();
+    assert!(
+        prior_events.iter().all(|e| e.correlation_id == "e2e-s014-prior"),
+        "prior events should use prior correlation ID"
+    );
+
+    // Validate structured E2E log schema for both prior and renewal
+    let prior_log = build_e2e_log_records(&prior_events);
+    validate_e2e_log_records(&prior_log, "e2e-s014-prior")?;
+    let prior_stages: BTreeSet<String> = prior_log.iter().map(|r| r.stage.clone()).collect();
+    for expected in ["Validated", "Priced", "Finalized", "Sent"] {
+        assert!(prior_stages.contains(expected), "prior missing stage: {expected}");
+    }
+
+    let renewal_log = build_e2e_log_records(&renewal_events);
+    validate_e2e_log_records(&renewal_log, "e2e-s014-renewal")?;
+    let renewal_stages: BTreeSet<String> = renewal_log.iter().map(|r| r.stage.clone()).collect();
+    for expected in ["Validated", "Priced", "Approval", "Approved", "Sent"] {
+        assert!(renewal_stages.contains(expected), "renewal missing stage: {expected}");
+    }
+
+    // ── Step 11: Persist and verify DB round-trip ──────────────────────
+    flush_audit_to_db(&renewal_sink, &audit_repo).await?;
+
+    let prior_db_events = audit_repo
+        .find_by_quote_id(&QuoteId("Q-E2E-REN-PRIOR".to_string()))
+        .await
+        .map_err(|e| format!("query prior: {e}"))?;
+    assert_eq!(prior_db_events.len(), 4, "prior: 4 happy-path transitions");
+
+    let renewal_db_events = audit_repo
+        .find_by_quote_id(&QuoteId("Q-E2E-REN-001".to_string()))
+        .await
+        .map_err(|e| format!("query renewal: {e}"))?;
+    assert_eq!(renewal_db_events.len(), 5, "renewal: 5 approval-path transitions");
+
+    // Both quotes share the same account
+    let renewal_loaded = quote_repo
+        .find_by_id(&QuoteId("Q-E2E-REN-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("not found")?;
+    assert_eq!(
+        renewal_loaded.account_id.as_deref(),
+        Some("acct-e2e"),
+        "renewal should share account with prior"
+    );
+    assert_eq!(
+        renewal_loaded.notes.as_deref(),
+        Some("Renewal/expansion of Q-E2E-REN-PRIOR"),
+        "renewal should reference prior quote"
+    );
+    assert_eq!(
+        renewal_loaded.deal_id.as_deref(),
+        Some("DEAL-REN-2026-001"),
+        "renewal should have deal ID"
+    );
 
     Ok(())
 }
