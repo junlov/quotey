@@ -68,10 +68,7 @@ pub fn validate_configuration_input(input: &ConstraintInput) -> ConstraintResult
                 message: "Quote line is missing product id".to_string(),
                 suggestion: Some("Choose a valid product id".to_string()),
             });
-            continue;
-        }
-
-        if !seen_product_ids.insert(trimmed_product_id.clone()) {
+        } else if !seen_product_ids.insert(trimmed_product_id.clone()) {
             result.violations.push(ConstraintViolation {
                 code: "DUPLICATE_PRODUCT_ID".to_string(),
                 message: format!("Duplicate product id in quote: {trimmed_product_id}"),
@@ -84,7 +81,10 @@ pub fn validate_configuration_input(input: &ConstraintInput) -> ConstraintResult
         if line.quantity == 0 {
             result.violations.push(ConstraintViolation {
                 code: "ZERO_QUANTITY".to_string(),
-                message: format!("Product {trimmed_product_id} has zero quantity"),
+                message: format!(
+                    "Product {} has zero quantity",
+                    if trimmed_product_id.is_empty() { "(missing)" } else { &trimmed_product_id }
+                ),
                 suggestion: Some("Use a positive integer quantity".to_string()),
             });
         }
@@ -92,7 +92,10 @@ pub fn validate_configuration_input(input: &ConstraintInput) -> ConstraintResult
         if line.unit_price <= Decimal::ZERO {
             result.violations.push(ConstraintViolation {
                 code: "NON_POSITIVE_UNIT_PRICE".to_string(),
-                message: format!("Product {trimmed_product_id} has non-positive unit price"),
+                message: format!(
+                    "Product {} has non-positive unit price",
+                    if trimmed_product_id.is_empty() { "(missing)" } else { &trimmed_product_id }
+                ),
                 suggestion: Some("Use a positive unit price with fixed decimals".to_string()),
             });
         }
