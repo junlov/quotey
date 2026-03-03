@@ -212,6 +212,96 @@ fn sanitize_filename(value: &str) -> String {
         .collect()
 }
 
+fn hash_tool_arguments(arguments: Option<&serde_json::Map<String, serde_json::Value>>) -> String {
+    let args_value =
+        arguments.cloned().map(serde_json::Value::Object).unwrap_or(serde_json::Value::Null);
+    let serialized = serde_json::to_string(&args_value).unwrap_or_else(|_| "null".to_string());
+    checksum_of(&serialized)
+}
+
+fn extract_quote_id_from_arguments(
+    arguments: Option<&serde_json::Map<String, serde_json::Value>>,
+) -> Option<String> {
+    arguments
+        .and_then(|args| args.get("quote_id"))
+        .and_then(|value| value.as_str())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_string)
+}
+
+fn parse_error_code_from_text_payload(text: &str) -> Option<String> {
+    let value = serde_json::from_str::<serde_json::Value>(text).ok()?;
+    value
+        .get("error")
+        .and_then(|error| error.get("code"))
+        .and_then(|code| code.as_str())
+        .map(str::to_string)
+}
+
+fn outcome_from_tool_result(
+    result: &Result<CallToolResult, rmcp::ErrorData>,
+) -> (bool, String, Option<String>) {
+    match result {
+        Ok(call_result) => {
+            for block in &call_result.content {
+                if let Some(text) = block.raw.as_text() {
+                    if let Some(code) = parse_error_code_from_text_payload(&text.text) {
+                        return (false, code, Some(text.text.clone()));
+                    }
+                }
+            }
+
+            if call_result.is_error.unwrap_or(false) {
+                return (false, "TOOL_ERROR".to_string(), None);
+            }
+
+            (true, "OK".to_string(), None)
+        }
+        Err(error) => (false, format!("MCP_{:?}", error.code), Some(error.message.to_string())),
+    }
+}
+
+#[derive(Debug, Clone)]
+struct McpInvocationAuditEnvelope {
+    tool_name: String,
+    quote_id: Option<String>,
+    actor: String,
+    request_id: String,
+    correlation_id: String,
+    input_hash: String,
+    success: bool,
+    outcome_code: String,
+    error_message: Option<String>,
+}
+
+fn parse_protocol_version(raw: Option<&str>) -> Result<ProtocolVersion, String> {
+    let Some(value) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(ProtocolVersion::LATEST);
+    };
+
+    if value.eq_ignore_ascii_case("latest") {
+        return Ok(ProtocolVersion::LATEST);
+    }
+
+    match value {
+        "2024-11-05" => Ok(ProtocolVersion::V_2024_11_05),
+        "2025-03-26" => Ok(ProtocolVersion::V_2025_03_26),
+        "2025-06-18" => Ok(ProtocolVersion::V_2025_06_18),
+        _ => Err(format!("Unsupported MCP protocol version '{value}'")),
+    }
+}
+
+fn resolve_protocol_version() -> ProtocolVersion {
+    match parse_protocol_version(std::env::var("QUOTEY_MCP_PROTOCOL_VERSION").ok().as_deref()) {
+        Ok(version) => version,
+        Err(error) => {
+            warn!(%error, "Invalid QUOTEY_MCP_PROTOCOL_VERSION; falling back to latest");
+            ProtocolVersion::LATEST
+        }
+    }
+}
+
 /// Main MCP server for Quotey
 #[derive(Debug, Clone)]
 pub struct QuoteyMcpServer {
@@ -221,6 +311,8 @@ pub struct QuoteyMcpServer {
     tool_router: ToolRouter<Self>,
     /// Authentication manager
     auth_manager: AuthManager,
+    /// MCP protocol version advertised during initialize handshake
+    protocol_version: ProtocolVersion,
 }
 
 impl QuoteyMcpServer {
@@ -229,14 +321,16 @@ impl QuoteyMcpServer {
         info!("Initializing Quotey MCP Server (no auth)");
         let tool_router = Self::tool_router();
         let auth_manager = AuthManager::no_auth();
-        Self { db_pool, tool_router, auth_manager }
+        let protocol_version = resolve_protocol_version();
+        Self { db_pool, tool_router, auth_manager, protocol_version }
     }
 
     /// Create a new MCP server with authentication
     pub fn with_auth(db_pool: quotey_db::DbPool, auth_manager: AuthManager) -> Self {
         info!("Initializing Quotey MCP Server (with auth)");
         let tool_router = Self::tool_router();
-        Self { db_pool, tool_router, auth_manager }
+        let protocol_version = resolve_protocol_version();
+        Self { db_pool, tool_router, auth_manager, protocol_version }
     }
 
     /// Run the server with stdio transport
@@ -263,6 +357,10 @@ impl QuoteyMcpServer {
     /// Get a reference to the auth manager
     pub fn auth_manager(&self) -> &AuthManager {
         &self.auth_manager
+    }
+
+    pub fn protocol_version(&self) -> &ProtocolVersion {
+        &self.protocol_version
     }
 
     async fn record_mcp_audit_event(
@@ -309,6 +407,62 @@ impl QuoteyMcpServer {
         }
     }
 
+    async fn record_mcp_invocation_outcome(&self, envelope: &McpInvocationAuditEnvelope) {
+        let tool_name = envelope.tool_name.as_str();
+        let payload = serde_json::json!({
+            "tool_name": tool_name,
+            "request_id": envelope.request_id,
+            "correlation_id": envelope.correlation_id,
+            "input_hash": envelope.input_hash,
+            "outcome": {
+                "success": envelope.success,
+                "code": envelope.outcome_code,
+                "error_message": envelope.error_message
+            },
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+        let payload_json = match serde_json::to_string(&payload) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(error = %error, tool_name = %tool_name, "failed to serialize MCP invocation audit payload");
+                "{}".to_string()
+            }
+        };
+        let metadata_json = serde_json::json!({
+            "source": "quotey-mcp",
+            "tool_name": tool_name,
+            "audit_version": 1,
+            "request_id": envelope.request_id,
+            "correlation_id": envelope.correlation_id,
+            "input_hash": envelope.input_hash
+        })
+        .to_string();
+
+        if let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO audit_event (
+                id, timestamp, actor, actor_type, quote_id,
+                event_type, event_category, payload_json, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(format!("mcp-audit-{}", uuid::Uuid::new_v4()))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(&envelope.actor)
+        .bind("agent")
+        .bind(envelope.quote_id.clone())
+        .bind(format!("mcp.{tool_name}.completed"))
+        .bind("mcp_tool")
+        .bind(payload_json)
+        .bind(Some(metadata_json))
+        .execute(self.db())
+        .await
+        {
+            warn!(error = %error, tool_name = %tool_name, "failed to persist MCP invocation audit_event");
+        }
+    }
+
     /// Validate the current request against the auth manager.
     ///
     /// Clients pass their key via the MCP `_meta` field on tool-call requests:
@@ -320,7 +474,7 @@ impl QuoteyMcpServer {
     /// }}
     /// ```
     async fn check_auth(&self, meta: &rmcp::model::Meta) -> Result<AuthResult, rmcp::ErrorData> {
-        let api_key = meta.0.get("api_key").and_then(|v| v.as_str());
+        let api_key = meta.0.get("api_key").and_then(|v| v.as_str()); // ubs:ignore (MCP metadata key name, not a secret literal)
 
         let result = self.auth_manager.validate_request(api_key).await;
 
@@ -353,7 +507,7 @@ impl QuoteyMcpServer {
 impl ServerHandler for QuoteyMcpServer {
     fn get_info(&self) -> ServerInfo {
         ServerInfo {
-            protocol_version: ProtocolVersion::V_2024_11_05,
+            protocol_version: self.protocol_version.clone(),
             capabilities: ServerCapabilities::builder()
                 .enable_tools()
                 .enable_resources()
@@ -380,14 +534,59 @@ impl ServerHandler for QuoteyMcpServer {
         request: CallToolRequestParam,
         context: rmcp::service::RequestContext<rmcp::service::RoleServer>,
     ) -> Result<CallToolResult, rmcp::ErrorData> {
+        let tool_name = request.name.to_string();
+        let request_id = context.id.to_string();
+        let correlation_id = request_id.clone();
+        let arguments = request.arguments.clone();
+        let quote_id_for_audit = extract_quote_id_from_arguments(arguments.as_ref());
+        let input_hash = hash_tool_arguments(arguments.as_ref());
+
         // Enforce authentication when configured.
         // Clients pass their API key via `_meta.api_key` on each tool-call request.
         // When auth is not required the check is a no-op (returns Allowed).
-        self.check_auth(&context.meta).await?;
+        let auth_result = match self.check_auth(&context.meta).await {
+            Ok(result) => result,
+            Err(error) => {
+                self.record_mcp_invocation_outcome(&McpInvocationAuditEnvelope {
+                    tool_name: tool_name.clone(),
+                    quote_id: quote_id_for_audit.clone(),
+                    actor: "agent:mcp:anonymous".to_string(),
+                    request_id: request_id.clone(),
+                    correlation_id: correlation_id.clone(),
+                    input_hash: input_hash.clone(),
+                    success: false,
+                    outcome_code: "AUTH_DENIED".to_string(),
+                    error_message: Some(error.message.to_string()),
+                })
+                .await;
+                return Err(error);
+            }
+        };
 
         // Route to tool handler
         let tool_call_context = ToolCallContext::new(self, request, context);
-        self.tool_router.call(tool_call_context).await
+        let result = self.tool_router.call(tool_call_context).await;
+        let (success, outcome_code, error_message) = outcome_from_tool_result(&result);
+
+        let actor = match &auth_result {
+            AuthResult::Allowed { key_name, .. } => format!("agent:mcp:{key_name}"),
+            AuthResult::Denied { .. } => "agent:mcp:anonymous".to_string(),
+        };
+
+        self.record_mcp_invocation_outcome(&McpInvocationAuditEnvelope {
+            tool_name,
+            quote_id: quote_id_for_audit,
+            actor,
+            request_id,
+            correlation_id,
+            input_hash,
+            success,
+            outcome_code,
+            error_message,
+        })
+        .await;
+
+        result
     }
 
     async fn list_tools(
@@ -2074,6 +2273,83 @@ mod tests {
         serde_json::from_str(output).expect("tool output must be valid JSON")
     }
 
+    #[test]
+    fn hash_tool_arguments_is_stable_for_same_payload() {
+        let mut args = serde_json::Map::new();
+        args.insert("quote_id".to_string(), serde_json::Value::String("Q-123".to_string()));
+        args.insert("limit".to_string(), serde_json::Value::Number(20.into()));
+
+        let first = hash_tool_arguments(Some(&args));
+        let second = hash_tool_arguments(Some(&args));
+        assert_eq!(first, second);
+    }
+
+    #[test]
+    fn extract_quote_id_from_arguments_trims_and_ignores_blank() {
+        let mut args = serde_json::Map::new();
+        args.insert("quote_id".to_string(), serde_json::Value::String(" Q-TRIM ".to_string()));
+        assert_eq!(extract_quote_id_from_arguments(Some(&args)).as_deref(), Some("Q-TRIM"));
+
+        args.insert("quote_id".to_string(), serde_json::Value::String("   ".to_string()));
+        assert!(extract_quote_id_from_arguments(Some(&args)).is_none());
+    }
+
+    #[test]
+    fn outcome_from_tool_result_detects_error_envelope_code() {
+        let error_payload = tool_error("VALIDATION_ERROR", "bad request", None);
+        let result = CallToolResult {
+            content: vec![Content::text(error_payload)],
+            is_error: None,
+            meta: None,
+            structured_content: None,
+        };
+
+        let (success, code, message) = outcome_from_tool_result(&Ok(result));
+        assert!(!success);
+        assert_eq!(code, "VALIDATION_ERROR");
+        assert!(message.is_some());
+    }
+
+    #[test]
+    fn outcome_from_tool_result_reports_ok_for_non_error_payload() {
+        let result = CallToolResult {
+            content: vec![Content::text("{\"ok\":true}")],
+            is_error: None,
+            meta: None,
+            structured_content: None,
+        };
+
+        let (success, code, message) = outcome_from_tool_result(&Ok(result));
+        assert!(success);
+        assert_eq!(code, "OK");
+        assert!(message.is_none());
+    }
+
+    #[test]
+    fn parse_protocol_version_defaults_to_latest_when_missing_or_blank() {
+        assert_eq!(parse_protocol_version(None).unwrap(), ProtocolVersion::LATEST);
+        assert_eq!(parse_protocol_version(Some("   ")).unwrap(), ProtocolVersion::LATEST);
+    }
+
+    #[test]
+    fn parse_protocol_version_accepts_known_versions_and_latest_alias() {
+        assert_eq!(
+            parse_protocol_version(Some("2024-11-05")).unwrap(),
+            ProtocolVersion::V_2024_11_05
+        );
+        assert_eq!(
+            parse_protocol_version(Some("2025-03-26")).unwrap(),
+            ProtocolVersion::V_2025_03_26
+        );
+        assert_eq!(parse_protocol_version(Some("LATEST")).unwrap(), ProtocolVersion::LATEST);
+    }
+
+    #[test]
+    fn parse_protocol_version_rejects_unknown_value() {
+        let err = parse_protocol_version(Some("2025-99-99")).expect_err("must reject unknown");
+        assert!(err.contains("Unsupported MCP protocol version"));
+    }
+
     /// Assert the output is an error envelope with the expected code.
     fn assert_error_envelope(output: &str, expected_code: &str) {
         let v = parse_output(output);
@@ -2864,10 +3140,8 @@ mod tests {
             }))
             .await;
         let created = parse_output(&create_out);
-        let quote_id = created["quote_id"]
-            .as_str()
-            .unwrap_or_else(|| panic!("quote_create failed: {create_out}"))
-            .to_string();
+        let quote_id = created["quote_id"].as_str().unwrap_or("").to_string();
+        assert!(!quote_id.is_empty(), "quote_create did not return quote_id payload: {create_out}");
 
         let output = srv
             .quote_pdf(Parameters(QuotePdfInput {

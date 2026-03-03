@@ -677,8 +677,8 @@ async fn s008_constraint_violation_blocks_then_fix_and_retry() -> TestResult {
     let bad_quote = make_quote(
         "Q-E2E-FAIL-001",
         vec![
-            line("PROD-F1", 0, 5000),  // zero quantity
-            line("PROD-F1", 3, 5000),  // duplicate product
+            line("PROD-F1", 0, 5000), // zero quantity
+            line("PROD-F1", 3, 5000), // duplicate product
         ],
     );
     quote_repo.save(bad_quote).await.map_err(|e| format!("save: {e}"))?;
@@ -1031,9 +1031,7 @@ async fn s010_quote_revision_cycle_sent_revised_resend() -> TestResult {
 
 #[tokio::test]
 async fn s011_idempotency_guard_prevents_duplicate_execution() -> TestResult {
-    use quotey_core::domain::execution::{
-        IdempotencyRecord, IdempotencyRecordState, OperationKey,
-    };
+    use quotey_core::domain::execution::{IdempotencyRecord, IdempotencyRecordState, OperationKey};
     use quotey_db::repositories::{IdempotencyRepository, SqlExecutionQueueRepository};
 
     let pool = setup_pool().await?;
@@ -1095,10 +1093,7 @@ async fn s011_idempotency_guard_prevents_duplicate_execution() -> TestResult {
         IdempotencyRecordState::Completed,
         "duplicate should see Completed state"
     );
-    assert!(
-        found.result_snapshot_json.is_some(),
-        "completed record should have result"
-    );
+    assert!(found.result_snapshot_json.is_some(), "completed record should have result");
     assert_eq!(found.attempt_count, 1, "should still be 1 attempt");
 
     Ok(())
@@ -1154,14 +1149,8 @@ async fn s012_multi_constraint_compound_failure_detection() -> TestResult {
     let codes: Vec<&str> = result.violations.iter().map(|v| v.code.as_str()).collect();
     assert!(codes.contains(&"MISSING_PRODUCT_ID"), "should detect missing product ID");
     assert!(codes.contains(&"ZERO_QUANTITY"), "should detect zero quantity");
-    assert!(
-        codes.contains(&"NON_POSITIVE_UNIT_PRICE"),
-        "should detect non-positive price"
-    );
-    assert!(
-        codes.contains(&"DUPLICATE_PRODUCT_ID"),
-        "should detect duplicate product"
-    );
+    assert!(codes.contains(&"NON_POSITIVE_UNIT_PRICE"), "should detect non-positive price");
+    assert!(codes.contains(&"DUPLICATE_PRODUCT_ID"), "should detect duplicate product");
 
     // Verify at least 4 violations reported
     assert!(
@@ -1223,10 +1212,7 @@ async fn s013_quote_expiration_from_approval_state() -> TestResult {
         created_at: now - chrono::Duration::hours(5),
         updated_at: now - chrono::Duration::hours(5),
     };
-    approval_repo
-        .save(expired_approval)
-        .await
-        .map_err(|e| format!("save approval: {e}"))?;
+    approval_repo.save(expired_approval).await.map_err(|e| format!("save approval: {e}"))?;
 
     // Verify the approval is stored with past expiry
     let approval = approval_repo

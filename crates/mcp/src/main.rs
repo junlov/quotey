@@ -16,6 +16,9 @@
 //!
 //! # Run with multiple API keys and rate limiting
 //! MCP_API_KEYS='[{"key":"key1","name":"Agent1","requests_per_minute":60}]' quotey-mcp
+//!
+//! # Pin MCP protocol version for legacy clients (defaults to latest supported)
+//! QUOTEY_MCP_PROTOCOL_VERSION=2024-11-05 quotey-mcp
 //! ```
 
 use anyhow::Result;
