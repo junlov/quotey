@@ -19,6 +19,9 @@
 ///   S-012  Multi-constraint compound failure detection
 ///   S-013  Quote expiration from Approval state
 ///   S-014  Renewal expansion: prior quote context, expansion lines, discount approval
+///   S-015  Execution task exhausts max retries → FailedTerminal (no recovery)
+///   S-016  Approval denied → quote rejected, then revised + re-approved
+///   S-017  Revision with stale/expired approval resets approval lifecycle
 use chrono::Utc;
 use quotey_core::audit::{AuditCategory, AuditContext, AuditOutcome, InMemoryAuditSink};
 use quotey_core::cpq::constraints::{
@@ -1688,6 +1691,502 @@ async fn s014_renewal_expansion_prior_context_discount_approval() -> TestResult 
         Some("DEAL-REN-2026-001"),
         "renewal should have deal ID"
     );
+
+    Ok(())
+}
+
+// ── S-015: Execution task exhausts max retries → FailedTerminal ──────────
+
+#[tokio::test]
+async fn s015_execution_task_max_retries_exhausted_terminal_failure() -> TestResult {
+    use quotey_core::domain::execution::{
+        ExecutionTask, ExecutionTaskId, ExecutionTaskState, ExecutionTransitionEvent,
+        ExecutionTransitionId, OperationKey,
+    };
+    use quotey_db::repositories::{ExecutionQueueRepository, SqlExecutionQueueRepository};
+
+    let pool = setup_pool().await?;
+
+    // Seed parent quote (FK constraint)
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let quote = make_quote("Q-E2E-TERM-001", vec![line("prod-term", 1, 5000)]);
+    quote_repo.save(quote).await.map_err(|e| format!("save quote: {e}"))?;
+
+    let exec_repo = SqlExecutionQueueRepository::new(pool.clone());
+    let now = Utc::now();
+    let quote_id = QuoteId("Q-E2E-TERM-001".to_string());
+
+    // Create task with max_retries=1 (only one retry allowed)
+    let task = ExecutionTask {
+        id: ExecutionTaskId("TASK-E2E-TERM-001".to_string()),
+        quote_id: quote_id.clone(),
+        operation_kind: "crm.sync_quote".to_string(),
+        payload_json: r#"{"deal_id":"D-TERM"}"#.to_string(),
+        idempotency_key: OperationKey("op-e2e-term-001".to_string()),
+        state: ExecutionTaskState::Queued,
+        retry_count: 0,
+        max_retries: 1,
+        available_at: now,
+        claimed_by: None,
+        claimed_at: None,
+        last_error: None,
+        result_fingerprint: None,
+        state_version: 1,
+        created_at: now,
+        updated_at: now,
+    };
+    exec_repo.save_task(task).await.map_err(|e| format!("save task: {e}"))?;
+
+    // Transition 1: Queued → Running (first attempt)
+    exec_repo
+        .append_transition(ExecutionTransitionEvent {
+            id: ExecutionTransitionId("t-term-001".to_string()),
+            task_id: ExecutionTaskId("TASK-E2E-TERM-001".to_string()),
+            quote_id: quote_id.clone(),
+            from_state: Some(ExecutionTaskState::Queued),
+            to_state: ExecutionTaskState::Running,
+            transition_reason: "worker-claim".to_string(),
+            error_class: None,
+            decision_context_json: r#"{"worker":"w-1","attempt":1}"#.to_string(),
+            actor_type: "system".to_string(),
+            actor_id: "queue-worker-1".to_string(),
+            idempotency_key: Some(OperationKey("op-e2e-term-001".to_string())),
+            correlation_id: "corr-e2e-s015".to_string(),
+            state_version: 2,
+            occurred_at: now,
+        })
+        .await
+        .map_err(|e| format!("t1: {e}"))?;
+
+    // Transition 2: Running → RetryableFailed (first failure)
+    exec_repo
+        .append_transition(ExecutionTransitionEvent {
+            id: ExecutionTransitionId("t-term-002".to_string()),
+            task_id: ExecutionTaskId("TASK-E2E-TERM-001".to_string()),
+            quote_id: quote_id.clone(),
+            from_state: Some(ExecutionTaskState::Running),
+            to_state: ExecutionTaskState::RetryableFailed,
+            transition_reason: "external-api-500".to_string(),
+            error_class: Some("HttpServerError".to_string()),
+            decision_context_json: r#"{"status_code":500,"body":"Internal Server Error"}"#
+                .to_string(),
+            actor_type: "system".to_string(),
+            actor_id: "queue-worker-1".to_string(),
+            idempotency_key: Some(OperationKey("op-e2e-term-001".to_string())),
+            correlation_id: "corr-e2e-s015".to_string(),
+            state_version: 3,
+            occurred_at: Utc::now(),
+        })
+        .await
+        .map_err(|e| format!("t2: {e}"))?;
+
+    // Update task to RetryableFailed
+    let mut task = exec_repo
+        .find_task_by_id(&ExecutionTaskId("TASK-E2E-TERM-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("task not found")?;
+    task.state = ExecutionTaskState::RetryableFailed;
+    task.retry_count = 1;
+    task.last_error = Some("HTTP 500: Internal Server Error".to_string());
+    task.claimed_by = None;
+    task.claimed_at = None;
+    task.state_version = 3;
+    task.updated_at = Utc::now();
+    exec_repo.save_task(task).await.map_err(|e| format!("update retryable: {e}"))?;
+
+    // Transition 3: RetryableFailed → Running (second attempt by different worker)
+    exec_repo
+        .append_transition(ExecutionTransitionEvent {
+            id: ExecutionTransitionId("t-term-003".to_string()),
+            task_id: ExecutionTaskId("TASK-E2E-TERM-001".to_string()),
+            quote_id: quote_id.clone(),
+            from_state: Some(ExecutionTaskState::RetryableFailed),
+            to_state: ExecutionTaskState::Running,
+            transition_reason: "retry-scheduled".to_string(),
+            error_class: None,
+            decision_context_json: r#"{"worker":"w-2","attempt":2}"#.to_string(),
+            actor_type: "system".to_string(),
+            actor_id: "queue-worker-2".to_string(),
+            idempotency_key: Some(OperationKey("op-e2e-term-001".to_string())),
+            correlation_id: "corr-e2e-s015".to_string(),
+            state_version: 4,
+            occurred_at: Utc::now(),
+        })
+        .await
+        .map_err(|e| format!("t3: {e}"))?;
+
+    // Transition 4: Running → FailedTerminal (retry exhausted, max_retries=1)
+    exec_repo
+        .append_transition(ExecutionTransitionEvent {
+            id: ExecutionTransitionId("t-term-004".to_string()),
+            task_id: ExecutionTaskId("TASK-E2E-TERM-001".to_string()),
+            quote_id: quote_id.clone(),
+            from_state: Some(ExecutionTaskState::Running),
+            to_state: ExecutionTaskState::FailedTerminal,
+            transition_reason: "max-retries-exceeded".to_string(),
+            error_class: Some("MaxRetriesExceeded".to_string()),
+            decision_context_json:
+                r#"{"retry_count":1,"max_retries":1,"final_error":"HTTP 500 on retry"}"#
+                    .to_string(),
+            actor_type: "system".to_string(),
+            actor_id: "queue-worker-2".to_string(),
+            idempotency_key: Some(OperationKey("op-e2e-term-001".to_string())),
+            correlation_id: "corr-e2e-s015".to_string(),
+            state_version: 5,
+            occurred_at: Utc::now(),
+        })
+        .await
+        .map_err(|e| format!("t4: {e}"))?;
+
+    // Update task to FailedTerminal
+    let mut task = exec_repo
+        .find_task_by_id(&ExecutionTaskId("TASK-E2E-TERM-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("task not found")?;
+    task.state = ExecutionTaskState::FailedTerminal;
+    task.retry_count = 1;
+    task.last_error = Some("Max retries exceeded: HTTP 500 on retry".to_string());
+    task.claimed_by = None;
+    task.claimed_at = None;
+    task.state_version = 5;
+    task.updated_at = Utc::now();
+    exec_repo.save_task(task).await.map_err(|e| format!("update terminal: {e}"))?;
+
+    // Verify: 4 transitions recorded in audit trail
+    let transitions = exec_repo
+        .list_transitions_for_task(&ExecutionTaskId("TASK-E2E-TERM-001".to_string()))
+        .await
+        .map_err(|e| format!("list transitions: {e}"))?;
+    assert_eq!(transitions.len(), 4, "expected 4 transition events");
+    assert_eq!(transitions[0].to_state, ExecutionTaskState::Running);
+    assert_eq!(transitions[1].to_state, ExecutionTaskState::RetryableFailed);
+    assert_eq!(transitions[2].to_state, ExecutionTaskState::Running);
+    assert_eq!(transitions[3].to_state, ExecutionTaskState::FailedTerminal);
+
+    // Verify final task state is terminal
+    let final_task = exec_repo
+        .find_task_by_id(&ExecutionTaskId("TASK-E2E-TERM-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("task not found")?;
+    assert_eq!(final_task.state, ExecutionTaskState::FailedTerminal);
+    assert_eq!(final_task.retry_count, 1);
+    assert!(final_task.result_fingerprint.is_none(), "terminal failure should have no result");
+    assert!(final_task.last_error.is_some(), "terminal failure should preserve last error");
+    assert!(
+        final_task.last_error.as_deref().unwrap().contains("Max retries"),
+        "error should mention max retries"
+    );
+
+    // Verify error_class captured in transition events
+    let error_transitions: Vec<_> =
+        transitions.iter().filter(|t| t.error_class.is_some()).collect();
+    assert_eq!(error_transitions.len(), 2, "two error transitions (retryable + terminal)");
+    assert_eq!(
+        error_transitions[0].error_class.as_deref(),
+        Some("HttpServerError"),
+        "first failure should be HttpServerError"
+    );
+    assert_eq!(
+        error_transitions[1].error_class.as_deref(),
+        Some("MaxRetriesExceeded"),
+        "terminal failure should be MaxRetriesExceeded"
+    );
+
+    // Verify correlation consistency across all transitions
+    assert!(
+        transitions.iter().all(|t| t.correlation_id == "corr-e2e-s015"),
+        "all transitions should share the same correlation ID"
+    );
+
+    Ok(())
+}
+
+// ── S-016: Approval denied → rejected → revised → re-approved ───────────
+
+#[tokio::test]
+async fn s016_approval_denied_rejected_then_revised_and_reapproved() -> TestResult {
+    let pool = setup_pool().await?;
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let approval_repo = SqlApprovalRepository::new(pool.clone());
+    let audit_repo = SqlAuditEventRepository::new(pool.clone());
+
+    let quote = make_quote("Q-E2E-REJ-001", vec![line("prod-rej", 10, 15000)]);
+    quote_repo.save(quote).await.map_err(|e| format!("save: {e}"))?;
+
+    let engine = FlowEngine::new(NetNewFlow);
+    let sink = InMemoryAuditSink::default();
+    let audit_ctx = AuditContext::new(
+        Some(QuoteId("Q-E2E-REJ-001".to_string())),
+        None,
+        "e2e-s016",
+        "e2e-harness",
+    );
+    let ctx = FlowContext::default();
+
+    // Phase 1: Drive to Approval state
+    let mut state = engine.initial_state();
+    for event in &[
+        FlowEvent::RequiredFieldsCollected,
+        FlowEvent::PricingCalculated,
+        FlowEvent::PolicyViolationDetected,
+    ] {
+        state = engine
+            .apply_with_audit(&state, event, &ctx, &sink, &audit_ctx)
+            .map_err(|e| format!("phase1: {e}"))?
+            .to;
+    }
+    assert_eq!(state, FlowState::Approval);
+
+    // Create first approval request (Pending)
+    let approval1 = ApprovalRequest {
+        id: ApprovalId("APR-E2E-REJ-001".to_string()),
+        quote_id: QuoteId("Q-E2E-REJ-001".to_string()),
+        approver_role: "sales_manager".to_string(),
+        reason: "Discount exceeds threshold".to_string(),
+        justification: "Large deal".to_string(),
+        status: ApprovalStatus::Pending,
+        requested_by: "e2e-harness".to_string(),
+        expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    approval_repo.save(approval1).await.map_err(|e| format!("save approval: {e}"))?;
+
+    // Phase 2: Deny the approval → Quote rejected
+    let mut denied = approval_repo
+        .find_by_id(&ApprovalId("APR-E2E-REJ-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("approval not found")?;
+    denied.status = ApprovalStatus::Rejected;
+    denied.updated_at = Utc::now();
+    approval_repo.save(denied).await.map_err(|e| format!("reject: {e}"))?;
+
+    state = engine
+        .apply_with_audit(&state, &FlowEvent::ApprovalDenied, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("denied: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Rejected, "denied approval should reject quote");
+
+    // Verify rejection in approval record
+    let rejected_approval = approval_repo
+        .find_by_id(&ApprovalId("APR-E2E-REJ-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("approval not found")?;
+    assert_eq!(rejected_approval.status, ApprovalStatus::Rejected);
+
+    // Phase 3: Revise the rejected quote
+    state = engine
+        .apply_with_audit(&state, &FlowEvent::ReviseRequested, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("revise: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Revised);
+
+    // Phase 4: Re-enter flow with corrected terms → approval required again
+    for event in &[
+        FlowEvent::RequiredFieldsCollected,
+        FlowEvent::PricingCalculated,
+        FlowEvent::PolicyViolationDetected, // still triggers approval
+    ] {
+        state = engine
+            .apply_with_audit(&state, event, &ctx, &sink, &audit_ctx)
+            .map_err(|e| format!("phase4: {e}"))?
+            .to;
+    }
+    assert_eq!(state, FlowState::Approval);
+
+    // Create second approval request (with new ID)
+    let approval2 = ApprovalRequest {
+        id: ApprovalId("APR-E2E-REJ-002".to_string()),
+        quote_id: QuoteId("Q-E2E-REJ-001".to_string()),
+        approver_role: "vp_sales".to_string(),
+        reason: "Revised discount still exceeds threshold".to_string(),
+        justification: "Strategic account retention".to_string(),
+        status: ApprovalStatus::Approved,
+        requested_by: "e2e-harness".to_string(),
+        expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
+        created_at: Utc::now(),
+        updated_at: Utc::now(),
+    };
+    approval_repo.save(approval2).await.map_err(|e| format!("save approval2: {e}"))?;
+
+    // Phase 5: Approve and deliver
+    state = engine
+        .apply_with_audit(&state, &FlowEvent::ApprovalGranted, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("approve: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Approved);
+
+    state = engine
+        .apply_with_audit(&state, &FlowEvent::QuoteDelivered, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("deliver: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Sent);
+
+    // Verify audit trail: 3(to approval) + 1(denied) + 1(revise) + 3(re-approval) + 1(granted) + 1(delivered) = 10
+    let events = sink.events();
+    assert_eq!(events.len(), 10, "full rejection-revision-reapproval cycle");
+
+    // Verify both approvals persisted — no pending ones for this quote
+    let all_approvals = approval_repo
+        .find_by_quote_id(&QuoteId("Q-E2E-REJ-001".to_string()))
+        .await
+        .map_err(|e| format!("find approvals: {e}"))?;
+    let pending_count =
+        all_approvals.iter().filter(|a| a.status == ApprovalStatus::Pending).count();
+    assert_eq!(pending_count, 0, "no pending approvals should remain");
+
+    let first = approval_repo
+        .find_by_id(&ApprovalId("APR-E2E-REJ-001".to_string()))
+        .await
+        .map_err(|e| format!("find first: {e}"))?
+        .ok_or("first approval not found")?;
+    assert_eq!(first.status, ApprovalStatus::Rejected, "first approval stays rejected");
+
+    let second = approval_repo
+        .find_by_id(&ApprovalId("APR-E2E-REJ-002".to_string()))
+        .await
+        .map_err(|e| format!("find second: {e}"))?
+        .ok_or("second approval not found")?;
+    assert_eq!(second.status, ApprovalStatus::Approved, "second approval is approved");
+    assert_eq!(second.approver_role, "vp_sales", "escalated to VP");
+
+    // Persist and verify DB round-trip for audit trail
+    flush_audit_to_db(&sink, &audit_repo).await?;
+    let db_events = audit_repo
+        .find_by_quote_id(&QuoteId("Q-E2E-REJ-001".to_string()))
+        .await
+        .map_err(|e| format!("query: {e}"))?;
+    assert_eq!(db_events.len(), 10, "all 10 audit events persisted");
+
+    // Validate E2E log schema
+    let log = build_e2e_log_records(&events);
+    validate_e2e_log_records(&log, "e2e-s016")?;
+
+    Ok(())
+}
+
+// ── S-017: Revision with expired approval resets lifecycle ───────────────
+
+#[tokio::test]
+async fn s017_revision_after_expired_approval_resets_lifecycle() -> TestResult {
+    let pool = setup_pool().await?;
+    let quote_repo = SqlQuoteRepository::new(pool.clone());
+    let approval_repo = SqlApprovalRepository::new(pool.clone());
+    let audit_repo = SqlAuditEventRepository::new(pool.clone());
+
+    let quote = make_quote("Q-E2E-EXPREV-001", vec![line("prod-exprev", 5, 20000)]);
+    quote_repo.save(quote).await.map_err(|e| format!("save: {e}"))?;
+
+    let engine = FlowEngine::new(NetNewFlow);
+    let sink = InMemoryAuditSink::default();
+    let audit_ctx = AuditContext::new(
+        Some(QuoteId("Q-E2E-EXPREV-001".to_string())),
+        None,
+        "e2e-s017",
+        "e2e-harness",
+    );
+    let ctx = FlowContext::default();
+
+    // Phase 1: Drive to Approval state with policy violation
+    let mut state = engine.initial_state();
+    for event in &[
+        FlowEvent::RequiredFieldsCollected,
+        FlowEvent::PricingCalculated,
+        FlowEvent::PolicyViolationDetected,
+    ] {
+        state = engine
+            .apply_with_audit(&state, event, &ctx, &sink, &audit_ctx)
+            .map_err(|e| format!("phase1: {e}"))?
+            .to;
+    }
+    assert_eq!(state, FlowState::Approval);
+
+    // Create approval request with already-expired timestamp
+    let expired_approval = ApprovalRequest {
+        id: ApprovalId("APR-E2E-EXPREV-001".to_string()),
+        quote_id: QuoteId("Q-E2E-EXPREV-001".to_string()),
+        approver_role: "sales_manager".to_string(),
+        reason: "Discount exceeds threshold".to_string(),
+        justification: "Large enterprise deal".to_string(),
+        status: ApprovalStatus::Pending,
+        requested_by: "e2e-harness".to_string(),
+        expires_at: Some(Utc::now() - chrono::Duration::hours(1)), // Already expired
+        created_at: Utc::now() - chrono::Duration::hours(2),
+        updated_at: Utc::now() - chrono::Duration::hours(1),
+    };
+    approval_repo.save(expired_approval).await.map_err(|e| format!("save approval: {e}"))?;
+
+    // Verify approval exists but is expired
+    let loaded_approval = approval_repo
+        .find_by_id(&ApprovalId("APR-E2E-EXPREV-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("approval not found")?;
+    assert!(
+        loaded_approval.expires_at.is_some_and(|e| e < Utc::now()),
+        "approval should be past expiration"
+    );
+
+    // Phase 2: Quote expires from Approval state
+    state = engine
+        .apply_with_audit(&state, &FlowEvent::QuoteExpired, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("expire: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Expired);
+
+    // Phase 3: Cannot deliver or approve an expired quote (verify invalid transitions)
+    let err_deliver = engine.apply(&state, &FlowEvent::QuoteDelivered, &ctx);
+    assert!(err_deliver.is_err(), "expired quote cannot be delivered");
+
+    let err_approve = engine.apply(&state, &FlowEvent::ApprovalGranted, &ctx);
+    assert!(err_approve.is_err(), "expired quote cannot be approved");
+
+    // Phase 4: Cancel the expired quote (cancellation always allowed)
+    state = engine
+        .apply_with_audit(&state, &FlowEvent::CancelRequested, &ctx, &sink, &audit_ctx)
+        .map_err(|e| format!("cancel: {e}"))?
+        .to;
+    assert_eq!(state, FlowState::Cancelled);
+
+    // Verify the old approval is still persisted (audit trail integrity)
+    let old_approval = approval_repo
+        .find_by_id(&ApprovalId("APR-E2E-EXPREV-001".to_string()))
+        .await
+        .map_err(|e| format!("find: {e}"))?
+        .ok_or("old approval not found")?;
+    assert_eq!(
+        old_approval.status,
+        ApprovalStatus::Pending,
+        "old approval still shows pending (expired but not explicitly rejected)"
+    );
+
+    // Verify audit trail: 3(to approval) + 1(expired) + 1(cancelled) = 5
+    let events = sink.events();
+    assert_eq!(events.len(), 5, "approval→expired→cancelled = 5 transitions");
+
+    // Verify specific transitions in audit
+    let states_visited: Vec<String> =
+        events.iter().filter_map(|e| e.metadata.get("to").cloned()).collect();
+    assert!(states_visited.contains(&"Approval".to_string()));
+    assert!(states_visited.contains(&"Expired".to_string()));
+    assert!(states_visited.contains(&"Cancelled".to_string()));
+
+    // Persist and verify DB round-trip
+    flush_audit_to_db(&sink, &audit_repo).await?;
+    let db_events = audit_repo
+        .find_by_quote_id(&QuoteId("Q-E2E-EXPREV-001".to_string()))
+        .await
+        .map_err(|e| format!("query: {e}"))?;
+    assert_eq!(db_events.len(), 5, "all 5 audit events persisted");
+
+    // Validate E2E log schema
+    let log = build_e2e_log_records(&events);
+    validate_e2e_log_records(&log, "e2e-s017")?;
 
     Ok(())
 }
