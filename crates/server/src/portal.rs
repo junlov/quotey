@@ -37,6 +37,16 @@ use tera::{Context, Tera};
 use tracing::{error, info, warn};
 use uuid::Uuid;
 
+/// Escape HTML special characters to prevent XSS in error pages.
+fn escape_html(input: &str) -> String {
+    input
+        .replace('&', "&amp;")
+        .replace('<', "&lt;")
+        .replace('>', "&gt;")
+        .replace('"', "&quot;")
+        .replace('\'', "&#x27;")
+}
+
 #[derive(Clone)]
 pub struct PortalState {
     db_pool: DbPool,
@@ -341,7 +351,7 @@ async fn view_quote_page(
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
     let quote_id = resolve_quote_by_token(&state.db_pool, &token)
         .await
-        .map_err(|(status, err)| (status, Html(format!("<h1>Error</h1><p>{}</p>", err.0.error))))?;
+        .map_err(|(status, err)| (status, Html(format!("<h1>Error</h1><p>{}</p>", escape_html(&err.0.error)))))?;
 
     // Fetch quote details with assumption tracking
     let quote_row = sqlx::query(
@@ -355,7 +365,7 @@ async fn view_quote_page(
     .fetch_optional(&state.db_pool)
     .await
     .map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
+        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))))
     })?;
 
     let quote_row = match quote_row {
@@ -378,7 +388,7 @@ async fn view_quote_page(
     .fetch_optional(&state.db_pool)
     .await
     .map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
+        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))))
     })?;
 
     // Use authoritative totals from pricing snapshot when available
@@ -425,7 +435,7 @@ async fn view_quote_page(
     .fetch_all(&state.db_pool)
     .await
     .map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
+        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))))
     })?;
 
     // Use authoritative totals from pricing snapshot, or compute from line items as fallback
@@ -485,7 +495,7 @@ async fn view_quote_page(
     .fetch_all(&state.db_pool)
     .await
     .map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
+        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))))
     })?;
 
     let comments: Vec<serde_json::Value> = comment_rows
@@ -761,7 +771,7 @@ async fn view_quote_page(
     let html = state.templates.render("quote_viewer.html", &context).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Template Error</h1><pre>{:?}</pre>", e)),
+            Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
         )
     })?;
 
@@ -992,7 +1002,7 @@ async fn portal_index_page(
     query_builder.push(" GROUP BY q.id ORDER BY q.created_at DESC LIMIT 100");
 
     let quote_rows = query_builder.build().fetch_all(&state.db_pool).await.map_err(|e| {
-        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", e)))
+        (StatusCode::INTERNAL_SERVER_ERROR, Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))))
     })?;
 
     // Calculate stats
@@ -1087,7 +1097,7 @@ async fn portal_index_page(
     let html = state.templates.render("index.html", &context).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Template Error</h1><pre>{:?}</pre>", e)),
+            Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
         )
     })?;
 
