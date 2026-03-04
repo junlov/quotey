@@ -368,7 +368,7 @@ async fn view_quote_page(
 
     // Fetch authoritative pricing snapshot from database (single source of truth for totals)
     let pricing_snapshot_row = sqlx::query(
-        "SELECT subtotal, discount_total, tax_total, total, currency
+        "SELECT subtotal, discount_total, tax_total, total, currency, pricing_trace_json
          FROM quote_pricing_snapshot
          WHERE quote_id = ? AND version = ?
          LIMIT 1",
@@ -387,6 +387,7 @@ async fn view_quote_page(
     let authoritative_tax: f64;
     let authoritative_total: f64;
     let has_snapshot: bool;
+    let pricing_trace: Option<serde_json::Value>;
 
     match &pricing_snapshot_row {
         Some(row) => {
@@ -395,6 +396,11 @@ async fn view_quote_page(
             authoritative_tax = row.try_get("tax_total").unwrap_or(0.0);
             authoritative_total = row.try_get("total").unwrap_or(0.0);
             has_snapshot = true;
+            pricing_trace = row
+                .try_get::<Option<String>, _>("pricing_trace_json")
+                .ok()
+                .flatten()
+                .and_then(|s| serde_json::from_str(&s).ok());
         }
         None => {
             authoritative_subtotal = 0.0;
@@ -402,6 +408,7 @@ async fn view_quote_page(
             authoritative_tax = 0.0;
             authoritative_total = 0.0;
             has_snapshot = false;
+            pricing_trace = None;
         }
     };
 
@@ -656,6 +663,18 @@ async fn view_quote_page(
 
     let has_assumptions = !assumptions.is_empty();
 
+    // Build pricing rationale for details-on-demand panel
+    let pricing_rationale = build_pricing_rationale(
+        final_subtotal,
+        final_discount,
+        final_tax,
+        final_total,
+        tax_rate_value,
+        &lines,
+        pricing_trace.as_ref(),
+        has_snapshot,
+    );
+
     context.insert("quote", &serde_json::json!({
         "quote_id": quote_id,
         "token": token,
@@ -688,6 +707,7 @@ async fn view_quote_page(
         "tax_rate_explicit": tax_rate_explicit,
         "payment_terms_explicit": payment_terms_explicit,
         "billing_country_explicit": billing_country_explicit,
+        "pricing_rationale": pricing_rationale,
     }));
 
     context.insert(
@@ -1077,6 +1097,150 @@ async fn portal_index_page(
 /// Format a price for display
 fn format_price(amount: f64) -> String {
     format!("${:.2}", amount)
+}
+
+/// Build pricing rationale data structure for the details-on-demand panel.
+/// Provides deterministic rule IDs, source explanations, and computation provenance.
+#[allow(clippy::too_many_arguments)]
+fn build_pricing_rationale(
+    subtotal: f64,
+    discount_total: f64,
+    tax_total: f64,
+    total: f64,
+    tax_rate: f64,
+    lines: &[serde_json::Value],
+    pricing_trace: Option<&serde_json::Value>,
+    has_snapshot: bool,
+) -> serde_json::Value {
+    // Build line item rationales
+    let line_rationales: Vec<serde_json::Value> = lines
+        .iter()
+        .enumerate()
+        .map(|(idx, line)| {
+            let product_name = line.get("product_name").and_then(|v| v.as_str()).unwrap_or("Unknown");
+            let quantity = line.get("quantity").and_then(|v| v.as_i64()).unwrap_or(0);
+            let unit_price_str = line.get("unit_price").and_then(|v| v.as_str()).unwrap_or("$0.00");
+            let total_str = line.get("total").and_then(|v| v.as_str()).unwrap_or("$0.00");
+
+            // Parse unit price from string (remove $ and parse)
+            let unit_price = unit_price_str
+                .trim_start_matches('$')
+                .replace(',', "")
+                .parse::<f64>()
+                .unwrap_or(0.0);
+            let line_subtotal = unit_price * quantity as f64;
+
+            serde_json::json!({
+                "index": idx + 1,
+                "product_name": product_name,
+                "quantity": quantity,
+                "unit_price": unit_price_str,
+                "line_subtotal": format_price(line_subtotal),
+                "line_total": total_str,
+                "calculation": format!("{} × {} = {}", quantity, unit_price_str, format_price(line_subtotal)),
+                "rule_id": format!("LINE-{:03}", idx + 1),
+                "source": "quote_line",
+            })
+        })
+        .collect();
+
+    // Build discount rationale if applicable
+    let discount_rationale = if discount_total > 0.0 {
+        let discount_pct = if subtotal > 0.0 { (discount_total / subtotal) * 100.0 } else { 0.0 };
+        Some(serde_json::json!({
+            "amount": format_price(discount_total),
+            "percentage": format!("{:.1}%", discount_pct),
+            "calculation": format!("{} × {:.1}% = {}", format_price(subtotal), discount_pct, format_price(discount_total)),
+            "rule_id": "DISCOUNT-001",
+            "source": "line_item_discounts",
+            "description": "Sum of per-line discounts",
+        }))
+    } else {
+        None
+    };
+
+    // Build tax rationale
+    let taxable_amount = subtotal - discount_total;
+    let tax_rationale = if tax_total > 0.0 {
+        Some(serde_json::json!({
+            "amount": format_price(tax_total),
+            "rate": format!("{:.0}%", tax_rate * 100.0),
+            "taxable_amount": format_price(taxable_amount),
+            "calculation": format!("{} × {:.0}% = {}", format_price(taxable_amount), tax_rate * 100.0, format_price(tax_total)),
+            "rule_id": "TAX-001",
+            "source": "tax_rate_configuration",
+            "description": "Tax applied to discounted subtotal",
+        }))
+    } else {
+        Some(serde_json::json!({
+            "amount": "$0.00",
+            "rate": format!("{:.0}%", tax_rate * 100.0),
+            "taxable_amount": format_price(taxable_amount),
+            "calculation": "Tax not applicable or rate is 0%",
+            "rule_id": "TAX-EXEMPT",
+            "source": "tax_exemption",
+            "description": "No tax applied (exempt or 0% rate)",
+        }))
+    };
+
+    // Build total calculation chain
+    let total_calculation = if discount_total > 0.0 && tax_total > 0.0 {
+        format!(
+            "{} - {} + {} = {}",
+            format_price(subtotal),
+            format_price(discount_total),
+            format_price(tax_total),
+            format_price(total)
+        )
+    } else if discount_total > 0.0 {
+        format!(
+            "{} - {} = {}",
+            format_price(subtotal),
+            format_price(discount_total),
+            format_price(total)
+        )
+    } else if tax_total > 0.0 {
+        format!(
+            "{} + {} = {}",
+            format_price(subtotal),
+            format_price(tax_total),
+            format_price(total)
+        )
+    } else {
+        format!("{} = {}", format_price(subtotal), format_price(total))
+    };
+
+    // Extract provenance from pricing trace if available
+    let provenance = pricing_trace.map(|trace| {
+        serde_json::json!({
+            "priced_at": trace.get("priced_at").and_then(|v| v.as_str()).unwrap_or("Unknown"),
+            "priced_by": trace.get("priced_by").and_then(|v| v.as_str()).unwrap_or("Unknown"),
+            "reason": trace.get("reason").and_then(|v| v.as_str()).unwrap_or("Standard pricing"),
+            "snapshot_available": has_snapshot,
+        })
+    }).unwrap_or_else(|| {
+        serde_json::json!({
+            "priced_at": "Unknown",
+            "priced_by": "fallback_calculation",
+            "reason": if has_snapshot { "Pricing snapshot" } else { "Computed from line items (no snapshot)" },
+            "snapshot_available": has_snapshot,
+        })
+    });
+
+    serde_json::json!({
+        "summary": {
+            "subtotal": format_price(subtotal),
+            "discount_total": format_price(discount_total),
+            "tax_total": format_price(tax_total),
+            "total": format_price(total),
+            "calculation_chain": total_calculation,
+        },
+        "line_items": line_rationales,
+        "discount": discount_rationale,
+        "tax": tax_rationale,
+        "provenance": provenance,
+        "has_detailed_trace": pricing_trace.is_some(),
+    })
 }
 
 async fn portal_manifest() -> impl IntoResponse {

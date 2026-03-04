@@ -671,29 +671,24 @@ fn handle_session_action(action_id: &str, value: Option<&str>) -> Option<Message
 
 /// Parse session ID from a value string like "session=abc123;action=resume"
 fn parse_session_id_from_value(value: &str) -> String {
-    value
-        .split(';')
-        .find_map(|part| part.strip_prefix("session="))
-        .unwrap_or("unknown")
-        .to_string()
+    value.split(';').find_map(|part| part.strip_prefix("session=")).unwrap_or("unknown").to_string()
 }
 
 /// Parse thread_ts from a value string like "thread=123.456;action=new_quote"
 fn parse_thread_ts_from_value(value: &str) -> String {
-    value
-        .split(';')
-        .find_map(|part| part.strip_prefix("thread="))
-        .unwrap_or("unknown")
-        .to_string()
+    value.split(';').find_map(|part| part.strip_prefix("thread=")).unwrap_or("unknown").to_string()
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        default_dispatcher, BlockActionEvent, EventContext, EventDispatcher, HandlerResult,
-        ReactionAddedEvent, ReactionApprovalAction, SlackEnvelope, SlackEvent, ThreadMessageEvent,
+        async_trait, default_dispatcher, BlockActionEvent, EventContext, EventDispatcher,
+        EventHandlerError, HandlerResult, NoopSessionLookup, ReactionAddedEvent,
+        ReactionApprovalAction, ResumableSessionInfo, ResumableThreadMessageService, SessionLookup,
+        SlackEnvelope, SlackEvent, ThreadMessageEvent, ThreadMessageService,
     };
     use crate::commands::SlashCommandPayload;
+    use quotey_core::domain::dialogue::SlackQuoteState;
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[tokio::test]
@@ -911,5 +906,248 @@ mod tests {
         assert_eq!(super::reaction_approval_action("🚀"), Some(ReactionApprovalAction::Discuss));
         assert_eq!(super::reaction_approval_action("👍"), Some(ReactionApprovalAction::Approve));
         assert_eq!(super::reaction_approval_action("👎"), Some(ReactionApprovalAction::Reject));
+    }
+
+    // Session resume tests
+
+    /// A mock session lookup that returns a fixed session for specific thread IDs.
+    struct MockSessionLookup {
+        sessions: std::collections::HashMap<String, ResumableSessionInfo>,
+    }
+
+    impl MockSessionLookup {
+        fn new() -> Self {
+            Self { sessions: std::collections::HashMap::new() }
+        }
+
+        fn with_session(mut self, thread_id: &str, info: ResumableSessionInfo) -> Self {
+            self.sessions.insert(thread_id.to_string(), info);
+            self
+        }
+    }
+
+    #[async_trait]
+    impl SessionLookup for MockSessionLookup {
+        async fn find_resumable_session(
+            &self,
+            thread_id: &str,
+        ) -> Result<Option<ResumableSessionInfo>, EventHandlerError> {
+            Ok(self.sessions.get(thread_id).cloned())
+        }
+    }
+
+    #[tokio::test]
+    async fn resumable_service_shows_resume_prompt_when_session_is_resumable() {
+        let lookup = MockSessionLookup::new().with_session(
+            "thread-resume",
+            ResumableSessionInfo {
+                session_id: "session-123".to_string(),
+                state: SlackQuoteState::ContextCollection,
+                started: "2024-01-01".to_string(),
+                last_active: "2024-01-01".to_string(),
+                is_expired: false,
+            },
+        );
+        let inner = super::NoopThreadMessageService::new();
+        let service = ResumableThreadMessageService::new(lookup, inner);
+
+        let event = ThreadMessageEvent {
+            channel_id: "C1".to_owned(),
+            thread_ts: "thread-resume".to_owned(),
+            user_id: "U1".to_owned(),
+            text: "any message".to_owned(),
+        };
+
+        let result = service
+            .handle_thread_message(&event, &EventContext::default())
+            .await
+            .expect("should not error");
+
+        let message = result.expect("should return a message");
+        assert!(message.fallback_text.contains("Resume session"));
+    }
+
+    #[tokio::test]
+    async fn resumable_service_shows_expired_recovery_when_session_is_expired() {
+        let lookup = MockSessionLookup::new().with_session(
+            "thread-expired",
+            ResumableSessionInfo {
+                session_id: "session-456".to_string(),
+                state: SlackQuoteState::IntentCapture,
+                started: "2024-01-01".to_string(),
+                last_active: "2024-01-01".to_string(),
+                is_expired: true,
+            },
+        );
+        let inner = super::NoopThreadMessageService::new();
+        let service = ResumableThreadMessageService::new(lookup, inner);
+
+        let event = ThreadMessageEvent {
+            channel_id: "C1".to_owned(),
+            thread_ts: "thread-expired".to_owned(),
+            user_id: "U1".to_owned(),
+            text: "any message".to_owned(),
+        };
+
+        let result = service
+            .handle_thread_message(&event, &EventContext::default())
+            .await
+            .expect("should not error");
+
+        let message = result.expect("should return a message");
+        assert!(message.fallback_text.contains("session has expired"));
+    }
+
+    #[tokio::test]
+    async fn resumable_service_delegates_to_inner_when_no_session_exists() {
+        let lookup = MockSessionLookup::new();
+        let inner = super::NoopThreadMessageService::new();
+        let service = ResumableThreadMessageService::new(lookup, inner);
+
+        let event = ThreadMessageEvent {
+            channel_id: "C1".to_owned(),
+            thread_ts: "thread-new".to_owned(),
+            user_id: "U1".to_owned(),
+            text: "quote for Acme Corp".to_owned(),
+        };
+
+        let result = service
+            .handle_thread_message(&event, &EventContext::default())
+            .await
+            .expect("should not error");
+
+        // NoopThreadMessageService returns a message for valid commands
+        assert!(result.is_some());
+    }
+
+    #[tokio::test]
+    async fn noop_session_lookup_always_returns_none() {
+        let lookup = NoopSessionLookup;
+        let result = lookup.find_resumable_session("any-thread").await.expect("should not error");
+        assert!(result.is_none());
+    }
+
+    #[test]
+    fn session_action_handler_resume_returns_resumed_message() {
+        let message =
+            super::handle_session_action("session.resume.v1", Some("session=abc123;action=resume"));
+        assert!(message.is_some());
+        let msg = message.unwrap();
+        assert!(msg.fallback_text.contains("Session Resumed"));
+    }
+
+    #[test]
+    fn session_action_handler_restart_returns_restarted_message() {
+        let message = super::handle_session_action(
+            "session.restart.v1",
+            Some("session=old456;action=restart"),
+        );
+        assert!(message.is_some());
+        let msg = message.unwrap();
+        assert!(msg.fallback_text.contains("Starting Fresh"));
+    }
+
+    #[test]
+    fn session_action_handler_new_returns_new_quote_message() {
+        let message =
+            super::handle_session_action("session.new.v1", Some("thread=123.456;action=new_quote"));
+        assert!(message.is_some());
+        let msg = message.unwrap();
+        assert!(msg.fallback_text.contains("New Quote"));
+    }
+
+    #[test]
+    fn session_action_handler_returns_none_for_unknown_action() {
+        let message = super::handle_session_action("unknown.action", None);
+        assert!(message.is_none());
+    }
+
+    #[test]
+    fn parse_session_id_extracts_id_from_value() {
+        assert_eq!(super::parse_session_id_from_value("session=abc123;action=resume"), "abc123");
+        assert_eq!(super::parse_session_id_from_value("action=restart;session=xyz789"), "xyz789");
+        assert_eq!(super::parse_session_id_from_value("no-session-here"), "unknown");
+    }
+
+    #[test]
+    fn parse_thread_ts_extracts_ts_from_value() {
+        assert_eq!(super::parse_thread_ts_from_value("thread=123.456;action=new_quote"), "123.456");
+        assert_eq!(super::parse_thread_ts_from_value("action=new;thread=999.888"), "999.888");
+        assert_eq!(super::parse_thread_ts_from_value("no-thread-here"), "unknown");
+    }
+
+    #[tokio::test]
+    async fn dispatcher_routes_session_resume_block_action() {
+        let dispatcher = default_dispatcher();
+        let envelope = SlackEnvelope {
+            envelope_id: "env-session-resume".to_owned(),
+            event: SlackEvent::BlockAction(BlockActionEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000000.8000".to_owned(),
+                thread_ts: Some("1730000000.7000".to_owned()),
+                user_id: "U9".to_owned(),
+                action_id: "session.resume.v1".to_owned(),
+                value: Some("session=session-xyz;action=resume".to_owned()),
+                quote_id: None,
+                request_id: Some("req-session-resume".to_owned()),
+            }),
+        };
+
+        let result =
+            dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
+        assert!(matches!(result, HandlerResult::Responded(_)));
+        if let HandlerResult::Responded(msg) = result {
+            assert!(msg.fallback_text.contains("Session Resumed"));
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_routes_session_restart_block_action() {
+        let dispatcher = default_dispatcher();
+        let envelope = SlackEnvelope {
+            envelope_id: "env-session-restart".to_owned(),
+            event: SlackEvent::BlockAction(BlockActionEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000000.9000".to_owned(),
+                thread_ts: Some("1730000000.7000".to_owned()),
+                user_id: "U10".to_owned(),
+                action_id: "session.restart.v1".to_owned(),
+                value: Some("session=session-old;action=restart".to_owned()),
+                quote_id: None,
+                request_id: Some("req-session-restart".to_owned()),
+            }),
+        };
+
+        let result =
+            dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
+        assert!(matches!(result, HandlerResult::Responded(_)));
+        if let HandlerResult::Responded(msg) = result {
+            assert!(msg.fallback_text.contains("Starting Fresh"));
+        }
+    }
+
+    #[tokio::test]
+    async fn dispatcher_routes_session_new_block_action() {
+        let dispatcher = default_dispatcher();
+        let envelope = SlackEnvelope {
+            envelope_id: "env-session-new".to_owned(),
+            event: SlackEvent::BlockAction(BlockActionEvent {
+                channel_id: "C1".to_owned(),
+                message_ts: "1730000001.0000".to_owned(),
+                thread_ts: Some("1730000000.7000".to_owned()),
+                user_id: "U11".to_owned(),
+                action_id: "session.new.v1".to_owned(),
+                value: Some("thread=1730000000.7000;action=new_quote".to_owned()),
+                quote_id: None,
+                request_id: Some("req-session-new".to_owned()),
+            }),
+        };
+
+        let result =
+            dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
+        assert!(matches!(result, HandlerResult::Responded(_)));
+        if let HandlerResult::Responded(msg) = result {
+            assert!(msg.fallback_text.contains("New Quote"));
+        }
     }
 }
