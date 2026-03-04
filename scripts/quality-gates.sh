@@ -151,11 +151,6 @@ if ! command -v cargo >/dev/null 2>&1; then
   exit 2
 fi
 
-if ! cargo deny --version >/dev/null 2>&1; then
-  log_error "cargo-deny is required. Install with: cargo install cargo-deny"
-  exit 2
-fi
-
 # Define gate functions
 run_build() {
   run_gate "build" cargo build --workspace
@@ -221,18 +216,17 @@ qa_threshold_checks() {
 
   local critical_gap_count max_critical_gaps
   critical_gap_count="$(
-    grep -E '^\| G-[0-9]+' .planning/qa/CRITICAL_PATH_MATRIX.md | \
-      awk -F'|' '
-        function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
-        {
-          pri=toupper(trim($4))
-          status=toupper(trim($6))
-          if ((pri == "P0" || pri == "P1") && status !~ /CLOSED/) {
-            c++
-          }
+    awk -F'|' '
+      function trim(s) { gsub(/^[ \t]+|[ \t]+$/, "", s); return s }
+      /^\| G-[0-9]+/ {
+        pri=toupper(trim($4))
+        status=toupper(trim($6))
+        if ((pri == "P0" || pri == "P1") && status !~ /CLOSED/) {
+          c++
         }
-        END { print c+0 }
-      '
+      }
+      END { print c+0 }
+    ' .planning/qa/CRITICAL_PATH_MATRIX.md
   )"
   max_critical_gaps="${QUOTEY_THRESHOLD_CRITICAL_PATH_GAPS_MAX:-0}"
   echo "qa: open_p0_p1_critical_gaps=${critical_gap_count} (threshold <= ${max_critical_gaps})"
@@ -274,13 +268,9 @@ qa_threshold_checks() {
     return 1
   fi
 
-  if ! command -v rg >/dev/null 2>&1; then
-    echo "qa: rg is required for log-validator checks"
-    return 1
-  fi
-
   local log_validator_cases min_log_validator_cases
-  log_validator_cases="$(rg -n "validate_e2e_log_records\\(&" crates/db/tests/e2e_scenarios.rs | wc -l | tr -d ' ')"
+  log_validator_cases="$(grep -c 'validate_e2e_log_records(&' crates/db/tests/e2e_scenarios.rs 2>/dev/null || true)"
+  log_validator_cases="${log_validator_cases:-0}"
   min_log_validator_cases="${QUOTEY_THRESHOLD_LOG_VALIDATOR_CASES_MIN:-5}"
   echo "qa: log_validator_cases=${log_validator_cases} (threshold >= ${min_log_validator_cases})"
   if [[ "$log_validator_cases" -lt "$min_log_validator_cases" ]]; then
@@ -296,6 +286,10 @@ run_qa() {
 }
 
 run_deny() {
+  if ! cargo deny --version >/dev/null 2>&1; then
+    log_error "cargo-deny is required for deny gate. Install with: cargo install cargo-deny"
+    return 1
+  fi
   run_gate "deny" cargo deny check
 }
 
