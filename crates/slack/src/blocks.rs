@@ -1798,6 +1798,39 @@ pub fn session_expired_recovery_message(thread_ts: &str) -> MessageTemplate {
         .build()
 }
 
+/// Build a confirmation message after resuming a session.
+pub fn session_resumed_message(session_id: &str) -> MessageTemplate {
+    MessageBuilder::new("Session resumed")
+        .section("session.resumed.v1", |section| {
+            section.mrkdwn(format!(
+                "✅ *Session Resumed*\nYour quote session `{session_id}` has been restored.\nContinue where you left off."
+            ));
+        })
+        .build()
+}
+
+/// Build a confirmation message after restarting a session.
+pub fn session_restarted_message(_old_session_id: &str) -> MessageTemplate {
+    MessageBuilder::new("Session restarted")
+        .section("session.restarted.v1", |section| {
+            section.mrkdwn(
+                "🔄 *Starting Fresh*\nPrevious session cleared. Let's create a new quote.\n\nTell me what you'd like to quote.",
+            );
+        })
+        .build()
+}
+
+/// Build a confirmation message for starting a new quote after expiration.
+pub fn new_quote_started_message(_thread_ts: &str) -> MessageTemplate {
+    MessageBuilder::new("New quote started")
+        .section("session.new.v1", |section| {
+            section.mrkdwn(
+                "✨ *New Quote*\nLet's start a fresh quote.\n\nTell me what you'd like to quote.",
+            );
+        })
+        .build()
+}
+
 #[cfg(test)]
 mod tests {
     use super::{

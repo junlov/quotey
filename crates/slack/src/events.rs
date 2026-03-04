@@ -11,7 +11,7 @@ use crate::{
         SlashCommandPayload,
     },
 };
-use quotey_core::domain::dialogue::{DialogueSessionStatus, SlackQuoteState};
+use quotey_core::domain::dialogue::SlackQuoteState;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlackEnvelope {
@@ -647,6 +647,44 @@ fn is_supported_approval_reaction(reaction: &str) -> bool {
 
 fn normalize_reaction_token(reaction: &str) -> String {
     reaction.trim().trim_matches(':').to_ascii_lowercase()
+}
+
+/// Handle session-related block actions (resume, restart, new).
+/// Returns a message template if the action is session-related, None otherwise.
+fn handle_session_action(action_id: &str, value: Option<&str>) -> Option<MessageTemplate> {
+    match action_id {
+        "session.resume.v1" => {
+            let session_id = parse_session_id_from_value(value.unwrap_or(""));
+            Some(crate::blocks::session_resumed_message(&session_id))
+        }
+        "session.restart.v1" => {
+            let session_id = parse_session_id_from_value(value.unwrap_or(""));
+            Some(crate::blocks::session_restarted_message(&session_id))
+        }
+        "session.new.v1" => {
+            let thread_ts = parse_thread_ts_from_value(value.unwrap_or(""));
+            Some(crate::blocks::new_quote_started_message(&thread_ts))
+        }
+        _ => None,
+    }
+}
+
+/// Parse session ID from a value string like "session=abc123;action=resume"
+fn parse_session_id_from_value(value: &str) -> String {
+    value
+        .split(';')
+        .find_map(|part| part.strip_prefix("session="))
+        .unwrap_or("unknown")
+        .to_string()
+}
+
+/// Parse thread_ts from a value string like "thread=123.456;action=new_quote"
+fn parse_thread_ts_from_value(value: &str) -> String {
+    value
+        .split(';')
+        .find_map(|part| part.strip_prefix("thread="))
+        .unwrap_or("unknown")
+        .to_string()
 }
 
 #[cfg(test)]
