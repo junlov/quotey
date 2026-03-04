@@ -361,6 +361,43 @@
             padding: 0;
         }
 
+        /* ========== PRICING RATIONALE PANEL ========== */
+        #pricingRationaleCard .card-header {
+            transition: background-color 0.2s ease;
+        }
+
+        #pricingRationaleCard .card-header:hover {
+            background-color: var(--bg-elevated);
+        }
+
+        #pricingRationaleCard .card-header:focus-visible {
+            outline: 2px solid var(--primary-color);
+            outline-offset: -2px;
+        }
+
+        .pricing-section h3 {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .pricing-section h3::before {
+            content: '';
+            width: 3px;
+            height: 14px;
+            background: var(--primary-color);
+            border-radius: 2px;
+        }
+
+        .pricing-line-item {
+            transition: transform 0.15s ease, box-shadow 0.15s ease;
+        }
+
+        .pricing-line-item:hover {
+            transform: translateY(-1px);
+            box-shadow: var(--shadow-sm);
+        }
+
         /* ========== LINE ITEMS TABLE ========== */
         .line-items-table {
             width: 100%;
@@ -1589,6 +1626,109 @@
                 </div>
             </article>
 
+            <!-- Pricing Rationale Panel -->
+            <article class="card" id="pricingRationaleCard">
+                <div class="card-header" style="cursor: pointer;" onclick="togglePricingRationale()" role="button" aria-expanded="false" aria-controls="pricingRationaleBody">
+                    <h2 class="card-title">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 7h6m0 3.666V14m-6.996 4.333h6.999M9 14h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+                        Pricing Details
+                        <span style="margin-left: auto; font-size: 12px; color: var(--text-tertiary); font-weight: 500;">
+                            <span id="pricingRationaleToggle">Show breakdown</span>
+                            <svg id="pricingRationaleIcon" width="16" height="16" fill="none" stroke="currentColor" viewBox="0 0 24 24" style="margin-left: 4px; transition: transform 0.2s;"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M19 9l-7 7-7-7"/></svg>
+                        </span>
+                    </h2>
+                </div>
+                <div class="card-body" id="pricingRationaleBody" style="display: none;">
+                    <!-- Compact Summary (Always Visible) -->
+                    <div class="pricing-summary-compact" style="margin-bottom: 20px; padding: 16px; background: var(--bg-elevated); border-radius: var(--radius); border: 1px solid var(--border-light);">
+                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                            <span style="font-size: 13px; color: var(--text-secondary);">Calculation</span>
+                            <span style="font-family: 'SF Mono', monospace; font-size: 13px; color: var(--text-primary);">{{ quote.pricing_rationale.summary.calculation_chain }}</span>
+                        </div>
+                        <div style="display: flex; justify-content: space-between; align-items: center;">
+                            <span style="font-size: 13px; color: var(--text-secondary);">Source</span>
+                            <span style="font-size: 12px; color: var(--text-tertiary);">{{ quote.pricing_rationale.provenance.priced_by }} • {{ quote.pricing_rationale.provenance.priced_at | truncate(length=19, end="") }}</span>
+                        </div>
+                    </div>
+
+                    <!-- Line Items Breakdown -->
+                    <div class="pricing-section" style="margin-bottom: 24px;">
+                        <h3 style="font-size: 13px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">Line Items</h3>
+                        <div class="pricing-lines" style="display: flex; flex-direction: column; gap: 10px;">
+                            {% for line in quote.pricing_rationale.line_items %}
+                            <div class="pricing-line-item" style="display: flex; justify-content: space-between; align-items: flex-start; padding: 12px; background: var(--bg-elevated); border-radius: var(--radius); border: 1px solid var(--border-light);">
+                                <div style="flex: 1;">
+                                    <div style="display: flex; align-items: center; gap: 8px; margin-bottom: 4px;">
+                                        <span style="font-size: 11px; color: var(--text-tertiary); font-family: monospace;">{{ line.rule_id }}</span>
+                                        <span style="font-size: 13px; font-weight: 500; color: var(--text-primary);">{{ line.product_name }}</span>
+                                    </div>
+                                    <div style="font-size: 12px; color: var(--text-secondary);">{{ line.calculation }}</div>
+                                </div>
+                                <div style="text-align: right;">
+                                    <div style="font-family: 'SF Mono', monospace; font-size: 14px; font-weight: 600; color: var(--text-primary);">{{ line.line_total }}</div>
+                                    <div style="font-size: 11px; color: var(--text-tertiary);">{{ line.source }}</div>
+                                </div>
+                            </div>
+                            {% endfor %}
+                        </div>
+                    </div>
+
+                    <!-- Discount Breakdown -->
+                    {% if quote.pricing_rationale.discount %}
+                    <div class="pricing-section" style="margin-bottom: 24px;">
+                        <h3 style="font-size: 13px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">Discount</h3>
+                        <div style="padding: 12px; background: linear-gradient(135deg, #ecfdf5 0%, #d1fae5 100%); border-radius: var(--radius); border: 1px solid #6ee7b7;">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <span style="font-size: 11px; color: #065f46; font-family: monospace; background: rgba(255,255,255,0.5); padding: 2px 6px; border-radius: 4px;">{{ quote.pricing_rationale.discount.rule_id }}</span>
+                                    <span style="font-size: 13px; font-weight: 500; color: #065f46;">{{ quote.pricing_rationale.discount.percentage }} off</span>
+                                </div>
+                                <span style="font-family: 'SF Mono', monospace; font-size: 16px; font-weight: 700; color: #059669;">-{{ quote.pricing_rationale.discount.amount }}</span>
+                            </div>
+                            <div style="font-size: 12px; color: #047857; margin-bottom: 4px;">{{ quote.pricing_rationale.discount.calculation }}</div>
+                            <div style="font-size: 11px; color: #065f46; opacity: 0.8;">{{ quote.pricing_rationale.discount.description }} • Source: {{ quote.pricing_rationale.discount.source }}</div>
+                        </div>
+                    </div>
+                    {% endif %}
+
+                    <!-- Tax Breakdown -->
+                    <div class="pricing-section" style="margin-bottom: 24px;">
+                        <h3 style="font-size: 13px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">Tax</h3>
+                        <div style="padding: 12px; background: var(--bg-elevated); border-radius: var(--radius); border: 1px solid var(--border-light);">
+                            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
+                                <div style="display: flex; align-items: center; gap: 8px;">
+                                    <span style="font-size: 11px; color: var(--text-tertiary); font-family: monospace; background: var(--bg-card); padding: 2px 6px; border-radius: 4px;">{{ quote.pricing_rationale.tax.rule_id }}</span>
+                                    <span style="font-size: 13px; font-weight: 500; color: var(--text-primary);">{{ quote.pricing_rationale.tax.rate }}</span>
+                                </div>
+                                <span style="font-family: 'SF Mono', monospace; font-size: 16px; font-weight: 600; color: var(--text-primary);">{{ quote.pricing_rationale.tax.amount }}</span>
+                            </div>
+                            <div style="font-size: 12px; color: var(--text-secondary); margin-bottom: 4px;">{{ quote.pricing_rationale.tax.calculation }}</div>
+                            <div style="font-size: 11px; color: var(--text-tertiary);">{{ quote.pricing_rationale.tax.description }} • Source: {{ quote.pricing_rationale.tax.source }}</div>
+                        </div>
+                    </div>
+
+                    <!-- Provenance / Audit Trail -->
+                    <div class="pricing-section">
+                        <h3 style="font-size: 13px; font-weight: 600; color: var(--text-secondary); text-transform: uppercase; letter-spacing: 0.5px; margin-bottom: 12px;">Pricing Provenance</h3>
+                        <div style="padding: 12px; background: var(--bg-elevated); border-radius: var(--radius); border: 1px solid var(--border-light);">
+                            <div style="display: grid; grid-template-columns: auto 1fr; gap: 8px 16px; font-size: 13px;">
+                                <span style="color: var(--text-tertiary);">Priced by</span>
+                                <span style="color: var(--text-primary); font-family: monospace;">{{ quote.pricing_rationale.provenance.priced_by }}</span>
+                                
+                                <span style="color: var(--text-tertiary);">Timestamp</span>
+                                <span style="color: var(--text-primary);">{{ quote.pricing_rationale.provenance.priced_at }}</span>
+                                
+                                <span style="color: var(--text-tertiary);">Reason</span>
+                                <span style="color: var(--text-primary);">{{ quote.pricing_rationale.provenance.reason }}</span>
+                                
+                                <span style="color: var(--text-tertiary);">Snapshot</span>
+                                <span style="color: var(--text-primary);">{% if quote.pricing_rationale.provenance.snapshot_available %}✓ Available{% else %}✗ Not available{% endif %}</span>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </article>
+
             <!-- Comments Section -->
             <section class="comments-card" aria-labelledby="comments-heading">
                 <div class="comment-form">
@@ -2018,6 +2158,28 @@
         function closeModal(modalId) {
             document.getElementById(modalId).classList.remove('active');
             document.body.style.overflow = '';
+        }
+
+        // Toggle pricing rationale panel
+        function togglePricingRationale() {
+            const body = document.getElementById('pricingRationaleBody');
+            const toggle = document.getElementById('pricingRationaleToggle');
+            const icon = document.getElementById('pricingRationaleIcon');
+            const header = document.querySelector('#pricingRationaleCard .card-header');
+            
+            const isExpanded = body.style.display !== 'none';
+            
+            if (isExpanded) {
+                body.style.display = 'none';
+                toggle.textContent = 'Show breakdown';
+                icon.style.transform = 'rotate(0deg)';
+                header.setAttribute('aria-expanded', 'false');
+            } else {
+                body.style.display = 'block';
+                toggle.textContent = 'Hide breakdown';
+                icon.style.transform = 'rotate(180deg)';
+                header.setAttribute('aria-expanded', 'true');
+            }
         }
 
         // Set loading state on button
