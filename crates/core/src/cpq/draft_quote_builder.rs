@@ -92,10 +92,8 @@ impl DraftQuoteBuilder {
         );
 
         if lines.is_empty() {
-            return Ok(DraftQuoteBuildResult {
-                quote: None,
-                warnings: vec!["No matched products available to build draft quote".to_string()],
-            });
+            warnings.push("No matched products available to build draft quote".to_string());
+            return Ok(DraftQuoteBuildResult { quote: None, warnings });
         }
 
         let now = Utc::now();
@@ -270,5 +268,7 @@ mod tests {
 
         assert!(result.quote.is_none());
         assert!(result.warnings.iter().any(|warning| warning.contains("No matched products")));
+        assert!(result.warnings.iter().any(|warning| warning.contains("Clarification required")));
+        assert!(result.warnings.iter().any(|warning| warning.contains("Unmatched requirement")));
     }
 }

@@ -20,6 +20,7 @@ Explicit overrides are supported when needed:
 
 - `QUOTEY_TMPDIR_OVERRIDE`
 - `QUOTEY_CARGO_TARGET_DIR_OVERRIDE`
+- `QUOTEY_FAIL_FAST` (default `1`)
 
 ## Gate Matrix
 
@@ -44,15 +45,35 @@ Explicit overrides are supported when needed:
    - Pass condition: all unit/integration/doc tests pass
    - Failure action: fix regressions, rerun targeted tests, then rerun full matrix
 
-5. `deny`
+5. `qa`
+   - Command: `scripts/quality-gates.sh qa` (invokes QA threshold checks)
+   - Pass condition:
+     - real-DB coverage ratio meets threshold
+     - open P0/P1 critical-path gap count is within threshold
+     - E2E scenario suite meets pass-rate threshold
+     - log-validator case count meets threshold
+   - Failure action: fix threshold violation source (tests/policy/gaps), then rerun
+
+6. `deny`
    - Command: `cargo deny check`
    - Pass condition: dependency and policy checks pass
    - Failure action: remediate denied crate/license/advisory and rerun
 
-6. `doc`
+7. `doc`
    - Command: `cargo doc --workspace --no-deps`
    - Pass condition: docs build successfully for workspace crates
    - Failure action: fix rustdoc/build issues and rerun
+
+## QA Threshold Contract
+
+Default threshold environment variables:
+
+| Variable | Default | Meaning |
+|---|---:|---|
+| `QUOTEY_THRESHOLD_REAL_DB_PCT` | `20` | Minimum real-DB test ratio from `scripts/test_inventory.sh --json` |
+| `QUOTEY_THRESHOLD_CRITICAL_PATH_GAPS_MAX` | `0` | Max allowed open P0/P1 gaps in `.planning/qa/CRITICAL_PATH_MATRIX.md` |
+| `QUOTEY_THRESHOLD_E2E_PASS_PCT` | `100` | Required pass rate for `cargo test -p quotey-db --test e2e_scenarios` |
+| `QUOTEY_THRESHOLD_LOG_VALIDATOR_CASES_MIN` | `5` | Minimum count of `validate_e2e_log_records(&...)` call sites |
 
 ## Actionable Failure Output Contract
 
@@ -62,7 +83,8 @@ The script prints explicit gate lifecycle markers:
 - `PASS <gate>`
 - `FAIL <gate>: fix the reported issue and rerun scripts/quality-gates.sh`
 
-This ensures failures are immediately attributable to a single gate.
+With fail-fast enabled (`QUOTEY_FAIL_FAST=1`, default), execution stops at the first
+gate failure so remediation can happen immediately.
 
 ## Migration Reversibility Workflow (FND-10d)
 

@@ -13,8 +13,11 @@ pub async fn parse_requirements(
     let response =
         client.complete(&prompt).await.context("requirement extraction completion failed")?;
 
-    let extracted: ExtractedRequirements =
-        serde_json::from_str(&response).context("requirement extraction returned invalid JSON")?;
+    let mut extracted: ExtractedRequirements = parse_extracted_requirements(&response)
+        .context("requirement extraction returned invalid JSON")?;
+
+    extracted.sender_hint = normalize_optional_hint(extracted.sender_hint);
+    extracted.context_hint = normalize_optional_hint(extracted.context_hint);
 
     if extracted.source_type != source_type {
         return Err(anyhow!(
@@ -40,6 +43,48 @@ pub async fn parse_rfp_requirements(
     source_text: &str,
 ) -> Result<ExtractedRequirements> {
     parse_requirements(client, RequirementSourceType::Rfp, source_text).await
+}
+
+fn parse_extracted_requirements(response: &str) -> Result<ExtractedRequirements> {
+    if let Ok(parsed) = serde_json::from_str::<ExtractedRequirements>(response) {
+        return Ok(parsed);
+    }
+
+    if let Some(json_payload) = strip_markdown_code_fence(response) {
+        return serde_json::from_str::<ExtractedRequirements>(&json_payload)
+            .context("failed to parse fenced JSON payload");
+    }
+
+    Err(anyhow!("response did not contain valid JSON object"))
+}
+
+fn strip_markdown_code_fence(response: &str) -> Option<String> {
+    let trimmed = response.trim();
+    let fenced = trimmed.strip_prefix("```")?;
+    let fenced = fenced.strip_suffix("```")?;
+    let fenced = fenced.trim_start();
+    let payload = if fenced.starts_with('{') || fenced.starts_with('[') {
+        fenced
+    } else {
+        fenced.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
+    };
+    let fenced = payload.trim();
+    if fenced.is_empty() {
+        None
+    } else {
+        Some(fenced.to_string())
+    }
+}
+
+fn normalize_optional_hint(value: Option<String>) -> Option<String> {
+    value.and_then(|raw| {
+        let trimmed = raw.trim();
+        if trimmed.is_empty() {
+            None
+        } else {
+            Some(trimmed.to_string())
+        }
+    })
 }
 
 #[cfg(test)]
@@ -160,5 +205,23 @@ mod tests {
         assert_eq!(parsed.source_type, RequirementSourceType::Email);
         assert_eq!(parsed.sender_hint.as_deref(), Some("buyer@example.com"));
         assert_eq!(parsed.context_hint.as_deref(), Some("Urgent replacement quote"));
+    }
+
+    #[tokio::test]
+    async fn parse_requirements_accepts_fenced_json_response() {
+        let client = MockLlmClient {
+            response: format!(
+                "```json\n{{\n  \"schema_version\":\"{}\",\n  \"source_type\":\"email\",\n  \"sender_hint\":\"  buyer@example.com  \",\n  \"context_hint\":\"  Urgent quote request  \",\n  \"requirements\":[],\n  \"ambiguities\":[],\n  \"missing_info\":[]\n}}\n```",
+                REQUIREMENT_EXTRACTION_SCHEMA_VERSION
+            ),
+        };
+
+        let parsed = parse_requirements(&client, RequirementSourceType::Email, "raw")
+            .await
+            .expect("fenced payload should parse");
+
+        assert_eq!(parsed.source_type, RequirementSourceType::Email);
+        assert_eq!(parsed.sender_hint.as_deref(), Some("buyer@example.com"));
+        assert_eq!(parsed.context_hint.as_deref(), Some("Urgent quote request"));
     }
 }

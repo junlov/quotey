@@ -11,6 +11,7 @@ use crate::{
         SlashCommandPayload,
     },
 };
+use quotey_core::domain::dialogue::{DialogueSessionStatus, SlackQuoteState};
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlackEnvelope {
@@ -293,6 +294,92 @@ impl ThreadMessageService for NoopThreadMessageService {
     }
 }
 
+/// Minimal session info needed to render a resume prompt.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ResumableSessionInfo {
+    pub session_id: String,
+    pub state: SlackQuoteState,
+    pub started: String,
+    pub last_active: String,
+    pub is_expired: bool,
+}
+
+/// Trait for looking up sessions by thread ID.
+/// Implementations can delegate to a database repository or provide mock data.
+#[async_trait]
+pub trait SessionLookup: Send + Sync {
+    async fn find_resumable_session(
+        &self,
+        thread_id: &str,
+    ) -> Result<Option<ResumableSessionInfo>, EventHandlerError>;
+}
+
+/// Noop session lookup that never finds any sessions.
+pub struct NoopSessionLookup;
+
+#[async_trait]
+impl SessionLookup for NoopSessionLookup {
+    async fn find_resumable_session(
+        &self,
+        _thread_id: &str,
+    ) -> Result<Option<ResumableSessionInfo>, EventHandlerError> {
+        Ok(None)
+    }
+}
+
+/// A ThreadMessageService that checks for resumable sessions before delegating.
+/// If a resumable session exists, returns a resume prompt.
+/// If an expired session exists, returns an expired recovery message.
+/// Otherwise, delegates to the inner service.
+pub struct ResumableThreadMessageService<L, S>
+where
+    L: SessionLookup,
+    S: ThreadMessageService,
+{
+    lookup: L,
+    inner: S,
+}
+
+impl<L, S> ResumableThreadMessageService<L, S>
+where
+    L: SessionLookup,
+    S: ThreadMessageService,
+{
+    pub fn new(lookup: L, inner: S) -> Self {
+        Self { lookup, inner }
+    }
+}
+
+#[async_trait]
+impl<L, S> ThreadMessageService for ResumableThreadMessageService<L, S>
+where
+    L: SessionLookup + 'static,
+    S: ThreadMessageService + 'static,
+{
+    async fn handle_thread_message(
+        &self,
+        event: &ThreadMessageEvent,
+        ctx: &EventContext,
+    ) -> Result<Option<MessageTemplate>, EventHandlerError> {
+        // First, check for an existing session on this thread
+        if let Some(info) = self.lookup.find_resumable_session(&event.thread_ts).await? {
+            if info.is_expired {
+                return Ok(Some(crate::blocks::session_expired_recovery_message(&event.thread_ts)));
+            } else {
+                return Ok(Some(crate::blocks::session_resume_prompt(
+                    &info.session_id,
+                    &info.state,
+                    &info.started,
+                    &info.last_active,
+                )));
+            }
+        }
+
+        // No existing session, delegate to inner service
+        self.inner.handle_thread_message(event, ctx).await
+    }
+}
+
 #[async_trait]
 pub trait BlockActionService: Send + Sync {
     async fn handle_block_action(
@@ -372,6 +459,11 @@ impl BlockActionService for NoopBlockActionService {
             &event.action_id,
             inferred_quote_id.as_deref(),
         ) {
+            return Ok(Some(message));
+        }
+
+        // Handle session resume/restart/new actions
+        if let Some(message) = handle_session_action(&event.action_id, event.value.as_deref()) {
             return Ok(Some(message));
         }
 

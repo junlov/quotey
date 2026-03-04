@@ -1006,20 +1006,21 @@ pub fn render_assumption_card_slack_blocks(card: &AssumptionCard) -> Vec<serde_j
             }
             AssumptionState::Assumed => {
                 // Show "Confirm" and "Change" buttons for assumed values
-                let mut elements = vec![serde_json::json!({
-                    "type": "button",
-                    "text": {
-                        "type": "plain_text",
-                        "text": "✓ Confirm",
-                        "emoji": true
-                    },
-                    "value": format!("confirm:{}", card.field),
-                    "action_id": format!("card_confirm_{}", card.field),
-                    "style": "primary"
-                })];
-
-                if !card.options.is_empty() {
-                    elements.push(serde_json::json!({
+                // Change button is ALWAYS shown for assumed values since users
+                // must be able to override system defaults
+                let elements = vec![
+                    serde_json::json!({
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "✓ Confirm",
+                            "emoji": true
+                        },
+                        "value": format!("confirm:{}", card.field),
+                        "action_id": format!("card_confirm_{}", card.field),
+                        "style": "primary"
+                    }),
+                    serde_json::json!({
                         "type": "button",
                         "text": {
                             "type": "plain_text",
@@ -1029,8 +1030,8 @@ pub fn render_assumption_card_slack_blocks(card: &AssumptionCard) -> Vec<serde_j
                         "value": format!("change:{}", card.field),
                         "action_id": format!("card_change_{}", card.field),
                         "style": "secondary"
-                    }));
-                }
+                    }),
+                ];
 
                 blocks.push(serde_json::json!({
                     "type": "actions",
@@ -1182,9 +1183,10 @@ pub fn ambiguity_set_to_card_set(set: &AmbiguitySet) -> AssumptionCardSet {
     for ambiguity in &set.ambiguities {
         let category = match ambiguity.ambiguity_type {
             AmbiguityType::CustomerResolution => AssumptionCategory::Customer,
-            AmbiguityType::ProductDisambiguation | AmbiguityType::MissingProductConfiguration => {
-                AssumptionCategory::Product
-            }
+            AmbiguityType::ProductDisambiguation
+            | AmbiguityType::MissingProductConfiguration
+            | AmbiguityType::MissingQuantity
+            | AmbiguityType::QuantityAssociation => AssumptionCategory::Product,
             AmbiguityType::AmbiguousDiscount => AssumptionCategory::Pricing,
             AmbiguityType::DefaultCurrency | AmbiguityType::MissingBillingCountry => {
                 AssumptionCategory::Billing
@@ -1193,7 +1195,6 @@ pub fn ambiguity_set_to_card_set(set: &AmbiguitySet) -> AssumptionCardSet {
             | AmbiguityType::MissingStartDate
             | AmbiguityType::DateFormatAmbiguity
             | AmbiguityType::DateDisambiguation => AssumptionCategory::Term,
-            _ => AssumptionCategory::General,
         };
 
         let card = AssumptionCard::from_ambiguity(ambiguity, category);

@@ -19,7 +19,11 @@ declare -A TEST_FILES
 
 count_test_fns() {
     local file="$1"
-    grep -cE '#\[(tokio::)?test\]' "$file" 2>/dev/null || echo 0
+    local count
+    count=$(grep -cE '#\[(tokio::)?test\]' "$file" 2>/dev/null || true)
+    # grep -c emits "0" with exit code 1 when no matches are found.
+    # Normalizing through a single printf avoids accidental "0\n0" output.
+    printf '%s\n' "${count:-0}"
 }
 
 # ── Scan each crate ──────────────────────────────────────────────────────

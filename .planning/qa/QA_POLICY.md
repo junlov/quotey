@@ -81,7 +81,11 @@ All fake-only exceptions MUST have:
 ### Phase 2: Gating (after quotey-115.3 gaps closed)
 
 - Pre-commit hook extension: `cargo test -p quotey-db --lib` must pass
-- CI job: Run `scripts/test_inventory.sh --json` and fail if real-DB coverage drops below current baseline
+- CI/local gate: `scripts/quality-gates.sh qa` enforces deterministic thresholds:
+  - `QUOTEY_THRESHOLD_REAL_DB_PCT` (default `20`)
+  - `QUOTEY_THRESHOLD_CRITICAL_PATH_GAPS_MAX` (default `0` for P0/P1 gaps)
+  - `QUOTEY_THRESHOLD_E2E_PASS_PCT` (default `100`)
+  - `QUOTEY_THRESHOLD_LOG_VALIDATOR_CASES_MIN` (default `5`)
 - New repository methods flagged if no corresponding test
 
 ### Phase 3: Full enforcement (after quotey-115.4 E2E harness)
