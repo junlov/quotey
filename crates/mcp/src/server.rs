@@ -24,6 +24,8 @@ use quotey_db::repositories::ApprovalRepository;
 
 const MAX_PAGE_LIMIT: u32 = 100;
 const DEFAULT_PAGE_LIMIT: u32 = 20;
+const MAX_LINE_ITEMS: usize = 500;
+const MAX_QUANTITY: u32 = 1_000_000;
 
 fn tool_error(code: &str, message: &str, details: Option<serde_json::Value>) -> String {
     let safe_message = if code == "INTERNAL_ERROR" { "Internal server error" } else { message };
@@ -1432,6 +1434,14 @@ impl QuoteyMcpServer {
             return tool_error("VALIDATION_ERROR", "At least one line item is required", None);
         }
 
+        if input.line_items.len() > MAX_LINE_ITEMS {
+            return tool_error(
+                "VALIDATION_ERROR",
+                &format!("Too many line items (max {})", MAX_LINE_ITEMS),
+                None,
+            );
+        }
+
         if let Some(months) = input.term_months {
             if months == 0 {
                 return tool_error("VALIDATION_ERROR", "term_months must be greater than 0", None);
@@ -1459,10 +1469,13 @@ impl QuoteyMcpServer {
                 }
             };
 
-            if item.quantity == 0 {
+            if item.quantity == 0 || item.quantity > MAX_QUANTITY {
                 return tool_error(
                     "VALIDATION_ERROR",
-                    &format!("line_items[{}].quantity must be > 0", i),
+                    &format!(
+                        "line_items[{}].quantity must be between 1 and {}",
+                        i, MAX_QUANTITY
+                    ),
                     None,
                 );
             }

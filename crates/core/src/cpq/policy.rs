@@ -52,11 +52,13 @@ pub fn evaluate_policy_input(input: &PolicyInput) -> PolicyDecision {
     let mut reasons = Vec::new();
     let mut violations = Vec::new();
 
-    if input.requested_discount_pct < Decimal::ZERO {
-        reasons.push("Requested discount cannot be negative".to_string());
+    if input.requested_discount_pct < Decimal::ZERO
+        || input.requested_discount_pct > Decimal::new(10000, 2)
+    {
+        reasons.push("Requested discount out of valid range".to_string());
         violations.push(PolicyViolation {
             policy_id: "invalid-input".to_string(),
-            reason: "requested_discount_pct must be >= 0".to_string(),
+            reason: "requested_discount_pct must be between 0 and 100".to_string(),
             required_approval: Some("risk".to_string()),
         });
     }

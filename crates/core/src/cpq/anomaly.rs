@@ -516,6 +516,9 @@ impl AnomalyRuleSet {
 /// Map a raw z-score-based value into [0, 1] using a sigmoid: 2 / (1 + e^(-x)) - 1
 /// This maps 0 → 0, and grows towards 1 for large positive values.
 fn sigmoid_transform(x: f64) -> f64 {
+    if x.is_nan() {
+        return 0.0;
+    }
     (2.0 / (1.0 + (-x).exp()) - 1.0).clamp(0.0, 1.0)
 }
 

@@ -432,12 +432,22 @@ impl PdfResult {
                     format!("attachment; filename=\"{}\"", filename),
                 )
                 .body(Body::from(bytes))
-                .unwrap(),
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from("Failed to build PDF response"))
+                        .expect("static error response")
+                }),
             PdfResult::Html(html) => Response::builder()
                 .status(StatusCode::OK)
                 .header(header::CONTENT_TYPE, "text/html; charset=utf-8")
                 .body(Body::from(html))
-                .unwrap(),
+                .unwrap_or_else(|_| {
+                    Response::builder()
+                        .status(StatusCode::INTERNAL_SERVER_ERROR)
+                        .body(Body::from("Failed to build HTML response"))
+                        .expect("static error response")
+                }),
         }
     }
 }
