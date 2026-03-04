@@ -128,6 +128,25 @@ Reference file: `config/quotey.example.toml`.
 
 ## Troubleshooting
 
+### QA Gate Triage (Local + CI)
+
+Use the deterministic quality-gate entrypoint:
+
+```bash
+scripts/quality-gates.sh
+```
+
+For targeted repro of a failing gate:
+
+```bash
+scripts/quality-gates.sh <build|fmt|clippy|tests|deny|doc>
+```
+
+Detailed local+CI triage workflow is documented in:
+
+- `.planning/qa/QA_TRIAGE_RUNBOOK.md`
+- `.planning/FOUNDATION_QUALITY_GATES.md`
+
 ### Common Errors
 
 **Error: `slack.app_token must start with `xapp-``**

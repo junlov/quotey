@@ -4,6 +4,7 @@
 **Date:** 2026-03-02
 **Status:** Active
 **Owner:** quotey engineering team
+**Triage Runbook:** `.planning/qa/QA_TRIAGE_RUNBOOK.md`
 
 ## Policy Statement
 
@@ -75,6 +76,7 @@ All fake-only exceptions MUST have:
 - `scripts/test_inventory.sh` runs on demand to produce coverage reports
 - Coverage baseline committed to `.planning/qa/COVERAGE_BASELINE.md`
 - Manual review of critical-path matrix before each release
+- All quality-gate failures are triaged via `.planning/qa/QA_TRIAGE_RUNBOOK.md`
 
 ### Phase 2: Gating (after quotey-115.3 gaps closed)
 
