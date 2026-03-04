@@ -85,6 +85,47 @@ pub enum AmbiguitySeverity {
     Low,
 }
 
+/// States for assumption/ambiguity cards
+/// Standardizes the display of quote constraints and pricing inputs
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssumptionState {
+    /// Value explicitly provided by the user
+    Confirmed,
+    /// Value defaulted by the system (user can override)
+    Assumed,
+    /// Value is missing and needs user input
+    NeedsConfirmation,
+}
+
+impl AssumptionState {
+    /// Get emoji for this state
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            AssumptionState::Confirmed => "✅",
+            AssumptionState::Assumed => "🤔",
+            AssumptionState::NeedsConfirmation => "❓",
+        }
+    }
+
+    /// Get color code for this state
+    pub fn color(&self) -> &'static str {
+        match self {
+            AssumptionState::Confirmed => "#22c55e",
+            AssumptionState::Assumed => "#f59e0b",
+            AssumptionState::NeedsConfirmation => "#ef4444",
+        }
+    }
+
+    /// Get label for this state
+    pub fn label(&self) -> &'static str {
+        match self {
+            AssumptionState::Confirmed => "Confirmed",
+            AssumptionState::Assumed => "Assumed",
+            AssumptionState::NeedsConfirmation => "Needs Confirmation",
+        }
+    }
+}
+
 impl AmbiguitySeverity {
     /// Get emoji for this severity
     pub fn emoji(&self) -> &'static str {
@@ -190,6 +231,248 @@ impl AmbiguitySet {
     /// Get high severity ambiguities
     pub fn high(&self) -> Vec<&Ambiguity> {
         self.by_severity(AmbiguitySeverity::High)
+    }
+}
+
+/// A card representing a quote assumption or ambiguity
+/// Standardized display for Confirmed, Assumed, and NeedsConfirmation states
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct AssumptionCard {
+    /// Unique identifier for this card
+    pub id: String,
+    /// Field or context this card relates to
+    pub field: String,
+    /// Human-readable label for the field
+    pub field_label: String,
+    /// Current state of this card
+    pub state: AssumptionState,
+    /// Current value (if any)
+    pub value: Option<String>,
+    /// Human-readable description of the value or issue
+    pub description: String,
+    /// Detailed explanation shown on expand
+    pub details: Option<String>,
+    /// Possible options for resolution (for NeedsConfirmation/Assumed states)
+    pub options: Vec<AmbiguityOption>,
+    /// Whether this card can be edited by the user
+    pub editable: bool,
+    /// Category for grouping cards
+    pub category: AssumptionCategory,
+}
+
+/// Categories for grouping assumption cards
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AssumptionCategory {
+    /// Customer/account information
+    Customer,
+    /// Product configuration
+    Product,
+    /// Pricing and discounts
+    Pricing,
+    /// Contract terms
+    Term,
+    /// Billing information
+    Billing,
+    /// General/other
+    General,
+}
+
+impl AssumptionCategory {
+    /// Get label for this category
+    pub fn label(&self) -> &'static str {
+        match self {
+            AssumptionCategory::Customer => "Customer",
+            AssumptionCategory::Product => "Products",
+            AssumptionCategory::Pricing => "Pricing",
+            AssumptionCategory::Term => "Terms",
+            AssumptionCategory::Billing => "Billing",
+            AssumptionCategory::General => "Other",
+        }
+    }
+
+    /// Get emoji for this category
+    pub fn emoji(&self) -> &'static str {
+        match self {
+            AssumptionCategory::Customer => "👤",
+            AssumptionCategory::Product => "📦",
+            AssumptionCategory::Pricing => "💰",
+            AssumptionCategory::Term => "📅",
+            AssumptionCategory::Billing => "🧾",
+            AssumptionCategory::General => "📋",
+        }
+    }
+}
+
+impl AssumptionCard {
+    /// Create a new confirmed card
+    pub fn confirmed(
+        id: impl Into<String>,
+        field: impl Into<String>,
+        field_label: impl Into<String>,
+        value: impl Into<String>,
+        description: impl Into<String>,
+        category: AssumptionCategory,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            field: field.into(),
+            field_label: field_label.into(),
+            state: AssumptionState::Confirmed,
+            value: Some(value.into()),
+            description: description.into(),
+            details: None,
+            options: vec![],
+            editable: true,
+            category,
+        }
+    }
+
+    /// Create a new assumed card
+    pub fn assumed(
+        id: impl Into<String>,
+        field: impl Into<String>,
+        field_label: impl Into<String>,
+        value: impl Into<String>,
+        description: impl Into<String>,
+        category: AssumptionCategory,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            field: field.into(),
+            field_label: field_label.into(),
+            state: AssumptionState::Assumed,
+            value: Some(value.into()),
+            description: description.into(),
+            details: None,
+            options: vec![],
+            editable: true,
+            category,
+        }
+    }
+
+    /// Create a new needs confirmation card
+    pub fn needs_confirmation(
+        id: impl Into<String>,
+        field: impl Into<String>,
+        field_label: impl Into<String>,
+        description: impl Into<String>,
+        options: Vec<AmbiguityOption>,
+        category: AssumptionCategory,
+    ) -> Self {
+        Self {
+            id: id.into(),
+            field: field.into(),
+            field_label: field_label.into(),
+            state: AssumptionState::NeedsConfirmation,
+            value: None,
+            description: description.into(),
+            details: None,
+            options,
+            editable: true,
+            category,
+        }
+    }
+
+    /// Set details for this card
+    pub fn with_details(mut self, details: impl Into<String>) -> Self {
+        self.details = Some(details.into());
+        self
+    }
+
+    /// Set editable flag
+    pub fn with_editable(mut self, editable: bool) -> Self {
+        self.editable = editable;
+        self
+    }
+
+    /// Convert an ambiguity to a needs confirmation card
+    pub fn from_ambiguity(ambiguity: &Ambiguity, category: AssumptionCategory) -> Self {
+        Self {
+            id: format!("{}_card", ambiguity.field),
+            field: ambiguity.field.clone(),
+            field_label: ambiguity.ambiguity_type.label().to_string(),
+            state: AssumptionState::NeedsConfirmation,
+            value: ambiguity.original_value.clone(),
+            description: ambiguity.clarification_prompt.clone(),
+            details: Some(ambiguity.description.clone()),
+            options: ambiguity.options.clone(),
+            editable: true,
+            category,
+        }
+    }
+}
+
+/// Collection of assumption cards for a quote
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct AssumptionCardSet {
+    /// List of cards
+    pub cards: Vec<AssumptionCard>,
+    /// Whether all required cards are confirmed
+    pub all_confirmed: bool,
+    /// Count of cards by state
+    pub confirmed_count: usize,
+    pub assumed_count: usize,
+    pub needs_confirmation_count: usize,
+}
+
+impl AssumptionCardSet {
+    /// Create a new empty card set
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// Add a card to the set
+    pub fn add(&mut self, card: AssumptionCard) {
+        match card.state {
+            AssumptionState::Confirmed => self.confirmed_count += 1,
+            AssumptionState::Assumed => self.assumed_count += 1,
+            AssumptionState::NeedsConfirmation => self.needs_confirmation_count += 1,
+        }
+        self.cards.push(card);
+        self.update_all_confirmed();
+    }
+
+    /// Check if the set is empty
+    pub fn is_empty(&self) -> bool {
+        self.cards.is_empty()
+    }
+
+    /// Get count of cards
+    pub fn len(&self) -> usize {
+        self.cards.len()
+    }
+
+    /// Get cards by state
+    pub fn by_state(&self, state: AssumptionState) -> Vec<&AssumptionCard> {
+        self.cards.iter().filter(|c| c.state == state).collect()
+    }
+
+    /// Get cards by category
+    pub fn by_category(&self, category: AssumptionCategory) -> Vec<&AssumptionCard> {
+        self.cards.iter().filter(|c| c.category == category).collect()
+    }
+
+    /// Update the all_confirmed flag
+    fn update_all_confirmed(&mut self) {
+        self.all_confirmed = self.needs_confirmation_count == 0;
+    }
+
+    /// Get cards that need user attention (sorted by priority)
+    pub fn attention_required(&self) -> Vec<&AssumptionCard> {
+        let mut cards: Vec<_> = self
+            .cards
+            .iter()
+            .filter(|c| {
+                matches!(c.state, AssumptionState::NeedsConfirmation | AssumptionState::Assumed)
+            })
+            .collect();
+        // Sort: NeedsConfirmation first, then Assumed
+        cards.sort_by_key(|c| match c.state {
+            AssumptionState::NeedsConfirmation => 0,
+            AssumptionState::Assumed => 1,
+            AssumptionState::Confirmed => 2,
+        });
+        cards
     }
 }
 
@@ -666,6 +949,260 @@ pub fn render_ambiguity_slack_blocks(set: &AmbiguitySet) -> Vec<serde_json::Valu
     blocks
 }
 
+/// Render an assumption card as Slack blocks
+/// Standardized card pattern for Confirmed, Assumed, and NeedsConfirmation states
+pub fn render_assumption_card_slack_blocks(card: &AssumptionCard) -> Vec<serde_json::Value> {
+    let mut blocks = vec![];
+    let state_emoji = card.state.emoji();
+
+    // Card header with state indicator
+    let value_text = match (&card.value, &card.state) {
+        (Some(val), AssumptionState::Confirmed) => format!("{} {}", state_emoji, val),
+        (Some(val), AssumptionState::Assumed) => format!("{} {} (assumed)", state_emoji, val),
+        (None, AssumptionState::NeedsConfirmation) => format!("{} _Required_", state_emoji),
+        _ => state_emoji.to_string(),
+    };
+
+    blocks.push(serde_json::json!({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": format!("*{}*\n{}", card.field_label, value_text)
+        }
+    }));
+
+    // Description text
+    blocks.push(serde_json::json!({
+        "type": "context",
+        "elements": [
+            {
+                "type": "mrkdwn",
+                "text": card.description.clone()
+            }
+        ]
+    }));
+
+    // Action buttons based on state
+    if card.editable {
+        match card.state {
+            AssumptionState::Confirmed => {
+                // Show "Change" button for confirmed values
+                blocks.push(serde_json::json!({
+                    "type": "actions",
+                    "elements": [
+                        {
+                            "type": "button",
+                            "text": {
+                                "type": "plain_text",
+                                "text": "Change",
+                                "emoji": true
+                            },
+                            "value": format!("change:{}", card.field),
+                            "action_id": format!("card_change_{}", card.field),
+                            "style": "secondary"
+                        }
+                    ]
+                }));
+            }
+            AssumptionState::Assumed => {
+                // Show "Confirm" and "Change" buttons for assumed values
+                let mut elements = vec![serde_json::json!({
+                    "type": "button",
+                    "text": {
+                        "type": "plain_text",
+                        "text": "✓ Confirm",
+                        "emoji": true
+                    },
+                    "value": format!("confirm:{}", card.field),
+                    "action_id": format!("card_confirm_{}", card.field),
+                    "style": "primary"
+                })];
+
+                if !card.options.is_empty() {
+                    elements.push(serde_json::json!({
+                        "type": "button",
+                        "text": {
+                            "type": "plain_text",
+                            "text": "Change",
+                            "emoji": true
+                        },
+                        "value": format!("change:{}", card.field),
+                        "action_id": format!("card_change_{}", card.field),
+                        "style": "secondary"
+                    }));
+                }
+
+                blocks.push(serde_json::json!({
+                    "type": "actions",
+                    "elements": elements
+                }));
+            }
+            AssumptionState::NeedsConfirmation => {
+                // Show resolution options for needs confirmation
+                if !card.options.is_empty() {
+                    let elements: Vec<serde_json::Value> = card
+                        .options
+                        .iter()
+                        .map(|opt| {
+                            serde_json::json!({
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": opt.label.clone(),
+                                    "emoji": true
+                                },
+                                "value": format!("{}:{}", card.field, opt.id),
+                                "action_id": format!("card_resolve_{}_{}", card.field, opt.id),
+                                "style": "primary"
+                            })
+                        })
+                        .collect();
+
+                    blocks.push(serde_json::json!({
+                        "type": "actions",
+                        "elements": elements
+                    }));
+                } else {
+                    // Show "Provide" button when no options available
+                    blocks.push(serde_json::json!({
+                        "type": "actions",
+                        "elements": [
+                            {
+                                "type": "button",
+                                "text": {
+                                    "type": "plain_text",
+                                    "text": "Provide",
+                                    "emoji": true
+                                },
+                                "value": format!("provide:{}", card.field),
+                                "action_id": format!("card_provide_{}", card.field),
+                                "style": "primary"
+                            }
+                        ]
+                    }));
+                }
+            }
+        }
+    }
+
+    blocks.push(serde_json::json!({
+        "type": "divider"
+    }));
+
+    blocks
+}
+
+/// Render an assumption card set as Slack blocks
+/// Groups cards by category and shows summary header
+pub fn render_assumption_card_set_slack_blocks(
+    card_set: &AssumptionCardSet,
+) -> Vec<serde_json::Value> {
+    let mut blocks = vec![];
+
+    if card_set.is_empty() {
+        return blocks;
+    }
+
+    // Summary header
+    let summary_emoji = if card_set.needs_confirmation_count > 0 {
+        "❓"
+    } else if card_set.assumed_count > 0 {
+        "🤔"
+    } else {
+        "✅"
+    };
+
+    blocks.push(serde_json::json!({
+        "type": "header",
+        "text": {
+            "type": "plain_text",
+            "text": format!("{} Quote Information", summary_emoji),
+            "emoji": true
+        }
+    }));
+
+    // Status summary
+    let status_text = format!(
+        "{} confirmed · {} assumed · {} needs confirmation",
+        card_set.confirmed_count, card_set.assumed_count, card_set.needs_confirmation_count
+    );
+
+    blocks.push(serde_json::json!({
+        "type": "section",
+        "text": {
+            "type": "mrkdwn",
+            "text": status_text
+        }
+    }));
+
+    blocks.push(serde_json::json!({
+        "type": "divider"
+    }));
+
+    // Group cards by category
+    let categories = [
+        AssumptionCategory::Customer,
+        AssumptionCategory::Product,
+        AssumptionCategory::Pricing,
+        AssumptionCategory::Term,
+        AssumptionCategory::Billing,
+        AssumptionCategory::General,
+    ];
+
+    for category in &categories {
+        let category_cards: Vec<_> =
+            card_set.cards.iter().filter(|c| &c.category == category).collect();
+
+        if !category_cards.is_empty() {
+            // Category header
+            blocks.push(serde_json::json!({
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": format!("{} *{}*", category.emoji(), category.label())
+                }
+            }));
+
+            // Cards in this category
+            for card in category_cards {
+                let card_blocks = render_assumption_card_slack_blocks(card);
+                blocks.extend(card_blocks);
+            }
+        }
+    }
+
+    blocks
+}
+
+/// Convert an ambiguity set to an assumption card set
+/// Transforms detected ambiguities into the card pattern
+pub fn ambiguity_set_to_card_set(set: &AmbiguitySet) -> AssumptionCardSet {
+    let mut card_set = AssumptionCardSet::new();
+
+    for ambiguity in &set.ambiguities {
+        let category = match ambiguity.ambiguity_type {
+            AmbiguityType::CustomerResolution => AssumptionCategory::Customer,
+            AmbiguityType::ProductDisambiguation | AmbiguityType::MissingProductConfiguration => {
+                AssumptionCategory::Product
+            }
+            AmbiguityType::AmbiguousDiscount => AssumptionCategory::Pricing,
+            AmbiguityType::DefaultCurrency | AmbiguityType::MissingBillingCountry => {
+                AssumptionCategory::Billing
+            }
+            AmbiguityType::MissingTerm
+            | AmbiguityType::MissingStartDate
+            | AmbiguityType::DateFormatAmbiguity
+            | AmbiguityType::DateDisambiguation => AssumptionCategory::Term,
+            _ => AssumptionCategory::General,
+        };
+
+        let card = AssumptionCard::from_ambiguity(ambiguity, category);
+        card_set.add(card);
+    }
+
+    card_set
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -747,5 +1284,209 @@ mod tests {
         let blocks = render_ambiguity_slack_blocks(&set);
         assert!(!blocks.is_empty());
         assert_eq!(blocks[0]["type"], "header");
+    }
+
+    #[test]
+    fn assumption_state_has_correct_emojis() {
+        assert_eq!(AssumptionState::Confirmed.emoji(), "✅");
+        assert_eq!(AssumptionState::Assumed.emoji(), "🤔");
+        assert_eq!(AssumptionState::NeedsConfirmation.emoji(), "❓");
+    }
+
+    #[test]
+    fn assumption_state_has_correct_labels() {
+        assert_eq!(AssumptionState::Confirmed.label(), "Confirmed");
+        assert_eq!(AssumptionState::Assumed.label(), "Assumed");
+        assert_eq!(AssumptionState::NeedsConfirmation.label(), "Needs Confirmation");
+    }
+
+    #[test]
+    fn creates_confirmed_card() {
+        let card = AssumptionCard::confirmed(
+            "customer",
+            "account_id",
+            "Customer",
+            "Acme Corp",
+            "The customer for this quote",
+            AssumptionCategory::Customer,
+        );
+
+        assert_eq!(card.state, AssumptionState::Confirmed);
+        assert_eq!(card.value, Some("Acme Corp".to_string()));
+        assert!(card.editable);
+    }
+
+    #[test]
+    fn creates_assumed_card() {
+        let card = AssumptionCard::assumed(
+            "currency",
+            "currency",
+            "Currency",
+            "USD",
+            "Using default currency",
+            AssumptionCategory::Billing,
+        );
+
+        assert_eq!(card.state, AssumptionState::Assumed);
+        assert_eq!(card.value, Some("USD".to_string()));
+    }
+
+    #[test]
+    fn creates_needs_confirmation_card() {
+        let options = vec![
+            AmbiguityOption {
+                id: "12".to_string(),
+                label: "12 months".to_string(),
+                description: None,
+                value: serde_json::json!(12),
+                confidence: 1.0,
+            },
+            AmbiguityOption {
+                id: "24".to_string(),
+                label: "24 months".to_string(),
+                description: None,
+                value: serde_json::json!(24),
+                confidence: 1.0,
+            },
+        ];
+
+        let card = AssumptionCard::needs_confirmation(
+            "term",
+            "term_months",
+            "Contract Term",
+            "What term length do you need?",
+            options,
+            AssumptionCategory::Term,
+        );
+
+        assert_eq!(card.state, AssumptionState::NeedsConfirmation);
+        assert_eq!(card.value, None);
+        assert_eq!(card.options.len(), 2);
+    }
+
+    #[test]
+    fn assumption_card_set_tracks_counts() {
+        let mut set = AssumptionCardSet::new();
+
+        set.add(AssumptionCard::confirmed(
+            "c1", "f1", "Field 1", "Value 1", "Desc", AssumptionCategory::General,
+        ));
+        set.add(AssumptionCard::assumed(
+            "c2", "f2", "Field 2", "Value 2", "Desc", AssumptionCategory::General,
+        ));
+        set.add(AssumptionCard::needs_confirmation(
+            "c3", "f3", "Field 3", "Desc", vec![], AssumptionCategory::General,
+        ));
+
+        assert_eq!(set.confirmed_count, 1);
+        assert_eq!(set.assumed_count, 1);
+        assert_eq!(set.needs_confirmation_count, 1);
+        assert!(!set.all_confirmed);
+    }
+
+    #[test]
+    fn all_confirmed_true_when_no_needs_confirmation() {
+        let mut set = AssumptionCardSet::new();
+
+        set.add(AssumptionCard::confirmed(
+            "c1", "f1", "Field 1", "Value 1", "Desc", AssumptionCategory::General,
+        ));
+        set.add(AssumptionCard::confirmed(
+            "c2", "f2", "Field 2", "Value 2", "Desc", AssumptionCategory::General,
+        ));
+
+        assert!(set.all_confirmed);
+    }
+
+    #[test]
+    fn attention_required_sorts_by_priority() {
+        let mut set = AssumptionCardSet::new();
+
+        set.add(AssumptionCard::confirmed(
+            "c1", "f1", "Confirmed", "Value", "Desc", AssumptionCategory::General,
+        ));
+        set.add(AssumptionCard::assumed(
+            "c2", "f2", "Assumed", "Value", "Desc", AssumptionCategory::General,
+        ));
+        set.add(AssumptionCard::needs_confirmation(
+            "c3", "f3", "Needs Confirm", "Desc", vec![], AssumptionCategory::General,
+        ));
+
+        let attention = set.attention_required();
+        assert_eq!(attention.len(), 2);
+        assert_eq!(attention[0].state, AssumptionState::NeedsConfirmation);
+        assert_eq!(attention[1].state, AssumptionState::Assumed);
+    }
+
+    #[test]
+    fn renders_confirmed_card_slack_blocks() {
+        let card = AssumptionCard::confirmed(
+            "customer",
+            "account_id",
+            "Customer",
+            "Acme Corp",
+            "The customer for this quote",
+            AssumptionCategory::Customer,
+        );
+
+        let blocks = render_assumption_card_slack_blocks(&card);
+        assert!(!blocks.is_empty());
+        // First block should be the section with field label and value
+        assert_eq!(blocks[0]["type"], "section");
+    }
+
+    #[test]
+    fn renders_card_set_slack_blocks() {
+        let mut set = AssumptionCardSet::new();
+
+        set.add(AssumptionCard::confirmed(
+            "c1", "f1", "Field 1", "Value 1", "Desc", AssumptionCategory::General,
+        ));
+
+        let blocks = render_assumption_card_set_slack_blocks(&set);
+        assert!(!blocks.is_empty());
+        assert_eq!(blocks[0]["type"], "header");
+    }
+
+    #[test]
+    fn ambiguity_set_to_card_set_conversion() {
+        let mut ambiguity_set = AmbiguitySet::new();
+        ambiguity_set.add(Ambiguity {
+            ambiguity_type: AmbiguityType::CustomerResolution,
+            description: "No customer".to_string(),
+            clarification_prompt: "Which customer?".to_string(),
+            options: vec![],
+            field: "account_id".to_string(),
+            original_value: None,
+        });
+
+        let card_set = ambiguity_set_to_card_set(&ambiguity_set);
+        assert_eq!(card_set.len(), 1);
+        assert_eq!(card_set.cards[0].category, AssumptionCategory::Customer);
+    }
+
+    #[test]
+    fn converts_ambiguity_to_card_correctly() {
+        let ambiguity = Ambiguity {
+            ambiguity_type: AmbiguityType::MissingTerm,
+            description: "Term not specified".to_string(),
+            clarification_prompt: "What term?".to_string(),
+            options: vec![
+                AmbiguityOption {
+                    id: "12".to_string(),
+                    label: "12 months".to_string(),
+                    description: None,
+                    value: serde_json::json!(12),
+                    confidence: 1.0,
+                },
+            ],
+            field: "term_months".to_string(),
+            original_value: None,
+        };
+
+        let card = AssumptionCard::from_ambiguity(&ambiguity, AssumptionCategory::Term);
+        assert_eq!(card.state, AssumptionState::NeedsConfirmation);
+        assert_eq!(card.field, "term_months");
+        assert_eq!(card.category, AssumptionCategory::Term);
     }
 }
