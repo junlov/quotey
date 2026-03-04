@@ -1,0 +1,50 @@
+{
+  "schema_version": "quote_template_catalog.v1",
+  "templates": [
+    {
+      "id": "executive_summary",
+      "label": "Executive Summary",
+      "template_path": "quotes/executive_summary.html.tera",
+      "target_use_case": "quick executive decision",
+      "max_pages_target": 1,
+      "supports_comparison": false,
+      "supports_renewal_delta": false
+    },
+    {
+      "id": "detailed",
+      "label": "Detailed",
+      "template_path": "quotes/detailed.html.tera",
+      "target_use_case": "procurement and legal review",
+      "max_pages_target": 8,
+      "supports_comparison": false,
+      "supports_renewal_delta": true
+    },
+    {
+      "id": "comparison",
+      "label": "Comparison",
+      "template_path": "quotes/comparison.html.tera",
+      "target_use_case": "option tradeoff review",
+      "max_pages_target": 4,
+      "supports_comparison": true,
+      "supports_renewal_delta": false
+    },
+    {
+      "id": "renewal",
+      "label": "Renewal",
+      "template_path": "quotes/renewal.html.tera",
+      "target_use_case": "renewal and expansion negotiation",
+      "max_pages_target": 4,
+      "supports_comparison": false,
+      "supports_renewal_delta": true
+    },
+    {
+      "id": "compact",
+      "label": "Compact",
+      "template_path": "quotes/compact.html.tera",
+      "target_use_case": "email attachment and mobile scanning",
+      "max_pages_target": 1,
+      "supports_comparison": false,
+      "supports_renewal_delta": false
+    }
+  ]
+}
