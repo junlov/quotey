@@ -41,7 +41,7 @@
 #[allow(dead_code)]
 mod auth;
 #[allow(dead_code)]
-mod server;
+pub mod server;
 mod tools;
 
 pub use auth::{

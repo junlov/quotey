@@ -771,7 +771,7 @@ pub struct CatalogGetResult {
 }
 
 // Quote Types
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 pub struct LineItemInput {
     pub product_id: String,
     pub quantity: u32,
@@ -783,7 +783,7 @@ pub struct LineItemInput {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Deserialize, JsonSchema)]
+#[derive(Clone, Debug, Deserialize, JsonSchema)]
 pub struct QuoteCreateInput {
     pub account_id: String,
     #[serde(default)]
@@ -1247,7 +1247,10 @@ fn payload_to_output_path(quote_id: &str, template: &str, is_pdf: bool) -> (Path
 impl QuoteyMcpServer {
     // Catalog Tools
     #[tool(description = "Search products by name, SKU, or description")]
-    async fn catalog_search(&self, Parameters(input): Parameters<CatalogSearchInput>) -> String {
+    pub async fn catalog_search(
+        &self,
+        Parameters(input): Parameters<CatalogSearchInput>,
+    ) -> String {
         debug!(query = %input.query, "catalog_search called");
         self.record_mcp_audit_event(
             "catalog_search",
@@ -1331,7 +1334,7 @@ impl QuoteyMcpServer {
     }
 
     #[tool(description = "Get detailed product information by ID")]
-    async fn catalog_get(&self, Parameters(input): Parameters<CatalogGetInput>) -> String {
+    pub async fn catalog_get(&self, Parameters(input): Parameters<CatalogGetInput>) -> String {
         debug!(product_id = %input.product_id, "catalog_get called");
         self.record_mcp_audit_event(
             "catalog_get",
@@ -1389,7 +1392,7 @@ impl QuoteyMcpServer {
 
     // Quote Tools
     #[tool(description = "Create a new quote for a customer")]
-    async fn quote_create(&self, Parameters(input): Parameters<QuoteCreateInput>) -> String {
+    pub async fn quote_create(&self, Parameters(input): Parameters<QuoteCreateInput>) -> String {
         debug!(account_id = %input.account_id, "quote_create called");
         self.record_mcp_audit_event(
             "quote_create",
@@ -1573,7 +1576,7 @@ impl QuoteyMcpServer {
     }
 
     #[tool(description = "Get detailed quote information")]
-    async fn quote_get(&self, Parameters(input): Parameters<QuoteGetInput>) -> String {
+    pub async fn quote_get(&self, Parameters(input): Parameters<QuoteGetInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_get called");
         let quote_id_for_audit = input.quote_id.trim().to_string();
         self.record_mcp_audit_event(
@@ -1686,7 +1689,7 @@ impl QuoteyMcpServer {
     }
 
     #[tool(description = "Run pricing engine on a quote")]
-    async fn quote_price(&self, Parameters(input): Parameters<QuotePriceInput>) -> String {
+    pub async fn quote_price(&self, Parameters(input): Parameters<QuotePriceInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_price called");
         let quote_id_for_audit = input.quote_id.trim().to_string();
         self.record_mcp_audit_event(
@@ -1837,7 +1840,7 @@ impl QuoteyMcpServer {
     }
 
     #[tool(description = "List quotes with optional filters")]
-    async fn quote_list(&self, Parameters(input): Parameters<QuoteListInput>) -> String {
+    pub async fn quote_list(&self, Parameters(input): Parameters<QuoteListInput>) -> String {
         debug!("quote_list called");
         self.record_mcp_audit_event(
             "quote_list",
@@ -1920,7 +1923,7 @@ impl QuoteyMcpServer {
 
     // Approval Tools
     #[tool(description = "Submit a quote for approval")]
-    async fn approval_request(
+    pub async fn approval_request(
         &self,
         Parameters(input): Parameters<ApprovalRequestInput>,
     ) -> String {
@@ -2071,7 +2074,10 @@ impl QuoteyMcpServer {
     }
 
     #[tool(description = "Check approval status for a quote")]
-    async fn approval_status(&self, Parameters(input): Parameters<ApprovalStatusInput>) -> String {
+    pub async fn approval_status(
+        &self,
+        Parameters(input): Parameters<ApprovalStatusInput>,
+    ) -> String {
         debug!(quote_id = %input.quote_id, "approval_status called");
         let quote_id_for_audit = input.quote_id.trim().to_string();
         self.record_mcp_audit_event(
@@ -2142,7 +2148,7 @@ impl QuoteyMcpServer {
     }
 
     #[tool(description = "List all pending approval requests")]
-    async fn approval_pending(
+    pub async fn approval_pending(
         &self,
         Parameters(input): Parameters<ApprovalPendingInput>,
     ) -> String {
@@ -2214,7 +2220,7 @@ impl QuoteyMcpServer {
 
     // PDF Tools
     #[tool(description = "Generate PDF for a quote")]
-    async fn quote_pdf(&self, Parameters(input): Parameters<QuotePdfInput>) -> String {
+    pub async fn quote_pdf(&self, Parameters(input): Parameters<QuotePdfInput>) -> String {
         debug!(quote_id = %input.quote_id, "quote_pdf called");
         let quote_id_for_audit = input.quote_id.trim().to_string();
         self.record_mcp_audit_event(
