@@ -73,6 +73,45 @@
             border-bottom: 1px solid var(--border);
         }
 
+        .analytics-controls {
+            padding: 14px 16px;
+            border-bottom: 1px solid var(--border);
+            background: #f8fbff;
+        }
+
+        .control-label {
+            font-size: 11px;
+            color: var(--text-secondary);
+            font-weight: 600;
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+            margin-bottom: 8px;
+        }
+
+        .chip-row {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+            margin-bottom: 8px;
+        }
+
+        .chip {
+            font-size: 11px;
+            line-height: 1;
+            padding: 6px 9px;
+            border-radius: 999px;
+            border: 1px solid var(--border);
+            color: var(--text-secondary);
+            background: #fff;
+        }
+
+        .chip.active {
+            border-color: var(--primary);
+            background: #dbeafe;
+            color: #1d4ed8;
+            font-weight: 600;
+        }
+
         .metric-box {
             text-align: center;
         }
@@ -240,6 +279,29 @@
         .status-dot.green { background: var(--success); }
         .status-dot.yellow { background: var(--warning); }
         .status-dot.red { background: var(--danger); }
+
+        .group-breakout {
+            display: grid;
+            grid-template-columns: 1fr auto auto;
+            gap: 8px;
+            align-items: center;
+            padding: 8px 0;
+            border-bottom: 1px solid var(--border);
+        }
+
+        .group-breakout:last-child {
+            border-bottom: none;
+        }
+
+        .breakout-dimension {
+            font-weight: 500;
+        }
+
+        .breakout-metric {
+            font-family: monospace;
+            color: var(--text-secondary);
+            font-size: 12px;
+        }
     </style>
 </head>
 <body>
@@ -253,6 +315,28 @@
                 <span class="status-dot {% if health_score > 80 %}green{% elif health_score > 50 %}yellow{% else %}red{% endif %}"></span>
                 {{ health_score | default(value="85") }}% healthy
             </span>
+        </div>
+
+        <div class="analytics-controls">
+            <div class="control-label">Metrics</div>
+            <div class="chip-row">
+                <span class="chip active">Quote Count</span>
+                <span class="chip active">Win Rate %</span>
+                <span class="chip active">Avg Discount %</span>
+                <span class="chip">Approval Cycle (hrs)</span>
+                <span class="chip">Time To Finalize (hrs)</span>
+                <span class="chip active">Anomaly Rate %</span>
+            </div>
+
+            <div class="control-label">Dimensions</div>
+            <div class="chip-row">
+                <span class="chip active">Month</span>
+                <span class="chip active">Region</span>
+                <span class="chip">Customer Segment</span>
+                <span class="chip">Sales Rep</span>
+                <span class="chip">Product Family</span>
+                <span class="chip">Approval Role</span>
+            </div>
         </div>
 
         <div class="metrics-row">
@@ -275,6 +359,30 @@
                 <div class="metric-label">Avg Deal</div>
                 <div class="metric-change {% if avg_deal_change_pct | default(value=0) >= 0 %}positive{% else %}negative{% endif %}">
                     {% if avg_deal_change_pct | default(value=0) >= 0 %}↑{% else %}↓{% endif %} {{ avg_deal_change_pct | default(value="0") }}%
+                </div>
+            </div>
+        </div>
+
+        <div class="metrics-row">
+            <div class="metric-box">
+                <div class="metric-value danger">{{ anomaly_rate_pct | default(value="8.2") }}%</div>
+                <div class="metric-label">Anomaly Rate</div>
+                <div class="metric-change {% if anomaly_rate_change_pct | default(value=0) <= 0 %}positive{% else %}negative{% endif %}">
+                    {% if anomaly_rate_change_pct | default(value=0) <= 0 %}↓{% else %}↑{% endif %} {{ anomaly_rate_change_pct | default(value="0") }}%
+                </div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{{ approval_cycle_hours | default(value="14.2") }}h</div>
+                <div class="metric-label">Approval Cycle</div>
+                <div class="metric-change {% if approval_cycle_change_pct | default(value=0) <= 0 %}positive{% else %}negative{% endif %}">
+                    {% if approval_cycle_change_pct | default(value=0) <= 0 %}↓{% else %}↑{% endif %} {{ approval_cycle_change_pct | default(value="0") }}%
+                </div>
+            </div>
+            <div class="metric-box">
+                <div class="metric-value">{{ finalize_hours | default(value="21.8") }}h</div>
+                <div class="metric-label">Time To Finalize</div>
+                <div class="metric-change {% if finalize_hours_change_pct | default(value=0) <= 0 %}positive{% else %}negative{% endif %}">
+                    {% if finalize_hours_change_pct | default(value=0) <= 0 %}↓{% else %}↑{% endif %} {{ finalize_hours_change_pct | default(value="0") }}%
                 </div>
             </div>
         </div>
@@ -321,6 +429,21 @@
             {% endfor %}
             {% else %}
             <div class="empty-note">Approval queue is clear.</div>
+            {% endif %}
+        </div>
+
+        <div class="widget-section">
+            <div class="section-title">Dimension Breakout (Month × Region)</div>
+            {% if grouped_metrics is defined and grouped_metrics | length > 0 %}
+                {% for row in grouped_metrics %}
+                <div class="group-breakout">
+                    <span class="breakout-dimension">{{ row.dimension }}</span>
+                    <span class="breakout-metric">{{ row.quote_count | default(value=0) }} quotes</span>
+                    <span class="breakout-metric">{{ row.win_rate | default(value=0) }}% win</span>
+                </div>
+                {% endfor %}
+            {% else %}
+                <div class="empty-note">No grouped metrics for selected filters.</div>
             {% endif %}
         </div>
 

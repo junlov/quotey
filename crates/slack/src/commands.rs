@@ -1,14 +1,32 @@
+use rust_decimal::prelude::ToPrimitive;
 use rust_decimal::Decimal;
 use std::collections::HashMap;
 use std::str::FromStr;
 use thiserror::Error;
 
 use crate::blocks::{self, MessageTemplate};
+use quotey_core::cpq::anomaly::{
+    AnomalyDetector, AnomalyRuleEvaluationInput, AnomalyRuleKind, AnomalySeverity,
+};
 
-const SUPPORTED_QUOTE_VERBS: [&str; 12] = [
-    "help", "new", "status", "list", "audit", "edit", "add-line", "discount", "send", "clone",
-    "simulate", "suggest",
+const SUPPORTED_QUOTE_VERBS: [&str; 15] = [
+    "help",
+    "new",
+    "status",
+    "list",
+    "audit",
+    "edit",
+    "add-line",
+    "discount",
+    "finalize",
+    "send",
+    "clone",
+    "simulate",
+    "suggest",
+    "parse-email",
+    "parse-rfp",
 ];
+const SUPPORTED_QUOTEY_VERBS: [&str; 2] = ["help", "branding"];
 
 fn suggest_supported_verb(input: &str) -> Option<&'static str> {
     let input = input.trim().to_ascii_lowercase();
@@ -77,10 +95,14 @@ pub enum QuoteCommand {
     Edit { quote_id: Option<String>, freeform_args: String },
     AddLine { quote_id: Option<String>, freeform_args: String },
     Discount { quote_id: Option<String>, freeform_args: String },
+    Finalize { request: FinalizeRequest },
     Send { quote_id: Option<String>, freeform_args: String },
     Clone { quote_id: Option<String>, freeform_args: String },
     Simulate { request: SimulationRequest },
     Suggest { quote_id: Option<String>, customer_hint: Option<String>, freeform_args: String },
+    ParseEmail { freeform_args: String },
+    ParseRfp { freeform_args: String },
+    Branding { freeform_args: String },
     Help,
     Unknown { verb: String, freeform_args: String },
 }
@@ -109,6 +131,22 @@ pub struct SimulationPromotionAction {
     pub action: String,
 }
 
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct FinalizeRequest {
+    pub quote_id: Option<String>,
+    pub requested_discount_pct: Option<Decimal>,
+    pub customer_avg_discount_pct: Option<Decimal>,
+    pub customer_discount_std_dev: Option<Decimal>,
+    pub margin_pct: Option<Decimal>,
+    pub category_floor_pct: Option<Decimal>,
+    pub requested_quantity: Option<Decimal>,
+    pub customer_avg_quantity: Option<Decimal>,
+    pub quote_total: Option<Decimal>,
+    pub similar_deals_avg_total: Option<Decimal>,
+    pub override_justification: Option<String>,
+    pub raw_args: String,
+}
+
 #[derive(Debug, Error, PartialEq, Eq)]
 pub enum CommandParseError {
     #[error("unsupported slash command: {0}")]
@@ -128,19 +166,25 @@ pub enum CommandRouteError {
 pub fn normalize_quote_command(
     payload: SlashCommandPayload,
 ) -> Result<CommandEnvelope, CommandParseError> {
-    if payload.command != "/quote" {
-        return Err(CommandParseError::UnsupportedCommand(payload.command));
-    }
+    let command = match payload.command.as_str() {
+        "/quote" => "quote",
+        "/quotey" => "quotey",
+        _ => return Err(CommandParseError::UnsupportedCommand(payload.command)),
+    };
 
     let text = payload.text.trim().to_owned();
     let mut parts = text.split_whitespace();
-    let verb = normalize_quote_command_verb(parts.next().unwrap_or("help"));
+    let verb = if command == "quote" {
+        normalize_quote_command_verb(parts.next().unwrap_or("help"))
+    } else {
+        normalize_quotey_command_verb(parts.next().unwrap_or("help"))
+    };
     let freeform_args = parts.collect::<Vec<_>>().join(" ");
     let quote_id = freeform_args.split_whitespace().find_map(parse_quote_id_token);
     let account_hint = extract_account_hint(&verb, &freeform_args);
 
     Ok(CommandEnvelope {
-        command: "quote".to_owned(),
+        command: command.to_owned(),
         verb: if verb.is_empty() { "help".to_owned() } else { verb },
         quote_id,
         account_hint,
@@ -503,7 +547,12 @@ where
     }
 
     pub fn route(&self, envelope: CommandEnvelope) -> Result<MessageTemplate, CommandRouteError> {
-        match classify_quote_command(&envelope.verb, envelope.freeform_args.clone()) {
+        let command = if envelope.command.eq_ignore_ascii_case("quotey") {
+            classify_quotey_command(&envelope.verb, envelope.freeform_args.clone())
+        } else {
+            classify_quote_command(&envelope.verb, envelope.freeform_args.clone())
+        };
+        match command {
             QuoteCommand::New { customer_hint, freeform_args } => {
                 self.service.new_quote(customer_hint, freeform_args, &envelope)
             }
@@ -523,6 +572,7 @@ where
             QuoteCommand::Discount { quote_id, freeform_args } => {
                 self.service.request_discount(quote_id, freeform_args, &envelope)
             }
+            QuoteCommand::Finalize { request } => self.service.finalize_quote(request, &envelope),
             QuoteCommand::Send { quote_id, freeform_args } => {
                 self.service.send_quote(quote_id, freeform_args, &envelope)
             }
@@ -533,16 +583,38 @@ where
             QuoteCommand::Suggest { quote_id, customer_hint, freeform_args } => {
                 self.service.suggest_products(quote_id, customer_hint, freeform_args, &envelope)
             }
+            QuoteCommand::ParseEmail { freeform_args } => {
+                self.service.parse_email(freeform_args, &envelope)
+            }
+            QuoteCommand::ParseRfp { freeform_args } => {
+                self.service.parse_rfp(freeform_args, &envelope)
+            }
+            QuoteCommand::Branding { freeform_args } => {
+                self.service.manage_branding(freeform_args, &envelope)
+            }
             QuoteCommand::Help => Ok(blocks::help_message()),
             QuoteCommand::Unknown { verb, .. } => {
-                let suggestion = suggest_supported_verb(&verb)
-                    .map(|candidate| format!(" Did you mean `/quote {candidate}`?"))
-                    .unwrap_or_default();
-                let supported = SUPPORTED_QUOTE_VERBS.join(", ");
+                let is_quotey = envelope.command.eq_ignore_ascii_case("quotey");
+                let suggestion = if is_quotey {
+                    suggest_supported_quotey_verb(&verb)
+                        .map(|candidate| format!(" Did you mean `/quotey {candidate}`?"))
+                        .unwrap_or_default()
+                } else {
+                    suggest_supported_verb(&verb)
+                        .map(|candidate| format!(" Did you mean `/quote {candidate}`?"))
+                        .unwrap_or_default()
+                };
+                let supported = if is_quotey {
+                    SUPPORTED_QUOTEY_VERBS.join(", ")
+                } else {
+                    SUPPORTED_QUOTE_VERBS.join(", ")
+                };
+                let command_name = if is_quotey { "quotey" } else { "quote" };
+                let help_command = if is_quotey { "/quotey help" } else { "/quote help" };
                 Ok(blocks::error_message(
                     &format!(
-            "I couldn't parse `/quote {verb}`.{suggestion} Use `/quote help` for supported commands: {supported}. \
-Tip: use explicit command mode for deterministic parsing (for example `/quote status Q-2026-1234`)."
+            "I couldn't parse `/{command_name} {verb}`.{suggestion} Use `{help_command}` for supported commands: {supported}. \
+Tip: use explicit command mode for deterministic parsing."
                     ),
                     &envelope.request_id,
                 ))
@@ -600,6 +672,12 @@ pub trait QuoteCommandService: Send + Sync {
         envelope: &CommandEnvelope,
     ) -> Result<MessageTemplate, CommandRouteError>;
 
+    fn finalize_quote(
+        &self,
+        request: FinalizeRequest,
+        envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError>;
+
     fn send_quote(
         &self,
         quote_id: Option<String>,
@@ -627,6 +705,24 @@ pub trait QuoteCommandService: Send + Sync {
         freeform_args: String,
         envelope: &CommandEnvelope,
     ) -> Result<MessageTemplate, CommandRouteError>;
+
+    fn parse_email(
+        &self,
+        freeform_args: String,
+        envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError>;
+
+    fn parse_rfp(
+        &self,
+        freeform_args: String,
+        envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError>;
+
+    fn manage_branding(
+        &self,
+        freeform_args: String,
+        envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError>;
 }
 
 #[derive(Default)]
@@ -639,7 +735,15 @@ impl QuoteCommandService for NoopQuoteCommandService {
         freeform_args: String,
         _envelope: &CommandEnvelope,
     ) -> Result<MessageTemplate, CommandRouteError> {
-        let summary = customer_hint.unwrap_or_else(|| "unassigned account".to_owned());
+        if let Some(customer_hint) = customer_hint.filter(|value| !value.trim().is_empty()) {
+            return Ok(blocks::suggestion_message(&blocks::SuggestionCardView {
+                quote_id: None,
+                customer_hint,
+                suggestions: noop_suggestion_items(),
+                request_id: _envelope.request_id.clone(),
+            }));
+        }
+        let summary = "unassigned account".to_owned();
         Ok(blocks::preview_mode_message(
             "/quote new",
             None,
@@ -745,6 +849,83 @@ impl QuoteCommandService for NoopQuoteCommandService {
         ))
     }
 
+    fn finalize_quote(
+        &self,
+        request: FinalizeRequest,
+        _envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError> {
+        let quote_id = request.quote_id.unwrap_or_else(|| "unknown".to_owned());
+        if let Some(justification) = request.override_justification {
+            return Ok(blocks::quote_status_message(
+                &quote_id,
+                &format!(
+                    "anomaly override captured with justification; finalization can proceed (justification: {justification})"
+                ),
+            ));
+        }
+
+        let input = AnomalyRuleEvaluationInput {
+            requested_discount_pct: request
+                .requested_discount_pct
+                .and_then(|v| v.to_f64())
+                .unwrap_or(18.0),
+            customer_avg_discount_pct: request
+                .customer_avg_discount_pct
+                .and_then(|v| v.to_f64())
+                .unwrap_or(7.8),
+            customer_discount_std_dev: request
+                .customer_discount_std_dev
+                .and_then(|v| v.to_f64())
+                .unwrap_or(2.0),
+            margin_pct: request.margin_pct.and_then(|v| v.to_f64()).unwrap_or(52.0),
+            category_floor_pct: request.category_floor_pct.and_then(|v| v.to_f64()).unwrap_or(60.0),
+            requested_quantity: request
+                .requested_quantity
+                .and_then(|v| v.to_f64())
+                .unwrap_or(150.0),
+            customer_avg_quantity: request
+                .customer_avg_quantity
+                .and_then(|v| v.to_f64())
+                .unwrap_or(65.0),
+            quote_total: request.quote_total.and_then(|v| v.to_f64()).unwrap_or(21_420.0),
+            similar_deals_avg_total: request
+                .similar_deals_avg_total
+                .and_then(|v| v.to_f64())
+                .unwrap_or(16_000.0),
+        };
+
+        let hits = AnomalyDetector::default().evaluate_rules(&input);
+        if hits.is_empty() {
+            return Ok(blocks::preview_mode_message(
+                "/quote finalize",
+                Some(&quote_id),
+                "no pricing anomalies detected; finalization can proceed",
+                &_envelope.request_id,
+            ));
+        }
+
+        let headline = format!(
+            "{} pricing anomal{} require{} explicit review before finalization.",
+            hits.len(),
+            if hits.len() == 1 { "y" } else { "ies" },
+            if hits.len() == 1 { "s" } else { "" }
+        );
+        let items = hits
+            .into_iter()
+            .map(|hit| blocks::AnomalyWarningItemView {
+                rule_label: anomaly_rule_label(hit.rule).to_owned(),
+                severity_label: anomaly_severity_label(hit.severity).to_owned(),
+                reason: hit.reason,
+            })
+            .collect();
+        Ok(blocks::anomaly_warning_message(&blocks::AnomalyWarningView {
+            quote_id,
+            headline,
+            items,
+            request_id: _envelope.request_id.clone(),
+        }))
+    }
+
     fn send_quote(
         &self,
         quote_id: Option<String>,
@@ -805,19 +986,118 @@ impl QuoteCommandService for NoopQuoteCommandService {
         freeform_args: String,
         _envelope: &CommandEnvelope,
     ) -> Result<MessageTemplate, CommandRouteError> {
-        let target = quote_id.as_deref().or(customer_hint.as_deref()).unwrap_or("unspecified");
-        let detail = if freeform_args.is_empty() {
-            "suggestion request captured".to_owned()
+        let customer_hint = customer_hint
+            .or_else(|| extract_account_hint("new", &freeform_args))
+            .unwrap_or_else(|| "Current customer".to_owned());
+        let suggestions = noop_suggestion_items();
+        Ok(blocks::suggestion_message(&blocks::SuggestionCardView {
+            quote_id,
+            customer_hint,
+            suggestions,
+            request_id: _envelope.request_id.clone(),
+        }))
+    }
+
+    fn parse_email(
+        &self,
+        freeform_args: String,
+        _envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError> {
+        let detail = if freeform_args.trim().is_empty() {
+            "email content required after `/quote parse-email`".to_owned()
         } else {
-            freeform_args
+            format!(
+                "email parser request captured; extracted from {} characters of source text",
+                freeform_args.len()
+            )
         };
         Ok(blocks::preview_mode_message(
-            "/quote suggest",
-            Some(target),
-            &format!("product suggestions requested · {detail}"),
+            "/quote parse-email",
+            Some("email parser"),
+            &detail,
             &_envelope.request_id,
         ))
     }
+
+    fn parse_rfp(
+        &self,
+        freeform_args: String,
+        _envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError> {
+        let detail = if freeform_args.trim().is_empty() {
+            "RFP content required after `/quote parse-rfp`".to_owned()
+        } else {
+            format!(
+                "RFP parser request captured; extracted from {} characters of source text",
+                freeform_args.len()
+            )
+        };
+        Ok(blocks::preview_mode_message(
+            "/quote parse-rfp",
+            Some("rfp parser"),
+            &detail,
+            &_envelope.request_id,
+        ))
+    }
+
+    fn manage_branding(
+        &self,
+        _freeform_args: String,
+        _envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError> {
+        Ok(blocks::branding_settings_message(&blocks::BrandingSettingsView {
+            company_name: "Quotey".to_owned(),
+            current_logo_url: None,
+            primary_color: "#2563eb".to_owned(),
+            secondary_color: "#1e40af".to_owned(),
+            accent_color: "#3b82f6".to_owned(),
+            request_id: _envelope.request_id.clone(),
+        }))
+    }
+}
+
+fn noop_suggestion_items() -> Vec<blocks::SuggestionItemView> {
+    vec![
+        blocks::SuggestionItemView {
+            product_id: "prod_support_premium".to_owned(),
+            product_name: "Premium Support".to_owned(),
+            product_sku: "SUPPORT-PREMIUM".to_owned(),
+            score: 0.85,
+            confidence: "High".to_owned(),
+            category_description: "Similar enterprise customers purchased this".to_owned(),
+            reasoning: vec![
+                "Enterprise deals often include premium support in year one".to_owned(),
+                "High seat count increases onboarding/support demand".to_owned(),
+            ],
+            unit_price: Some(499.0),
+        },
+        blocks::SuggestionItemView {
+            product_id: "prod_sso".to_owned(),
+            product_name: "SSO Add-on".to_owned(),
+            product_sku: "ADDON-SSO-001".to_owned(),
+            score: 0.72,
+            confidence: "Medium".to_owned(),
+            category_description: "Cross-sell from security and compliance profile".to_owned(),
+            reasoning: vec![
+                "Most comparable deals include centralized identity".to_owned(),
+                "Security review notes prioritize SSO support".to_owned(),
+            ],
+            unit_price: Some(2.0),
+        },
+        blocks::SuggestionItemView {
+            product_id: "prod_onboarding".to_owned(),
+            product_name: "Onboarding Package".to_owned(),
+            product_sku: "SERV-ONBOARD-001".to_owned(),
+            score: 0.65,
+            confidence: "Medium".to_owned(),
+            category_description: "High-impact activation accelerator".to_owned(),
+            reasoning: vec![
+                "Recommended for larger deployment footprints".to_owned(),
+                "Reduces time-to-value and implementation risk".to_owned(),
+            ],
+            unit_price: Some(1500.0),
+        },
+    ]
 }
 
 fn classify_quote_command(verb: &str, freeform_args: String) -> QuoteCommand {
@@ -849,6 +1129,9 @@ fn classify_quote_command(verb: &str, freeform_args: String) -> QuoteCommand {
             quote_id: freeform_args.split_whitespace().find_map(parse_quote_id_token),
             freeform_args,
         },
+        "finalize" | "finalise" => {
+            QuoteCommand::Finalize { request: parse_finalize_request(freeform_args) }
+        }
         "send" => QuoteCommand::Send {
             quote_id: freeform_args.split_whitespace().find_map(parse_quote_id_token),
             freeform_args,
@@ -863,9 +1146,19 @@ fn classify_quote_command(verb: &str, freeform_args: String) -> QuoteCommand {
             let customer_hint = extract_account_hint("new", &freeform_args);
             QuoteCommand::Suggest { quote_id, customer_hint, freeform_args }
         }
+        "parse-email" | "parse_email" | "parseemail" => QuoteCommand::ParseEmail { freeform_args },
+        "parse-rfp" | "parse_rfp" | "parserfp" => QuoteCommand::ParseRfp { freeform_args },
         "what" if freeform_args.to_ascii_lowercase().contains("if") => {
             QuoteCommand::Simulate { request: parse_simulation_request(freeform_args) }
         }
+        "help" => QuoteCommand::Help,
+        _ => QuoteCommand::Unknown { verb: verb.to_owned(), freeform_args },
+    }
+}
+
+fn classify_quotey_command(verb: &str, freeform_args: String) -> QuoteCommand {
+    match verb {
+        "branding" => QuoteCommand::Branding { freeform_args },
         "help" => QuoteCommand::Help,
         _ => QuoteCommand::Unknown { verb: verb.to_owned(), freeform_args },
     }
@@ -1084,6 +1377,34 @@ pub fn handle_block_action(
             let payload = raw_value.ok_or(CommandRouteError::InvalidSimulationActionPayload)?;
             handle_simulation_promotion_action(payload, request_id)
         }
+        "quotey.branding.open_modal.v1" => Ok(blocks::preview_mode_message(
+            "/quotey branding",
+            None,
+            "branding modal open requested; logo upload + color pickers + live preview are prepared",
+            request_id,
+        )),
+        "quotey.branding.save.v1" => Ok(blocks::preview_mode_message(
+            "/quotey branding",
+            None,
+            "branding save requested; changes will persist once runtime wiring is connected",
+            request_id,
+        )),
+        "quote.anomaly.override.v1" => Ok(blocks::quote_status_message(
+            &quote_id,
+            &format!(
+                "anomaly override selected. Provide explicit rationale using `/quote finalize {quote_id} override_reason=...` so finalization remains auditable."
+            ),
+        )),
+        "quote.anomaly.adjust.v1" => Ok(blocks::quote_status_message(
+            &quote_id,
+            &format!(
+                "quote adjustment requested. Update pricing inputs, then rerun `/quote finalize {quote_id}` to re-evaluate anomaly checks."
+            ),
+        )),
+        "quote.anomaly.similar.v1" => Ok(blocks::quote_status_message(
+            &quote_id,
+            "similar-deal context requested. Comparable finalized deal baselines are being prepared for review.",
+        )),
         "approval.approve.v1" => Ok(blocks::quote_status_message(
             &quote_id,
             "approval action captured (approve). This signal is recorded and routed through deterministic flow execution.",
@@ -1313,6 +1634,74 @@ pub fn handle_simulation_promotion_action(
     ))
 }
 
+fn parse_finalize_request(raw_args: String) -> FinalizeRequest {
+    let mut request = FinalizeRequest {
+        quote_id: None,
+        requested_discount_pct: None,
+        customer_avg_discount_pct: None,
+        customer_discount_std_dev: None,
+        margin_pct: None,
+        category_floor_pct: None,
+        requested_quantity: None,
+        customer_avg_quantity: None,
+        quote_total: None,
+        similar_deals_avg_total: None,
+        override_justification: None,
+        raw_args: raw_args.clone(),
+    };
+
+    for token in raw_args.split_whitespace() {
+        if request.quote_id.is_none() {
+            request.quote_id = parse_quote_id_token(token);
+            if request.quote_id.is_some() {
+                continue;
+            }
+        }
+
+        if let Some((key, value)) = token.split_once('=') {
+            let normalized_key = key.trim().to_ascii_lowercase();
+            match normalized_key.as_str() {
+                "discount" | "requested_discount" => {
+                    request.requested_discount_pct = parse_decimal_token(value);
+                }
+                "avg_discount" | "customer_avg_discount" => {
+                    request.customer_avg_discount_pct = parse_decimal_token(value);
+                }
+                "discount_stddev" | "discount_std_dev" => {
+                    request.customer_discount_std_dev = parse_decimal_token(value);
+                }
+                "margin" => {
+                    request.margin_pct = parse_decimal_token(value);
+                }
+                "margin_floor" | "category_floor" => {
+                    request.category_floor_pct = parse_decimal_token(value);
+                }
+                "quantity" | "requested_quantity" => {
+                    request.requested_quantity = parse_decimal_token(value);
+                }
+                "avg_quantity" | "customer_avg_quantity" => {
+                    request.customer_avg_quantity = parse_decimal_token(value);
+                }
+                "total" | "quote_total" => {
+                    request.quote_total = parse_decimal_token(value);
+                }
+                "similar_total" | "similar_avg_total" => {
+                    request.similar_deals_avg_total = parse_decimal_token(value);
+                }
+                "override_reason" | "reason" => {
+                    let reason = value.trim().trim_matches('"');
+                    if !reason.is_empty() {
+                        request.override_justification = Some(reason.to_owned());
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+
+    request
+}
+
 fn parse_simulation_request(raw_args: String) -> SimulationRequest {
     let mut request = SimulationRequest {
         quote_id: None,
@@ -1392,6 +1781,24 @@ fn parse_decimal_token(token: &str) -> Option<Decimal> {
     Decimal::from_str(trimmed).ok()
 }
 
+fn anomaly_rule_label(rule: AnomalyRuleKind) -> &'static str {
+    match rule {
+        AnomalyRuleKind::Discount => "Discount",
+        AnomalyRuleKind::Margin => "Margin",
+        AnomalyRuleKind::Quantity => "Quantity",
+        AnomalyRuleKind::Price => "Price",
+    }
+}
+
+fn anomaly_severity_label(severity: AnomalySeverity) -> &'static str {
+    match severity {
+        AnomalySeverity::None => "none",
+        AnomalySeverity::Info => "info",
+        AnomalySeverity::Warning => "warning",
+        AnomalySeverity::Critical => "critical",
+    }
+}
+
 fn decode_action_value_component(value: &str) -> Option<String> {
     let bytes = value.as_bytes();
     let mut decoded = Vec::with_capacity(bytes.len());
@@ -1454,15 +1861,39 @@ fn normalize_quote_command_verb(raw: &str) -> String {
         .to_ascii_lowercase()
 }
 
+fn normalize_quotey_command_verb(raw: &str) -> String {
+    raw.trim()
+        .trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '_' && ch != '-')
+        .to_ascii_lowercase()
+}
+
+fn suggest_supported_quotey_verb(input: &str) -> Option<&'static str> {
+    let input = input.trim().to_ascii_lowercase();
+    let mut best: Option<(usize, &'static str)> = None;
+    for &candidate in &SUPPORTED_QUOTEY_VERBS {
+        let distance = levenshtein_distance(&input, candidate);
+        match best {
+            Some((current_best, _)) if distance >= current_best => {}
+            _ => {
+                if distance <= 2 {
+                    best = Some((distance, candidate));
+                }
+            }
+        }
+    }
+    best.map(|(_, candidate)| candidate)
+}
+
 #[cfg(test)]
 mod tests {
+    use rust_decimal::Decimal;
     use std::sync::Mutex;
 
     use super::{
         action_quote_id, action_value_pairs, build_simulation_promotion_value, handle_block_action,
         handle_simulation_promotion_action, infer_thread_quote_command, normalize_quote_command,
         parse_quote_command, parse_quote_id_token, parse_simulation_promotion_value,
-        suggest_supported_verb, CommandEnvelope, CommandRouteError, CommandRouter,
+        suggest_supported_verb, CommandEnvelope, CommandRouteError, CommandRouter, FinalizeRequest,
         NoopQuoteCommandService, QuoteCommand, QuoteCommandService, SimulationRequest,
         SlashCommandPayload,
     };
@@ -1554,12 +1985,24 @@ mod tests {
             parse_quote_command("discount Q-2026-0101 28"),
             QuoteCommand::Discount { .. }
         ));
+        assert!(matches!(
+            parse_quote_command("finalize Q-2026-0101 discount=18 margin=52"),
+            QuoteCommand::Finalize { .. }
+        ));
         assert!(matches!(parse_quote_command("send Q-2026-0101 now"), QuoteCommand::Send { .. }));
         assert!(matches!(parse_quote_command("clone Q-2026-0101"), QuoteCommand::Clone { .. }));
         assert!(matches!(parse_quote_command("help?"), QuoteCommand::Help));
         assert!(matches!(
             parse_quote_command("simulate Q-2026-0001 variant=v1 discount=10% plan-pro:+5"),
             QuoteCommand::Simulate { .. }
+        ));
+        assert!(matches!(
+            parse_quote_command("parse-email Need 150 seats and premium support"),
+            QuoteCommand::ParseEmail { .. }
+        ));
+        assert!(matches!(
+            parse_quote_command("parse-rfp Security requirements table attached"),
+            QuoteCommand::ParseRfp { .. }
         ));
         assert!(matches!(parse_quote_command("help"), QuoteCommand::Help));
         assert!(matches!(parse_quote_command("something-else"), QuoteCommand::Unknown { .. }));
@@ -1570,8 +2013,27 @@ mod tests {
         assert_eq!(suggest_supported_verb("statuz"), Some("status"));
         assert_eq!(suggest_supported_verb("edti"), Some("edit"));
         assert_eq!(suggest_supported_verb("sendd"), Some("send"));
+        assert_eq!(suggest_supported_verb("finalzie"), Some("finalize"));
         assert_eq!(suggest_supported_verb("hlep"), Some("help"));
+        assert_eq!(suggest_supported_verb("parse-emial"), Some("parse-email"));
+        assert_eq!(suggest_supported_verb("parse-rpf"), Some("parse-rfp"));
         assert_eq!(suggest_supported_verb("xyz"), None);
+    }
+
+    #[test]
+    fn normalize_quote_command_accepts_quotey_branding() {
+        let envelope = normalize_quote_command(SlashCommandPayload {
+            command: "/quotey".to_owned(),
+            text: "branding".to_owned(),
+            channel_id: "C123".to_owned(),
+            user_id: "U123".to_owned(),
+            trigger_ts: "1700000000.1".to_owned(),
+            request_id: "req-quotey-branding".to_owned(),
+        })
+        .expect("normalized");
+
+        assert_eq!(envelope.command, "quotey");
+        assert_eq!(envelope.verb, "branding");
     }
 
     #[test]
@@ -1758,6 +2220,27 @@ mod tests {
     }
 
     #[test]
+    fn block_action_handles_anomaly_controls() {
+        let message = handle_block_action(
+            "quote.anomaly.override.v1",
+            Some("quote=Q-2026-7003"),
+            Some("Q-2026-7003"),
+            "req-anomaly-1",
+        )
+        .expect("anomaly override handled");
+        assert!(message.fallback_text.contains("override_reason"));
+
+        let message = handle_block_action(
+            "quote.anomaly.adjust.v1",
+            Some("quote=Q-2026-7003"),
+            Some("Q-2026-7003"),
+            "req-anomaly-2",
+        )
+        .expect("anomaly adjust handled");
+        assert!(message.fallback_text.contains("rerun `/quote finalize"));
+    }
+
+    #[test]
     fn block_action_handles_command_shortcuts() {
         let message = handle_block_action(
             "quote.help.command.status.v1",
@@ -1777,6 +2260,23 @@ mod tests {
         )
         .expect("shortcut action handled");
         assert!(message.fallback_text.contains("Run command: /quote new for <customer>"));
+    }
+
+    #[test]
+    fn block_action_handles_branding_controls() {
+        let message = handle_block_action(
+            "quotey.branding.open_modal.v1",
+            None,
+            None,
+            "req-quotey-branding-open",
+        )
+        .expect("branding open handled");
+        assert!(message.fallback_text.contains("Preview mode active"));
+
+        let message =
+            handle_block_action("quotey.branding.save.v1", None, None, "req-quotey-branding-save")
+                .expect("branding save handled");
+        assert!(message.fallback_text.contains("Preview mode active"));
     }
 
     #[test]
@@ -1951,6 +2451,15 @@ mod tests {
                 Ok(crate::blocks::help_message())
             }
 
+            fn finalize_quote(
+                &self,
+                _request: FinalizeRequest,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("finalize");
+                Ok(crate::blocks::help_message())
+            }
+
             fn send_quote(
                 &self,
                 _quote_id: Option<String>,
@@ -1981,6 +2490,33 @@ mod tests {
                 self.calls.lock().expect("lock").push("suggest");
                 Ok(crate::blocks::help_message())
             }
+
+            fn parse_email(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("parse-email");
+                Ok(crate::blocks::help_message())
+            }
+
+            fn parse_rfp(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("parse-rfp");
+                Ok(crate::blocks::help_message())
+            }
+
+            fn manage_branding(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("branding");
+                Ok(crate::blocks::help_message())
+            }
         }
 
         let router = CommandRouter::new(RecordingService::default());
@@ -1993,9 +2529,12 @@ mod tests {
             ("edit", "Q-2026-1111 term change"),
             ("add-line", "Q-2026-1111 addon:+1"),
             ("discount", "Q-2026-1111 25"),
+            ("finalize", "Q-2026-1111 discount=12 margin=58"),
             ("send", "Q-2026-1111"),
             ("clone", "Q-2026-1111"),
             ("suggest", "Q-2026-1111"),
+            ("parse-email", "Need 100 seats with annual billing"),
+            ("parse-rfp", "Section 3: security controls and SLA requirements"),
         ] {
             router
                 .route(CommandEnvelope {
@@ -2016,10 +2555,207 @@ mod tests {
         assert_eq!(
             &*calls,
             &[
-                "new", "status", "list", "simulate", "audit", "edit", "add-line", "discount",
-                "send", "clone", "suggest"
+                "new",
+                "status",
+                "list",
+                "simulate",
+                "audit",
+                "edit",
+                "add-line",
+                "discount",
+                "finalize",
+                "send",
+                "clone",
+                "suggest",
+                "parse-email",
+                "parse-rfp"
             ]
         );
+    }
+
+    #[test]
+    fn router_routes_quotey_branding_command() {
+        #[derive(Default)]
+        struct BrandingRecordingService {
+            calls: Mutex<Vec<&'static str>>,
+        }
+
+        impl QuoteCommandService for BrandingRecordingService {
+            fn new_quote(
+                &self,
+                _customer_hint: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn status_quote(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn list_quotes(
+                &self,
+                _filter: Option<String>,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn audit_quote(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn edit_quote(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn add_line(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn request_discount(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn finalize_quote(
+                &self,
+                _request: FinalizeRequest,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn send_quote(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn clone_quote(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn simulate_quote(
+                &self,
+                _request: SimulationRequest,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn suggest_products(
+                &self,
+                _quote_id: Option<String>,
+                _customer_hint: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn parse_email(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn parse_rfp(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn manage_branding(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("branding");
+                Ok(crate::blocks::help_message())
+            }
+        }
+
+        let router = CommandRouter::new(BrandingRecordingService::default());
+        router
+            .route(CommandEnvelope {
+                command: "quotey".to_owned(),
+                verb: "branding".to_owned(),
+                quote_id: None,
+                account_hint: None,
+                freeform_args: String::new(),
+                channel_id: "C1".to_owned(),
+                user_id: "U1".to_owned(),
+                trigger_ts: "1".to_owned(),
+                request_id: "req-branding-route".to_owned(),
+            })
+            .expect("route");
+        assert_eq!(*router.service.calls.lock().expect("lock"), vec!["branding"]);
+    }
+
+    #[test]
+    fn noop_service_finalize_renders_anomaly_warning_ui() {
+        let service = NoopQuoteCommandService;
+        let envelope = CommandEnvelope {
+            command: "quote".to_owned(),
+            verb: "finalize".to_owned(),
+            quote_id: Some("Q-2026-8888".to_owned()),
+            account_hint: None,
+            freeform_args: "Q-2026-8888 discount=18 margin=52".to_owned(),
+            channel_id: "C1".to_owned(),
+            user_id: "U1".to_owned(),
+            trigger_ts: "1".to_owned(),
+            request_id: "req-finalize".to_owned(),
+        };
+
+        let message = service
+            .finalize_quote(
+                FinalizeRequest {
+                    quote_id: Some("Q-2026-8888".to_owned()),
+                    requested_discount_pct: Some(Decimal::new(18, 0)),
+                    customer_avg_discount_pct: Some(Decimal::new(78, 1)),
+                    customer_discount_std_dev: Some(Decimal::new(2, 0)),
+                    margin_pct: Some(Decimal::new(52, 0)),
+                    category_floor_pct: Some(Decimal::new(60, 0)),
+                    requested_quantity: Some(Decimal::new(150, 0)),
+                    customer_avg_quantity: Some(Decimal::new(65, 0)),
+                    quote_total: Some(Decimal::new(21420, 0)),
+                    similar_deals_avg_total: Some(Decimal::new(16000, 0)),
+                    override_justification: None,
+                    raw_args: "Q-2026-8888 discount=18 margin=52".to_owned(),
+                },
+                &envelope,
+            )
+            .expect("finalize should return warning ui");
+
+        assert!(message.fallback_text.contains("flagged"));
+        assert!(message.blocks.iter().any(|block| matches!(
+            block,
+            crate::blocks::Block::Actions { block_id, .. } if block_id == "quote.anomaly.actions.v1"
+        )));
     }
 
     #[test]
@@ -2077,5 +2813,67 @@ mod tests {
             "req-45",
         );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn noop_service_suggest_products_renders_suggestion_ui() {
+        let service = NoopQuoteCommandService;
+        let envelope = CommandEnvelope {
+            command: "quote".to_owned(),
+            verb: "suggest".to_owned(),
+            quote_id: Some("Q-2026-1234".to_owned()),
+            account_hint: Some("Acme Corp".to_owned()),
+            freeform_args: "for Acme Corp".to_owned(),
+            channel_id: "C1".to_owned(),
+            user_id: "U1".to_owned(),
+            trigger_ts: "1".to_owned(),
+            request_id: "req-suggest-ui".to_owned(),
+        };
+
+        let message = service
+            .suggest_products(
+                Some("Q-2026-1234".to_owned()),
+                Some("Acme Corp".to_owned()),
+                "for Acme Corp".to_owned(),
+                &envelope,
+            )
+            .expect("suggestions should render");
+
+        assert!(message.fallback_text.contains("product suggestion"));
+        assert!(message.blocks.iter().any(|block| matches!(
+            block,
+            crate::blocks::Block::Section { block_id, .. } if block_id == "suggest.header.v1"
+        )));
+        assert!(message.blocks.iter().any(|block| matches!(
+            block,
+            crate::blocks::Block::Actions { block_id, .. }
+                if block_id == "suggest.item.actions.0.v1"
+        )));
+    }
+
+    #[test]
+    fn noop_service_new_quote_with_customer_renders_suggestions() {
+        let service = NoopQuoteCommandService;
+        let envelope = CommandEnvelope {
+            command: "quote".to_owned(),
+            verb: "new".to_owned(),
+            quote_id: None,
+            account_hint: Some("Acme Corp".to_owned()),
+            freeform_args: "for Acme Corp".to_owned(),
+            channel_id: "C1".to_owned(),
+            user_id: "U1".to_owned(),
+            trigger_ts: "1".to_owned(),
+            request_id: "req-new-suggest".to_owned(),
+        };
+
+        let message = service
+            .new_quote(Some("Acme Corp".to_owned()), "for Acme Corp".to_owned(), &envelope)
+            .expect("new quote should render suggestion card");
+
+        assert!(message.fallback_text.contains("suggestion"));
+        assert!(message.blocks.iter().any(|block| matches!(
+            block,
+            crate::blocks::Block::Section { block_id, .. } if block_id == "suggest.header.v1"
+        )));
     }
 }

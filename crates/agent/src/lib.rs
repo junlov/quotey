@@ -26,7 +26,9 @@
 //! or policy outcomes. Those are deterministic decisions made by the CPQ core.
 
 pub mod conversation;
+pub mod extraction;
 pub mod guardrails;
 pub mod llm;
+pub mod prompts;
 pub mod runtime;
 pub mod tools;

@@ -588,6 +588,26 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn dispatcher_routes_quotey_branding_slash_command() {
+        let dispatcher = default_dispatcher();
+        let envelope = SlackEnvelope {
+            envelope_id: "env-quotey-branding-1".to_owned(),
+            event: SlackEvent::SlashCommand(SlashCommandPayload {
+                command: "/quotey".to_owned(),
+                text: "branding".to_owned(),
+                channel_id: "C1".to_owned(),
+                user_id: "U1".to_owned(),
+                trigger_ts: "1".to_owned(),
+                request_id: "req-quotey-branding-1".to_owned(),
+            }),
+        };
+
+        let result =
+            dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
+        assert!(matches!(result, HandlerResult::Responded(_)));
+    }
+
+    #[tokio::test]
     async fn dispatcher_returns_ignored_when_no_handler_registered() {
         let dispatcher = EventDispatcher::new();
         let envelope = SlackEnvelope {

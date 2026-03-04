@@ -1693,6 +1693,7 @@ dependencies = [
  "quotey-core",
  "serde",
  "serde_json",
+ "tokio",
 ]
 
 [[package]]
@@ -1800,9 +1801,12 @@ version = "0.1.2"
 dependencies = [
  "anyhow",
  "async-trait",
+ "chrono",
  "quotey-core",
+ "quotey-db",
  "rust_decimal",
  "serde",
+ "sqlx",
  "thiserror",
  "tokio",
  "tracing",

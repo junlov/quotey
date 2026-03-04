@@ -4,6 +4,8 @@
 //! - `GET  /quote/{token}`                      — view quote details (HTML)
 //! - `GET  /quote/{token}/download`             — download quote PDF
 //! - `GET  /portal`                             — portal homepage (quote list)
+//! - `GET  /portal/manifest.webmanifest`        — PWA manifest
+//! - `GET  /portal/sw.js`                       — service worker script
 //!
 //! JSON API Endpoints:
 //! - `POST /quote/{token}/approve`              — capture electronic approval
@@ -15,11 +17,13 @@
 //! - `POST /api/v1/portal/links`                — generate a shareable link
 //! - `POST /api/v1/portal/links/revoke`         — revoke an existing link
 //! - `GET  /api/v1/portal/links/{quote_id}`     — list active links for a quote
+//! - `POST /api/v1/portal/push/subscribe`       — register browser push subscription
+//! - `POST /api/v1/portal/push/unsubscribe`     — revoke browser push subscription
 
 use crate::pdf::PdfGenerator;
 use axum::{
     extract::{Path, Query, State},
-    http::StatusCode,
+    http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
@@ -202,6 +206,20 @@ pub struct RevokeLinkRequest {
     pub token: String,
 }
 
+#[derive(Debug, Deserialize)]
+pub struct PushSubscriptionRequest {
+    pub endpoint: String,
+    pub p256dh: String,
+    pub auth: String,
+    pub user_agent: Option<String>,
+    pub device_label: Option<String>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct PushUnsubscribeRequest {
+    pub endpoint: String,
+}
+
 // ---------------------------------------------------------------------------
 // Router
 // ---------------------------------------------------------------------------
@@ -249,6 +267,8 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/quote/{token}", get(view_quote_page))
         .route("/quote/{token}/download", get(download_quote_pdf))
         .route("/portal", get(portal_index_page))
+        .route("/portal/manifest.webmanifest", get(portal_manifest))
+        .route("/portal/sw.js", get(portal_service_worker))
         // JSON API routes
         .route("/quote/{token}/approve", post(approve_quote))
         .route("/quote/{token}/reject", post(reject_quote))
@@ -259,6 +279,8 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/api/v1/portal/links", post(create_link))
         .route("/api/v1/portal/links/revoke", post(revoke_link))
         .route("/api/v1/portal/links/{quote_id}", get(list_links))
+        .route("/api/v1/portal/push/subscribe", post(subscribe_push))
+        .route("/api/v1/portal/push/unsubscribe", post(unsubscribe_push))
         .with_state(PortalState { db_pool, templates, pdf_generator })
 }
 
@@ -473,11 +495,101 @@ async fn view_quote_page(
         })
         .collect();
 
+    let valid_until = quote_row.try_get::<String, _>("valid_until").unwrap_or_default();
+    let created_at_value = quote_row.try_get::<String, _>("created_at").unwrap_or_default();
+    let quote_age_days = created_at_value
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .map(|created_at| (Utc::now() - created_at).num_days().max(0))
+        .unwrap_or(0);
+    let days_to_expiry = valid_until
+        .parse::<chrono::DateTime<chrono::Utc>>()
+        .map(|expires_at| (expires_at - Utc::now()).num_days())
+        .unwrap_or(0);
+    let discount_percent = if final_subtotal > 0.0 {
+        ((final_discount / final_subtotal) * 100.0).clamp(0.0, 100.0)
+    } else {
+        0.0
+    };
+
+    let account_id_value: Option<String> =
+        quote_row.try_get::<Option<String>, _>("account_id").unwrap_or(None);
+    let (prior_quotes_count, prior_approved_count, similar_deals) = if let Some(account_id) =
+        &account_id_value
+    {
+        let prior_quotes_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE account_id = ? AND id != ?")
+                .bind(account_id)
+                .bind(&quote_id)
+                .fetch_one(&state.db_pool)
+                .await
+                .unwrap_or(0);
+
+        let prior_approved_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM quote WHERE account_id = ? AND id != ? AND status = 'approved'",
+        )
+        .bind(account_id)
+        .bind(&quote_id)
+        .fetch_one(&state.db_pool)
+        .await
+        .unwrap_or(0);
+
+        let similar_rows = sqlx::query(
+            "SELECT id, status, created_at
+             FROM quote
+             WHERE account_id = ? AND id != ?
+             ORDER BY created_at DESC
+             LIMIT 3",
+        )
+        .bind(account_id)
+        .bind(&quote_id)
+        .fetch_all(&state.db_pool)
+        .await
+        .unwrap_or_default();
+
+        let similar_deals: Vec<serde_json::Value> = similar_rows
+            .iter()
+            .map(|row| {
+                serde_json::json!({
+                    "quote_id": row.try_get::<String, _>("id").unwrap_or_default(),
+                    "status": canonical_quote_status(&row.try_get::<String, _>("status").unwrap_or_default()),
+                    "created_at": row.try_get::<String, _>("created_at").unwrap_or_default(),
+                })
+            })
+            .collect();
+
+        (prior_quotes_count, prior_approved_count, similar_deals)
+    } else {
+        (0, 0, Vec::new())
+    };
+
+    let latest_rep_note: Option<String> = sqlx::query_scalar(
+        "SELECT body
+         FROM portal_comment
+         WHERE quote_id = ? AND author_email LIKE 'portal:%'
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(&quote_id)
+    .fetch_optional(&state.db_pool)
+    .await
+    .unwrap_or(None);
+
+    let latest_customer_context: Option<String> = sqlx::query_scalar(
+        "SELECT body
+         FROM portal_comment
+         WHERE quote_id = ? AND author_email NOT LIKE 'portal:%'
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(&quote_id)
+    .fetch_optional(&state.db_pool)
+    .await
+    .unwrap_or(None);
+
     // Build template context
     let mut context = Context::new();
     let raw_status = quote_row.try_get::<String, _>("status").unwrap_or_default();
     let display_status = canonical_quote_status(&raw_status);
-    let valid_until = quote_row.try_get::<String, _>("valid_until").unwrap_or_default();
     let expires_soon = valid_until
         .parse::<chrono::DateTime<chrono::Utc>>()
         .map(|expires_at| (expires_at - Utc::now()).num_days() <= 3)
@@ -549,7 +661,7 @@ async fn view_quote_page(
         "token": token,
         "status": display_status,
         "version": quote_row.try_get::<i64, _>("version").unwrap_or(1),
-        "created_at": quote_row.try_get::<String, _>("created_at").unwrap_or_default(),
+        "created_at": created_at_value,
         "valid_until": valid_until,
         "term_months": quote_row.try_get::<i64, _>("term_months").unwrap_or(12),
         "currency": currency,
@@ -579,14 +691,25 @@ async fn view_quote_page(
     }));
 
     context.insert(
+        "decision_context",
+        &serde_json::json!({
+            "quote_age_days": quote_age_days,
+            "days_to_expiry": days_to_expiry,
+            "line_count": line_rows.len(),
+            "discount_amount": format_price(final_discount),
+            "discount_percent": format!("{discount_percent:.1}%"),
+            "prior_quotes_count": prior_quotes_count,
+            "prior_approved_count": prior_approved_count,
+            "rep_justification": latest_rep_note.unwrap_or_else(|| "No rep justification has been attached yet.".to_string()),
+            "competitive_context": latest_customer_context.unwrap_or_else(|| "No competitive context has been shared yet.".to_string()),
+            "similar_deals": similar_deals,
+        }),
+    );
+
+    context.insert(
         "customer",
         &serde_json::json!({
-            "name": quote_row
-                .try_get::<Option<String>, _>("account_id")
-                .ok()
-                .flatten()
-                .map(|id| id.to_string())
-                .unwrap_or_else(|| "Customer".to_string()),
+            "name": account_id_value.clone().unwrap_or_else(|| "Customer".to_string()),
             "email": "customer@example.com",
             "phone": "",
         }),
@@ -801,7 +924,6 @@ async fn portal_index_page(
     let status_filter = normalize_status_filter(query.status.as_deref());
     let selected_filter = selected_status(query.status.as_deref());
     let selected_search_value = selected_search(query.search.as_deref());
-    let now = Utc::now().to_rfc3339();
     let search_pattern = selected_search_value.to_ascii_lowercase();
     let search_pattern =
         if search_pattern.is_empty() { None } else { Some(format!("%{}%", search_pattern)) };
@@ -810,7 +932,7 @@ async fn portal_index_page(
         r#"
         SELECT q.id, q.status, q.created_at, q.valid_until,
             COALESCE(SUM(
-                (COALESCE(ql.subtotal, COALESCE(ql.unit_price, 0.0) * COALESCE(ql.quantity, 0))
+                COALESCE(ql.subtotal, COALESCE(ql.unit_price, 0.0) * COALESCE(ql.quantity, 0))
                 * (1.0 - (MAX(0.0, MIN(COALESCE(ql.discount_pct, 0.0), 100.0)) / 100.0))
             ), 0.0) AS computed_total,
             (
@@ -818,7 +940,7 @@ async fn portal_index_page(
                 FROM portal_link pl
                 WHERE pl.quote_id = q.id
                   AND pl.revoked = 0
-                  AND pl.expires_at > ?
+                  AND pl.expires_at > datetime('now')
                 ORDER BY pl.created_at DESC
                 LIMIT 1
             ) AS token
@@ -827,7 +949,6 @@ async fn portal_index_page(
         "#,
     );
     query_builder.push(" WHERE 1=1");
-    query_builder.push_bind(now);
 
     if let Some(filter_values) = &status_filter {
         query_builder.push(" AND q.status IN (");
@@ -958,13 +1079,131 @@ fn format_price(amount: f64) -> String {
     format!("${:.2}", amount)
 }
 
+async fn portal_manifest() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "application/manifest+json; charset=utf-8")],
+        include_str!("../../../templates/portal/manifest.webmanifest"),
+    )
+}
+
+async fn portal_service_worker() -> impl IntoResponse {
+    (
+        [(CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        include_str!("../../../templates/portal/sw.js"),
+    )
+}
+
 // ---------------------------------------------------------------------------
 // JSON API Handlers
 // ---------------------------------------------------------------------------
 
+async fn subscribe_push(
+    State(state): State<PortalState>,
+    Json(body): Json<PushSubscriptionRequest>,
+) -> Result<Json<PortalResponse>, (StatusCode, Json<PortalError>)> {
+    ensure_push_subscription_table(&state.db_pool).await.map_err(db_error)?;
+
+    let endpoint = body.endpoint.trim();
+    let p256dh = body.p256dh.trim();
+    let auth = body.auth.trim();
+    if endpoint.is_empty() || p256dh.is_empty() || auth.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(PortalError::validation(
+                "push subscription",
+                "endpoint, p256dh, and auth are required",
+            )),
+        ));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let subscription_id = format!("PUSH-{}", &uuid_v4()[..12]);
+    sqlx::query(
+        "INSERT INTO portal_push_subscription
+            (id, endpoint, p256dh, auth, user_agent, device_label, revoked, created_at, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?, 0, ?, ?)
+         ON CONFLICT(endpoint) DO UPDATE SET
+            p256dh = excluded.p256dh,
+            auth = excluded.auth,
+            user_agent = excluded.user_agent,
+            device_label = excluded.device_label,
+            revoked = 0,
+            updated_at = excluded.updated_at",
+    )
+    .bind(subscription_id)
+    .bind(endpoint)
+    .bind(p256dh)
+    .bind(auth)
+    .bind(body.user_agent.as_deref().map(str::trim).filter(|value| !value.is_empty()))
+    .bind(body.device_label.as_deref().map(str::trim).filter(|value| !value.is_empty()))
+    .bind(&now)
+    .bind(&now)
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    record_audit_event(
+        &state.db_pool,
+        None,
+        "portal.push.subscription.created",
+        "Portal push subscription registered",
+    )
+    .await;
+
+    Ok(Json(PortalResponse {
+        success: true,
+        message: "Push notifications enabled for this device".to_string(),
+    }))
+}
+
+async fn unsubscribe_push(
+    State(state): State<PortalState>,
+    Json(body): Json<PushUnsubscribeRequest>,
+) -> Result<Json<PortalResponse>, (StatusCode, Json<PortalError>)> {
+    ensure_push_subscription_table(&state.db_pool).await.map_err(db_error)?;
+
+    let endpoint = body.endpoint.trim();
+    if endpoint.is_empty() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(PortalError::validation("endpoint", "is required")),
+        ));
+    }
+
+    let now = Utc::now().to_rfc3339();
+    let result = sqlx::query(
+        "UPDATE portal_push_subscription
+         SET revoked = 1, updated_at = ?
+         WHERE endpoint = ? AND revoked = 0",
+    )
+    .bind(&now)
+    .bind(endpoint)
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    if result.rows_affected() == 0 {
+        return Err((StatusCode::NOT_FOUND, Json(PortalError::not_found("push subscription"))));
+    }
+
+    record_audit_event(
+        &state.db_pool,
+        None,
+        "portal.push.subscription.revoked",
+        "Portal push subscription revoked",
+    )
+    .await;
+
+    Ok(Json(PortalResponse {
+        success: true,
+        message: "Push notifications disabled for this device".to_string(),
+    }))
+}
+
 async fn approve_quote(
     Path(token): Path<String>,
     State(state): State<PortalState>,
+    headers: HeaderMap,
     Json(body): Json<ApproveRequest>,
 ) -> Result<Json<PortalResponse>, (StatusCode, Json<PortalError>)> {
     let quote_id = resolve_quote_by_token(&state.db_pool, &token).await?;
@@ -980,6 +1219,21 @@ async fn approve_quote(
     }
 
     let now = Utc::now();
+    let quote_version: i64 = sqlx::query_scalar("SELECT version FROM quote WHERE id = ?")
+        .bind(&quote_id)
+        .fetch_optional(&state.db_pool)
+        .await
+        .map_err(db_error)?
+        .unwrap_or(1);
+    let requester_ip = extract_requester_ip(&headers);
+    let approval_metadata = serde_json::json!({
+        "comments": body.comments.as_deref().unwrap_or(""),
+        "approver_name": approver_name,
+        "approver_email": approver_email,
+        "quote_version": quote_version,
+        "requester_ip": requester_ip,
+        "captured_at": now.to_rfc3339(),
+    });
     let approval_id = format!("PAPR-{}", &uuid_v4()[..12]);
 
     // Record the approval
@@ -991,7 +1245,7 @@ async fn approve_quote(
     )
     .bind(&approval_id)
     .bind(&quote_id)
-    .bind(body.comments.as_deref().unwrap_or(""))
+    .bind(approval_metadata.to_string())
     .bind(format!("portal:{}:{}", approver_email, approver_name))
     .bind(now.to_rfc3339())
     .bind(now.to_rfc3339())
@@ -1012,7 +1266,10 @@ async fn approve_quote(
         &state.db_pool,
         Some(&quote_id),
         "portal.approval",
-        &format!("Quote approved by {} ({}) via web portal", approver_name, approver_email),
+        &format!(
+            "Quote approved by {} ({}) via web portal [version={}, ip={}]",
+            approver_name, approver_email, quote_version, requester_ip
+        ),
     )
     .await;
 
@@ -1022,6 +1279,8 @@ async fn approve_quote(
         quote_id = %quote_id,
         approver_name = %approver_name,
         approver_email = %approver_email,
+        requester_ip = %requester_ip,
+        quote_version = %quote_version,
         "quote approved via web portal"
     );
 
@@ -1783,6 +2042,61 @@ fn db_error(error: sqlx::Error) -> (StatusCode, Json<PortalError>) {
     (StatusCode::INTERNAL_SERVER_ERROR, Json(PortalError::service_unavailable("database")))
 }
 
+async fn ensure_push_subscription_table(pool: &DbPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS portal_push_subscription (
+            id            TEXT PRIMARY KEY NOT NULL,
+            endpoint      TEXT NOT NULL UNIQUE,
+            p256dh        TEXT NOT NULL,
+            auth          TEXT NOT NULL,
+            user_agent    TEXT,
+            device_label  TEXT,
+            revoked       INTEGER NOT NULL DEFAULT 0,
+            created_at    TEXT NOT NULL DEFAULT (datetime('now')),
+            updated_at    TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_portal_push_subscription_revoked
+         ON portal_push_subscription(revoked)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+fn extract_requester_ip(headers: &HeaderMap) -> String {
+    let from_forwarded = headers
+        .get("x-forwarded-for")
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.split(',').next())
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(ToString::to_string);
+
+    if let Some(ip) = from_forwarded {
+        return ip;
+    }
+
+    for header in ["x-real-ip", "cf-connecting-ip"] {
+        if let Some(ip) = headers
+            .get(header)
+            .and_then(|value| value.to_str().ok())
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(ToString::to_string)
+        {
+            return ip;
+        }
+    }
+
+    "unknown".to_string()
+}
+
 /// Generate a URL-safe random-looking token for portal links.
 fn generate_token() -> String {
     // Use a cryptographically random UUID for link tokens to avoid guessability.
@@ -1795,6 +2109,7 @@ fn uuid_v4() -> String {
 
 #[cfg(test)]
 mod tests {
+    use axum::http::{HeaderMap, HeaderValue};
     use axum::{extract::State, Json};
     use chrono::Utc;
     use quotey_db::{connect_with_settings, migrations};
@@ -1847,6 +2162,16 @@ mod tests {
         State(PortalState { db_pool: pool, templates: Arc::new(tera), pdf_generator: None })
     }
 
+    fn state_with_real_templates(pool: sqlx::SqlitePool) -> State<PortalState> {
+        State(PortalState { db_pool: pool, templates: init_templates(), pdf_generator: None })
+    }
+
+    fn forwarded_headers(ip: &str) -> HeaderMap {
+        let mut headers = HeaderMap::new();
+        headers.insert("x-forwarded-for", HeaderValue::from_str(ip).expect("valid header"));
+        headers
+    }
+
     #[tokio::test]
     async fn approve_quote_records_approval_and_updates_status() {
         let (pool, quote_id, token) = setup().await;
@@ -1854,6 +2179,7 @@ mod tests {
         let result = approve_quote(
             axum::extract::Path(token.clone()),
             state(pool.clone()),
+            HeaderMap::new(),
             Json(ApproveRequest {
                 approver_name: "Jane Doe".to_string(),
                 approver_email: "jane@acme.com".to_string(),
@@ -1892,6 +2218,20 @@ mod tests {
         .await
         .expect("fetch audit");
         assert!(audit_payload.contains("approved"));
+
+        // Verify captured approval metadata includes required fields
+        let justification: String = sqlx::query_scalar(
+            "SELECT justification FROM approval_request WHERE quote_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch justification");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&justification).expect("justification should be json");
+        assert_eq!(metadata["quote_version"], serde_json::json!(1));
+        assert_eq!(metadata["requester_ip"], serde_json::json!("unknown"));
+        assert_eq!(metadata["approver_email"], serde_json::json!("jane@acme.com"));
     }
 
     #[tokio::test]
@@ -1901,6 +2241,7 @@ mod tests {
         let result = approve_quote(
             axum::extract::Path(token),
             state(pool),
+            HeaderMap::new(),
             Json(ApproveRequest {
                 approver_name: "  ".to_string(),
                 approver_email: "jane@acme.com".to_string(),
@@ -2019,6 +2360,7 @@ mod tests {
         let result = approve_quote(
             axum::extract::Path("Q-NONEXISTENT".to_string()),
             state(pool),
+            HeaderMap::new(),
             Json(ApproveRequest {
                 approver_name: "Jane".to_string(),
                 approver_email: "jane@test.com".to_string(),
@@ -2031,6 +2373,218 @@ mod tests {
         let (status, body) = result.unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.0.error.contains("not found"));
+    }
+
+    #[tokio::test]
+    async fn approve_quote_captures_requester_ip_from_forwarded_header() {
+        let (pool, quote_id, token) = setup().await;
+
+        let result = approve_quote(
+            axum::extract::Path(token.clone()),
+            state(pool.clone()),
+            forwarded_headers("203.0.113.7, 10.0.0.1"),
+            Json(ApproveRequest {
+                approver_name: "Jane Doe".to_string(),
+                approver_email: "jane@acme.com".to_string(),
+                comments: Some("LGTM".to_string()),
+            }),
+        )
+        .await
+        .expect("should succeed");
+
+        assert!(result.0.success);
+
+        let justification: String = sqlx::query_scalar(
+            "SELECT justification FROM approval_request WHERE quote_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch justification");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&justification).expect("justification should be json");
+        assert_eq!(metadata["requester_ip"], serde_json::json!("203.0.113.7"));
+    }
+
+    #[tokio::test]
+    async fn view_quote_page_renders_core_quote_details_and_actions() {
+        let (pool, quote_id, token) = setup().await;
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query("UPDATE quote SET account_id = 'Acme Corp', valid_until = ? WHERE id = ?")
+            .bind((Utc::now() + chrono::Duration::days(10)).to_rfc3339())
+            .bind(&quote_id)
+            .execute(&pool)
+            .await
+            .expect("update quote");
+
+        sqlx::query(
+            "INSERT INTO product (id, name, sku, base_price, currency, active, created_at, updated_at)
+             VALUES ('PROD-PORTAL', 'Enterprise Plan', 'ENT-001', '100.0', 'USD', 1, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed product");
+
+        sqlx::query(
+            "INSERT INTO quote_line (id, quote_id, product_id, quantity, unit_price, subtotal, discount_pct, notes, created_at, updated_at)
+             VALUES ('QL-PORTAL-1', ?, 'PROD-PORTAL', 3, 100.0, 300.0, 10.0, 'Includes onboarding', ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed quote line");
+
+        sqlx::query(
+            "INSERT INTO portal_comment (id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at)
+             VALUES ('PC-PORTAL-1', ?, NULL, NULL, 'Customer A', 'customer@example.com', 'Can we discuss payment terms?', datetime('now'))",
+        )
+        .bind(&quote_id)
+        .execute(&pool)
+        .await
+        .expect("seed comment");
+
+        sqlx::query(
+            "INSERT INTO portal_comment (id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at)
+             VALUES ('PC-PORTAL-2', ?, NULL, NULL, 'Rep A', 'portal:rep@acme.com', 'Discount requested to match competitor proposal.', datetime('now'))",
+        )
+        .bind(&quote_id)
+        .execute(&pool)
+        .await
+        .expect("seed rep note");
+
+        sqlx::query(
+            "INSERT INTO quote (id, status, currency, created_by, account_id, created_at, updated_at)
+             VALUES ('Q-TEST-RELATED', 'approved', 'USD', 'test-rep', 'Acme Corp', ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed similar deal");
+
+        let html = view_quote_page(axum::extract::Path(token), state_with_real_templates(pool))
+            .await
+            .expect("render quote page")
+            .0;
+
+        assert!(html.contains("Quote for"));
+        assert!(html.contains("Acme Corp"));
+        assert!(html.contains("Line Items"));
+        assert!(html.contains("Enterprise Plan"));
+        assert!(html.contains("Approve Quote"));
+        assert!(html.contains("Decline"));
+        assert!(html.contains("/download"));
+        assert!(html.contains("Questions or Comments"));
+        assert!(html.contains("Can we discuss payment terms?"));
+        assert!(html.contains("Decision Context"));
+        assert!(html.contains("Need Info"));
+        assert!(html.contains("Snooze"));
+        assert!(html.contains("Q-TEST-RELATED"));
+        assert!(html.contains("Discount requested to match competitor proposal."));
+    }
+
+    #[tokio::test]
+    async fn view_quote_page_approved_state_shows_confirmation_panel() {
+        let (pool, quote_id, token) = setup().await;
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query(
+            "UPDATE quote
+             SET status = 'approved', account_id = 'Acme Corp', valid_until = ?, updated_at = ?
+             WHERE id = ?",
+        )
+        .bind((Utc::now() + chrono::Duration::days(10)).to_rfc3339())
+        .bind(&now)
+        .bind(&quote_id)
+        .execute(&pool)
+        .await
+        .expect("update quote to approved");
+
+        let html = view_quote_page(axum::extract::Path(token), state_with_real_templates(pool))
+            .await
+            .expect("render quote page")
+            .0;
+
+        assert!(html.contains("Quote Approved"));
+        assert!(html.contains("This quote has been approved."));
+        assert!(html.contains("Download PDF"));
+        assert!(!html.contains("Quote Actions"));
+    }
+
+    #[tokio::test]
+    async fn portal_index_page_shows_pending_approvals_summary_cards() {
+        let (pool, quote_id, token) = setup().await;
+        let now = Utc::now().to_rfc3339();
+        let valid_until = (Utc::now() + chrono::Duration::days(15)).to_rfc3339();
+
+        sqlx::query(
+            "UPDATE quote SET status = 'pending', valid_until = ?, updated_at = ? WHERE id = ?",
+        )
+        .bind(&valid_until)
+        .bind(&now)
+        .bind(&quote_id)
+        .execute(&pool)
+        .await
+        .expect("set quote pending");
+
+        sqlx::query(
+            "INSERT INTO product (id, name, sku, base_price, currency, active, created_at, updated_at)
+             VALUES ('PROD-PENDING-1', 'Platform Seats', 'SEAT-001', '125.0', 'USD', 1, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed product");
+
+        sqlx::query(
+            "INSERT INTO quote_line
+                (id, quote_id, product_id, quantity, unit_price, subtotal, discount_pct, notes, created_at, updated_at)
+             VALUES ('QL-PENDING-1', ?, 'PROD-PENDING-1', 2, 125.0, 250.0, 0.0, NULL, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed quote line");
+
+        let html =
+            portal_index_page(Query(PortalIndexQuery::default()), state_with_real_templates(pool))
+                .await
+                .expect("render portal index")
+                .0;
+
+        assert!(html.contains("Pending Approvals"));
+        assert!(html.contains("waiting for decision"));
+        assert!(html.contains(&quote_id));
+        assert!(html.contains(&format!("/quote/{token}")));
+    }
+
+    #[tokio::test]
+    async fn portal_index_page_hides_pending_summary_when_no_pending_quotes() {
+        let (pool, quote_id, _token) = setup().await;
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query("UPDATE quote SET status = 'approved', updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&quote_id)
+            .execute(&pool)
+            .await
+            .expect("set quote approved");
+
+        let html =
+            portal_index_page(Query(PortalIndexQuery::default()), state_with_real_templates(pool))
+                .await
+                .expect("render portal index")
+                .0;
+
+        assert!(!html.contains("Pending Approvals"));
     }
 
     // -----------------------------------------------------------------------
@@ -2714,5 +3268,89 @@ mod tests {
             audit_count >= 1,
             "expected at least 1 audit event for expired token, got {audit_count}"
         );
+    }
+
+    #[tokio::test]
+    async fn subscribe_push_persists_subscription() {
+        let (pool, _, _) = setup().await;
+
+        let result = subscribe_push(
+            state(pool.clone()),
+            Json(PushSubscriptionRequest {
+                endpoint: "https://example.push/abc".to_string(),
+                p256dh: "p256dh-key".to_string(),
+                auth: "auth-key".to_string(),
+                user_agent: Some("Mobile Safari".to_string()),
+                device_label: Some("Manager iPhone".to_string()),
+            }),
+        )
+        .await
+        .expect("subscribe push");
+
+        assert!(result.0.success);
+
+        let count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM portal_push_subscription WHERE endpoint = ? AND revoked = 0",
+        )
+        .bind("https://example.push/abc")
+        .fetch_one(&pool)
+        .await
+        .expect("count push subscriptions");
+        assert_eq!(count, 1);
+    }
+
+    #[tokio::test]
+    async fn unsubscribe_push_marks_subscription_revoked() {
+        let (pool, _, _) = setup().await;
+        ensure_push_subscription_table(&pool).await.expect("ensure push table");
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO portal_push_subscription
+                (id, endpoint, p256dh, auth, user_agent, device_label, revoked, created_at, updated_at)
+             VALUES ('PUSH-TEST', 'https://example.push/remove', 'p', 'a', NULL, NULL, 0, ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed push subscription");
+
+        let result = unsubscribe_push(
+            state(pool.clone()),
+            Json(PushUnsubscribeRequest { endpoint: "https://example.push/remove".to_string() }),
+        )
+        .await
+        .expect("unsubscribe push");
+        assert!(result.0.success);
+
+        let revoked: i64 =
+            sqlx::query_scalar("SELECT revoked FROM portal_push_subscription WHERE endpoint = ?")
+                .bind("https://example.push/remove")
+                .fetch_one(&pool)
+                .await
+                .expect("fetch revoked flag");
+        assert_eq!(revoked, 1);
+    }
+
+    #[tokio::test]
+    async fn portal_manifest_route_returns_manifest_json() {
+        let response = portal_manifest().await.into_response();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        assert!(content_type.contains("application/manifest+json"));
+    }
+
+    #[tokio::test]
+    async fn portal_service_worker_route_returns_script() {
+        let response = portal_service_worker().await.into_response();
+        let content_type = response
+            .headers()
+            .get(CONTENT_TYPE)
+            .and_then(|value| value.to_str().ok())
+            .unwrap_or("");
+        assert!(content_type.contains("application/javascript"));
     }
 }

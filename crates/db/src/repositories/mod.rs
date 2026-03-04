@@ -10,6 +10,7 @@ use quotey_core::domain::product::{Product, ProductId};
 use quotey_core::domain::quote::{Quote, QuoteId};
 use quotey_core::suggestions::{ProductAcceptanceRate, SuggestionFeedback};
 
+pub mod analytics;
 pub mod approval;
 pub mod audit;
 pub mod customer;
@@ -25,6 +26,7 @@ pub mod quote;
 pub mod simulation;
 pub mod suggestion_feedback;
 
+pub use analytics::{AnalyticsQueryError, SqlAnalyticsQueryBuilder};
 pub use approval::SqlApprovalRepository;
 pub use audit::SqlAuditEventRepository;
 pub use customer::SqlCustomerRepository;

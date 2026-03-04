@@ -14,6 +14,99 @@ use tera::{Context, Tera};
 use tokio::process::Command;
 use tracing::{error, info, warn};
 
+#[derive(Clone, Debug, PartialEq)]
+struct TemplateBranding {
+    company_name: String,
+    company_logo: Option<String>,
+    company_address: Option<String>,
+    company_email: Option<String>,
+    company_phone: Option<String>,
+    primary_color: String,
+    secondary_color: String,
+    accent_color: String,
+    footer_text: Option<String>,
+    white_label: bool,
+}
+
+impl Default for TemplateBranding {
+    fn default() -> Self {
+        Self {
+            company_name: "Quotey".to_owned(),
+            company_logo: None,
+            company_address: None,
+            company_email: None,
+            company_phone: None,
+            primary_color: "#2563eb".to_owned(),
+            secondary_color: "#1e40af".to_owned(),
+            accent_color: "#3b82f6".to_owned(),
+            footer_text: None,
+            white_label: false,
+        }
+    }
+}
+
+impl TemplateBranding {
+    fn from_quote_data(quote_data: &serde_json::Value) -> Self {
+        let mut branding = Self::default();
+        let nested = quote_data.get("branding");
+
+        branding.company_name = read_string(nested, quote_data, "company_name")
+            .unwrap_or_else(|| branding.company_name.clone());
+        branding.company_logo = read_string(nested, quote_data, "company_logo");
+        branding.company_address = read_string(nested, quote_data, "company_address");
+        branding.company_email = read_string(nested, quote_data, "company_email");
+        branding.company_phone = read_string(nested, quote_data, "company_phone");
+        branding.primary_color = read_string(nested, quote_data, "primary_color")
+            .unwrap_or_else(|| branding.primary_color.clone());
+        branding.secondary_color = read_string(nested, quote_data, "secondary_color")
+            .unwrap_or_else(|| branding.secondary_color.clone());
+        branding.accent_color = read_string(nested, quote_data, "accent_color")
+            .unwrap_or_else(|| branding.accent_color.clone());
+        branding.footer_text = read_string(nested, quote_data, "footer_text");
+        branding.white_label =
+            read_bool(nested, quote_data, "white_label").unwrap_or(branding.white_label);
+        branding
+    }
+
+    fn insert_into_context(&self, context: &mut Context) {
+        context.insert("company_name", &self.company_name);
+        context.insert("company_logo", &self.company_logo);
+        context.insert("company_address", &self.company_address);
+        context.insert("company_email", &self.company_email);
+        context.insert("company_phone", &self.company_phone);
+        context.insert("primary_color", &self.primary_color);
+        context.insert("secondary_color", &self.secondary_color);
+        context.insert("accent_color", &self.accent_color);
+        context.insert("footer_text", &self.footer_text);
+        context.insert("white_label", &self.white_label);
+    }
+}
+
+fn read_string(
+    nested: Option<&serde_json::Value>,
+    quote_data: &serde_json::Value,
+    key: &str,
+) -> Option<String> {
+    nested
+        .and_then(|value| value.get(key))
+        .or_else(|| quote_data.get(key))
+        .and_then(serde_json::Value::as_str)
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned)
+}
+
+fn read_bool(
+    nested: Option<&serde_json::Value>,
+    quote_data: &serde_json::Value,
+    key: &str,
+) -> Option<bool> {
+    nested
+        .and_then(|value| value.get(key))
+        .or_else(|| quote_data.get(key))
+        .and_then(serde_json::Value::as_bool)
+}
+
 /// Register custom Tera filters used by quote templates.
 ///
 /// - `format`: printf-style formatting, e.g. `"%.2f" | format(value=price)`
@@ -169,6 +262,7 @@ impl PdfGenerator {
         quote_data: &serde_json::Value,
         template: &str,
     ) -> Result<PdfResult, PdfError> {
+        let branding = TemplateBranding::from_quote_data(quote_data);
         // Build context
         let mut context = Context::new();
         context.insert("quote", quote_data);
@@ -185,15 +279,7 @@ impl PdfGenerator {
             "sales_rep",
             &quote_data.get("sales_rep").cloned().unwrap_or(serde_json::json!({})),
         );
-        context.insert(
-            "company_name",
-            &quote_data.get("company_name").cloned().unwrap_or(serde_json::json!("Quotey")),
-        );
-        context.insert(
-            "primary_color",
-            &quote_data.get("primary_color").cloned().unwrap_or(serde_json::json!("#2563eb")),
-        );
-        context.insert("white_label", &false);
+        branding.insert_into_context(&mut context);
 
         // Assumption tracking for F-003
         context.insert(
@@ -299,6 +385,7 @@ impl PdfGenerator {
         quote_data: &serde_json::Value,
         template: &str,
     ) -> Result<String, PdfError> {
+        let branding = TemplateBranding::from_quote_data(quote_data);
         let mut context = Context::new();
         context.insert("quote", quote_data);
         context.insert(
@@ -310,11 +397,7 @@ impl PdfGenerator {
             "pricing",
             &quote_data.get("pricing").cloned().unwrap_or(serde_json::json!({})),
         );
-        context.insert(
-            "company_name",
-            &quote_data.get("company_name").cloned().unwrap_or(serde_json::json!("Quotey")),
-        );
-        context.insert("white_label", &false);
+        branding.insert_into_context(&mut context);
 
         // Assumption tracking for F-003
         context.insert(
@@ -368,6 +451,47 @@ pub fn is_wkhtmltopdf_available() -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn template_branding_defaults_when_absent() {
+        let quote_data = serde_json::json!({
+            "id": "Q-DEFAULT-001",
+            "pricing": {"total": 100.0}
+        });
+
+        let branding = TemplateBranding::from_quote_data(&quote_data);
+        assert_eq!(branding.company_name, "Quotey");
+        assert_eq!(branding.primary_color, "#2563eb");
+        assert_eq!(branding.secondary_color, "#1e40af");
+        assert_eq!(branding.accent_color, "#3b82f6");
+        assert!(!branding.white_label);
+    }
+
+    #[test]
+    fn template_branding_prefers_nested_branding_values() {
+        let quote_data = serde_json::json!({
+            "company_name": "Legacy Top Level",
+            "primary_color": "#000000",
+            "branding": {
+                "company_name": "Acme CPQ",
+                "company_logo": "data:image/png;base64,abc123",
+                "primary_color": "#112233",
+                "secondary_color": "#334455",
+                "accent_color": "#556677",
+                "company_email": "quotes@acme.example",
+                "white_label": true
+            }
+        });
+
+        let branding = TemplateBranding::from_quote_data(&quote_data);
+        assert_eq!(branding.company_name, "Acme CPQ");
+        assert_eq!(branding.company_logo.as_deref(), Some("data:image/png;base64,abc123"));
+        assert_eq!(branding.primary_color, "#112233");
+        assert_eq!(branding.secondary_color, "#334455");
+        assert_eq!(branding.accent_color, "#556677");
+        assert_eq!(branding.company_email.as_deref(), Some("quotes@acme.example"));
+        assert!(branding.white_label);
+    }
 
     #[test]
     fn pdf_generator_with_embedded_templates() {

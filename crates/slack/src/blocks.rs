@@ -937,6 +937,52 @@ pub fn command_shortcut_message(command: &str, use_case: &str, example: &str) ->
         .build()
 }
 
+#[derive(Clone, Debug, PartialEq)]
+pub struct BrandingSettingsView {
+    pub company_name: String,
+    pub current_logo_url: Option<String>,
+    pub primary_color: String,
+    pub secondary_color: String,
+    pub accent_color: String,
+    pub request_id: String,
+}
+
+pub fn branding_settings_message(view: &BrandingSettingsView) -> MessageTemplate {
+    let logo_display = view.current_logo_url.as_deref().unwrap_or("No logo configured");
+    MessageBuilder::new("Branding configuration")
+        .section("quotey.branding.header.v1", |section| {
+            section.mrkdwn("🎨 *Branding Settings*");
+        })
+        .section("quotey.branding.current.v1", |section| {
+            section.mrkdwn(format!(
+                "*Company:* {}\n*Current logo:* {}\n*Primary:* `{}` · *Secondary:* `{}` · *Accent:* `{}`",
+                view.company_name, logo_display, view.primary_color, view.secondary_color, view.accent_color
+            ));
+        })
+        .section("quotey.branding.modal-preview.v1", |section| {
+            section.mrkdwn(
+                "*Modal includes:*\n• Current logo preview\n• Upload new logo\n• Color pickers\n• Live preview\n• Save button",
+            );
+        })
+        .actions("quotey.branding.actions.v1", |actions| {
+            actions
+                .button(
+                    ButtonElement::new("quotey.branding.open_modal.v1", "Open Branding Modal")
+                        .style(ButtonStyle::Primary)
+                        .value("action=open_branding_modal"),
+                )
+                .button(
+                    ButtonElement::new("quotey.branding.save.v1", "Save Branding")
+                        .value("action=save_branding"),
+                );
+        })
+        .context("quotey.branding.context.v1", |context| {
+            context.plain(format!("Request ID: {}", view.request_id));
+            context.plain("Command: `/quotey branding`");
+        })
+        .build()
+}
+
 pub fn help_message() -> MessageTemplate {
     MessageBuilder::new("Quotey command guide")
         .section("quote.help.hero.v1", |section| {
@@ -1424,6 +1470,88 @@ fn sanitize_simulation_slug(value: &str) -> String {
     } else {
         slug
     }
+}
+
+// -------------------------------------------------------------------------
+// Anomaly Review UI
+// -------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnomalyWarningItemView {
+    pub rule_label: String,
+    pub severity_label: String,
+    pub reason: String,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct AnomalyWarningView {
+    pub quote_id: String,
+    pub headline: String,
+    pub items: Vec<AnomalyWarningItemView>,
+    pub request_id: String,
+}
+
+fn anomaly_action_value(quote_id: &str, action: &str) -> String {
+    format!(
+        "action={};quote={}",
+        encode_action_value_component(action),
+        encode_action_value_component(quote_id)
+    )
+}
+
+pub fn anomaly_warning_message(view: &AnomalyWarningView) -> MessageTemplate {
+    let fallback = format!("Quote {} flagged for anomaly review", view.quote_id);
+    let mut builder = MessageBuilder::new(fallback)
+        .section("quote.anomaly.header.v1", |section| {
+            section.mrkdwn(format!("⚠️ *Quote flagged for review* `{}`", view.quote_id));
+        })
+        .section("quote.anomaly.headline.v1", |section| {
+            section.mrkdwn(view.headline.clone());
+        });
+
+    if view.items.is_empty() {
+        builder = builder.section("quote.anomaly.empty.v1", |section| {
+            section
+                .mrkdwn("No anomaly details were produced. Continue with standard finalization.");
+        });
+    } else {
+        let lines = view
+            .items
+            .iter()
+            .map(|item| {
+                format!("• *{}* ({}) — {}", item.rule_label, item.severity_label, item.reason)
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        builder = builder.section("quote.anomaly.items.v1", |section| {
+            section.mrkdwn(lines);
+        });
+    }
+
+    builder
+        .actions("quote.anomaly.actions.v1", |actions| {
+            actions
+                .button(
+                    ButtonElement::new("quote.anomaly.override.v1", "Override with Justification")
+                        .style(ButtonStyle::Danger)
+                        .value(anomaly_action_value(&view.quote_id, "override")),
+                )
+                .button(
+                    ButtonElement::new("quote.anomaly.adjust.v1", "Adjust Quote")
+                        .style(ButtonStyle::Primary)
+                        .value(anomaly_action_value(&view.quote_id, "adjust")),
+                )
+                .button(
+                    ButtonElement::new("quote.anomaly.similar.v1", "View Similar Deals")
+                        .value(anomaly_action_value(&view.quote_id, "similar")),
+                );
+        })
+        .context("quote.anomaly.context.v1", |context| {
+            context
+                .plain(format!("Request ID: {}", view.request_id))
+                .plain("Override requires explicit written justification for audit trace.");
+        })
+        .build()
 }
 
 // -------------------------------------------------------------------------
@@ -2562,6 +2690,45 @@ mod tests {
     }
 
     #[test]
+    fn anomaly_warning_message_renders_actions_and_items() {
+        use super::{AnomalyWarningItemView, AnomalyWarningView};
+
+        let view = AnomalyWarningView {
+            quote_id: "Q-2026-4242".to_string(),
+            headline: "2 pricing anomalies require explicit review before finalization."
+                .to_string(),
+            items: vec![
+                AnomalyWarningItemView {
+                    rule_label: "Discount".to_string(),
+                    severity_label: "warning".to_string(),
+                    reason: "discount 18.00% exceeds warning threshold 11.70%".to_string(),
+                },
+                AnomalyWarningItemView {
+                    rule_label: "Margin".to_string(),
+                    severity_label: "critical".to_string(),
+                    reason: "margin 52.00% is below floor 60.00%".to_string(),
+                },
+            ],
+            request_id: "req-anomaly-ui".to_string(),
+        };
+
+        let message = super::anomaly_warning_message(&view);
+        assert!(message.fallback_text.contains("Q-2026-4242"));
+
+        let actions = message.blocks.iter().find_map(|block| match block {
+            Block::Actions { block_id, elements } if block_id == "quote.anomaly.actions.v1" => {
+                Some(elements)
+            }
+            _ => None,
+        });
+        let actions = actions.expect("expected anomaly actions block");
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].action_id, "quote.anomaly.override.v1");
+        assert_eq!(actions[1].action_id, "quote.anomaly.adjust.v1");
+        assert_eq!(actions[2].action_id, "quote.anomaly.similar.v1");
+    }
+
+    #[test]
     fn suggestion_message_empty_shows_empty_state() {
         use super::SuggestionCardView;
 
@@ -2602,6 +2769,30 @@ mod tests {
         assert!(super::score_bar(1.0).starts_with("█████"));
         assert!(super::score_bar(0.0).starts_with("░░░░░"));
         assert!(super::score_bar(0.5).contains("50%"));
+    }
+
+    #[test]
+    fn branding_settings_message_renders_modal_actions() {
+        let message = super::branding_settings_message(&super::BrandingSettingsView {
+            company_name: "Acme".to_owned(),
+            current_logo_url: Some("https://example.com/logo.png".to_owned()),
+            primary_color: "#111111".to_owned(),
+            secondary_color: "#222222".to_owned(),
+            accent_color: "#333333".to_owned(),
+            request_id: "req-branding-ui".to_owned(),
+        });
+
+        assert!(message.fallback_text.contains("Branding"));
+        let actions = message.blocks.iter().find_map(|block| match block {
+            Block::Actions { block_id, elements } if block_id == "quotey.branding.actions.v1" => {
+                Some(elements)
+            }
+            _ => None,
+        });
+        let actions = actions.expect("expected branding actions block");
+        assert_eq!(actions.len(), 2);
+        assert_eq!(actions[0].action_id, "quotey.branding.open_modal.v1");
+        assert_eq!(actions[1].action_id, "quotey.branding.save.v1");
     }
 
     #[test]

@@ -5,6 +5,8 @@
 //! - Tool calling (no-auth mode)
 //! - Authentication enforcement (auth-required mode)
 //! - Rate limiting
+//! - Tool execution against real SQLite database
+//! - Audit trail persistence
 
 use quotey_mcp::{ApiKeyConfig, AuthConfig, AuthManager, QuoteyMcpServer};
 use rmcp::ServerHandler;

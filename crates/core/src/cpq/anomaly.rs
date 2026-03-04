@@ -50,6 +50,36 @@ impl Default for AnomalyThresholds {
     }
 }
 
+/// Deterministic rule thresholds used for anomaly definitions.
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AnomalyRuleThresholds {
+    /// warning when discount exceeds average * multiplier
+    pub discount_warning_multiplier: f64,
+    /// flag when discount exceeds average * multiplier + std_dev
+    pub discount_flag_multiplier: f64,
+    /// critical when discount exceeds average * multiplier
+    pub discount_critical_multiplier: f64,
+    /// warning when margin falls within floor + buffer pct
+    pub margin_warning_buffer_pct: f64,
+    /// flag when quantity exceeds average * multiplier
+    pub quantity_multiplier: f64,
+    /// flag when price exceeds similar-deal average * multiplier
+    pub price_multiplier: f64,
+}
+
+impl Default for AnomalyRuleThresholds {
+    fn default() -> Self {
+        Self {
+            discount_warning_multiplier: 1.5,
+            discount_flag_multiplier: 2.0,
+            discount_critical_multiplier: 3.0,
+            margin_warning_buffer_pct: 5.0,
+            quantity_multiplier: 3.0,
+            price_multiplier: 1.5,
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Baseline statistics
 // ---------------------------------------------------------------------------
@@ -122,6 +152,34 @@ pub struct AnomalyFlag {
     pub explanation: String,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AnomalyRuleKind {
+    Discount,
+    Margin,
+    Quantity,
+    Price,
+}
+
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnomalyRuleHit {
+    pub rule: AnomalyRuleKind,
+    pub severity: AnomalySeverity,
+    pub reason: String,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Serialize, Deserialize)]
+pub struct AnomalyRuleEvaluationInput {
+    pub requested_discount_pct: f64,
+    pub customer_avg_discount_pct: f64,
+    pub customer_discount_std_dev: f64,
+    pub margin_pct: f64,
+    pub category_floor_pct: f64,
+    pub requested_quantity: f64,
+    pub customer_avg_quantity: f64,
+    pub quote_total: f64,
+    pub similar_deals_avg_total: f64,
+}
+
 /// Full anomaly assessment for a quote.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AnomalyScore {
@@ -147,11 +205,20 @@ const MIN_SAMPLES: u32 = 5;
 pub struct AnomalyDetector {
     weights: AnomalyWeights,
     thresholds: AnomalyThresholds,
+    rule_set: AnomalyRuleSet,
 }
 
 impl AnomalyDetector {
     pub fn new(weights: AnomalyWeights, thresholds: AnomalyThresholds) -> Self {
-        Self { weights, thresholds }
+        Self { weights, thresholds, rule_set: AnomalyRuleSet::default() }
+    }
+
+    pub fn with_rule_set(
+        weights: AnomalyWeights,
+        thresholds: AnomalyThresholds,
+        rule_set: AnomalyRuleSet,
+    ) -> Self {
+        Self { weights, thresholds, rule_set }
     }
 
     /// Score a single quote line against its product baseline.
@@ -283,6 +350,166 @@ impl AnomalyDetector {
         } else {
             AnomalySeverity::None
         }
+    }
+
+    pub fn evaluate_rules(&self, input: &AnomalyRuleEvaluationInput) -> Vec<AnomalyRuleHit> {
+        let mut hits = Vec::new();
+
+        if let Some(hit) = self.rule_set.evaluate_discount(
+            input.requested_discount_pct,
+            input.customer_avg_discount_pct,
+            input.customer_discount_std_dev,
+        ) {
+            hits.push(hit);
+        }
+
+        if let Some(hit) = self.rule_set.evaluate_margin(input.margin_pct, input.category_floor_pct)
+        {
+            hits.push(hit);
+        }
+
+        if let Some(hit) =
+            self.rule_set.evaluate_quantity(input.requested_quantity, input.customer_avg_quantity)
+        {
+            hits.push(hit);
+        }
+
+        if let Some(hit) =
+            self.rule_set.evaluate_price(input.quote_total, input.similar_deals_avg_total)
+        {
+            hits.push(hit);
+        }
+
+        hits
+    }
+}
+
+/// Deterministic rule set for threshold-based anomaly checks.
+#[derive(Debug, Clone, Default)]
+pub struct AnomalyRuleSet {
+    thresholds: AnomalyRuleThresholds,
+}
+
+impl AnomalyRuleSet {
+    pub fn new(thresholds: AnomalyRuleThresholds) -> Self {
+        Self { thresholds }
+    }
+
+    pub fn evaluate_discount(
+        &self,
+        requested_discount_pct: f64,
+        customer_avg_discount_pct: f64,
+        customer_discount_std_dev: f64,
+    ) -> Option<AnomalyRuleHit> {
+        let critical_threshold =
+            customer_avg_discount_pct * self.thresholds.discount_critical_multiplier;
+        if requested_discount_pct > critical_threshold {
+            return Some(AnomalyRuleHit {
+                rule: AnomalyRuleKind::Discount,
+                severity: AnomalySeverity::Critical,
+                reason: format!(
+                    "discount {:.2}% exceeds critical threshold {:.2}%",
+                    requested_discount_pct, critical_threshold
+                ),
+            });
+        }
+
+        let flag_threshold = customer_avg_discount_pct * self.thresholds.discount_flag_multiplier
+            + customer_discount_std_dev;
+        if requested_discount_pct > flag_threshold {
+            return Some(AnomalyRuleHit {
+                rule: AnomalyRuleKind::Discount,
+                severity: AnomalySeverity::Warning,
+                reason: format!(
+                    "discount {:.2}% exceeds flag threshold {:.2}%",
+                    requested_discount_pct, flag_threshold
+                ),
+            });
+        }
+
+        let warning_threshold =
+            customer_avg_discount_pct * self.thresholds.discount_warning_multiplier;
+        if requested_discount_pct > warning_threshold {
+            return Some(AnomalyRuleHit {
+                rule: AnomalyRuleKind::Discount,
+                severity: AnomalySeverity::Info,
+                reason: format!(
+                    "discount {:.2}% exceeds warning threshold {:.2}%",
+                    requested_discount_pct, warning_threshold
+                ),
+            });
+        }
+
+        None
+    }
+
+    pub fn evaluate_margin(
+        &self,
+        margin_pct: f64,
+        category_floor_pct: f64,
+    ) -> Option<AnomalyRuleHit> {
+        if margin_pct < category_floor_pct {
+            return Some(AnomalyRuleHit {
+                rule: AnomalyRuleKind::Margin,
+                severity: AnomalySeverity::Critical,
+                reason: format!(
+                    "margin {:.2}% is below floor {:.2}%",
+                    margin_pct, category_floor_pct
+                ),
+            });
+        }
+
+        let warning_threshold = category_floor_pct + self.thresholds.margin_warning_buffer_pct;
+        if margin_pct < warning_threshold {
+            return Some(AnomalyRuleHit {
+                rule: AnomalyRuleKind::Margin,
+                severity: AnomalySeverity::Warning,
+                reason: format!(
+                    "margin {:.2}% is within warning band of floor {:.2}%",
+                    margin_pct, category_floor_pct
+                ),
+            });
+        }
+
+        None
+    }
+
+    pub fn evaluate_quantity(
+        &self,
+        requested_quantity: f64,
+        customer_avg_quantity: f64,
+    ) -> Option<AnomalyRuleHit> {
+        let quantity_threshold = customer_avg_quantity * self.thresholds.quantity_multiplier;
+        if requested_quantity > quantity_threshold {
+            return Some(AnomalyRuleHit {
+                rule: AnomalyRuleKind::Quantity,
+                severity: AnomalySeverity::Warning,
+                reason: format!(
+                    "quantity {:.2} exceeds threshold {:.2}",
+                    requested_quantity, quantity_threshold
+                ),
+            });
+        }
+        None
+    }
+
+    pub fn evaluate_price(
+        &self,
+        quote_total: f64,
+        similar_deals_avg_total: f64,
+    ) -> Option<AnomalyRuleHit> {
+        let price_threshold = similar_deals_avg_total * self.thresholds.price_multiplier;
+        if quote_total > price_threshold {
+            return Some(AnomalyRuleHit {
+                rule: AnomalyRuleKind::Price,
+                severity: AnomalySeverity::Warning,
+                reason: format!(
+                    "quote total {:.2} exceeds threshold {:.2}",
+                    quote_total, price_threshold
+                ),
+            });
+        }
+        None
     }
 }
 
@@ -518,5 +745,61 @@ mod tests {
         assert!((stats.z_score(100.0, 5) - 0.0).abs() < 1e-10); // at mean
         assert!((stats.z_score(120.0, 5) - 2.0).abs() < 1e-10); // 2σ above
         assert!((stats.z_score(80.0, 5) - 2.0).abs() < 1e-10); // 2σ below (abs)
+    }
+
+    #[test]
+    fn ruleset_discount_and_margin_thresholds_match_policy_definition() {
+        let ruleset = AnomalyRuleSet::default();
+
+        let discount_warning =
+            ruleset.evaluate_discount(12.0, 7.8, 1.0).expect("discount warning expected");
+        assert_eq!(discount_warning.rule, AnomalyRuleKind::Discount);
+        assert_eq!(discount_warning.severity, AnomalySeverity::Info);
+
+        let discount_critical =
+            ruleset.evaluate_discount(24.0, 7.8, 1.0).expect("critical discount expected");
+        assert_eq!(discount_critical.severity, AnomalySeverity::Critical);
+
+        let margin_critical =
+            ruleset.evaluate_margin(52.0, 60.0).expect("margin floor breach expected");
+        assert_eq!(margin_critical.rule, AnomalyRuleKind::Margin);
+        assert_eq!(margin_critical.severity, AnomalySeverity::Critical);
+    }
+
+    #[test]
+    fn ruleset_quantity_and_price_thresholds_flag_large_outliers() {
+        let ruleset = AnomalyRuleSet::default();
+
+        let quantity =
+            ruleset.evaluate_quantity(45.0, 10.0).expect("quantity outlier should be flagged");
+        assert_eq!(quantity.rule, AnomalyRuleKind::Quantity);
+        assert_eq!(quantity.severity, AnomalySeverity::Warning);
+
+        let price =
+            ruleset.evaluate_price(150_000.0, 90_000.0).expect("price outlier should be flagged");
+        assert_eq!(price.rule, AnomalyRuleKind::Price);
+        assert_eq!(price.severity, AnomalySeverity::Warning);
+    }
+
+    #[test]
+    fn detector_evaluate_rules_returns_typed_hits() {
+        let detector = AnomalyDetector::default();
+        let hits = detector.evaluate_rules(&AnomalyRuleEvaluationInput {
+            requested_discount_pct: 24.0,
+            customer_avg_discount_pct: 7.0,
+            customer_discount_std_dev: 1.0,
+            margin_pct: 52.0,
+            category_floor_pct: 60.0,
+            requested_quantity: 45.0,
+            customer_avg_quantity: 10.0,
+            quote_total: 150_000.0,
+            similar_deals_avg_total: 90_000.0,
+        });
+
+        assert_eq!(hits.len(), 4);
+        assert!(hits.iter().any(|hit| hit.rule == AnomalyRuleKind::Discount));
+        assert!(hits.iter().any(|hit| hit.rule == AnomalyRuleKind::Margin));
+        assert!(hits.iter().any(|hit| hit.rule == AnomalyRuleKind::Quantity));
+        assert!(hits.iter().any(|hit| hit.rule == AnomalyRuleKind::Price));
     }
 }

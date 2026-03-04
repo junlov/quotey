@@ -1,3 +1,4 @@
+pub mod analytics;
 pub mod approval;
 pub mod autopsy;
 pub mod customer;
@@ -8,4 +9,6 @@ pub mod optimizer;
 pub mod precedent;
 pub mod product;
 pub mod quote;
+pub mod requirement_extraction;
 pub mod simulation;
+pub mod visual_rule;

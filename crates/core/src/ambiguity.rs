@@ -1369,13 +1369,28 @@ mod tests {
         let mut set = AssumptionCardSet::new();
 
         set.add(AssumptionCard::confirmed(
-            "c1", "f1", "Field 1", "Value 1", "Desc", AssumptionCategory::General,
+            "c1",
+            "f1",
+            "Field 1",
+            "Value 1",
+            "Desc",
+            AssumptionCategory::General,
         ));
         set.add(AssumptionCard::assumed(
-            "c2", "f2", "Field 2", "Value 2", "Desc", AssumptionCategory::General,
+            "c2",
+            "f2",
+            "Field 2",
+            "Value 2",
+            "Desc",
+            AssumptionCategory::General,
         ));
         set.add(AssumptionCard::needs_confirmation(
-            "c3", "f3", "Field 3", "Desc", vec![], AssumptionCategory::General,
+            "c3",
+            "f3",
+            "Field 3",
+            "Desc",
+            vec![],
+            AssumptionCategory::General,
         ));
 
         assert_eq!(set.confirmed_count, 1);
@@ -1389,10 +1404,20 @@ mod tests {
         let mut set = AssumptionCardSet::new();
 
         set.add(AssumptionCard::confirmed(
-            "c1", "f1", "Field 1", "Value 1", "Desc", AssumptionCategory::General,
+            "c1",
+            "f1",
+            "Field 1",
+            "Value 1",
+            "Desc",
+            AssumptionCategory::General,
         ));
         set.add(AssumptionCard::confirmed(
-            "c2", "f2", "Field 2", "Value 2", "Desc", AssumptionCategory::General,
+            "c2",
+            "f2",
+            "Field 2",
+            "Value 2",
+            "Desc",
+            AssumptionCategory::General,
         ));
 
         assert!(set.all_confirmed);
@@ -1403,13 +1428,28 @@ mod tests {
         let mut set = AssumptionCardSet::new();
 
         set.add(AssumptionCard::confirmed(
-            "c1", "f1", "Confirmed", "Value", "Desc", AssumptionCategory::General,
+            "c1",
+            "f1",
+            "Confirmed",
+            "Value",
+            "Desc",
+            AssumptionCategory::General,
         ));
         set.add(AssumptionCard::assumed(
-            "c2", "f2", "Assumed", "Value", "Desc", AssumptionCategory::General,
+            "c2",
+            "f2",
+            "Assumed",
+            "Value",
+            "Desc",
+            AssumptionCategory::General,
         ));
         set.add(AssumptionCard::needs_confirmation(
-            "c3", "f3", "Needs Confirm", "Desc", vec![], AssumptionCategory::General,
+            "c3",
+            "f3",
+            "Needs Confirm",
+            "Desc",
+            vec![],
+            AssumptionCategory::General,
         ));
 
         let attention = set.attention_required();
@@ -1440,7 +1480,12 @@ mod tests {
         let mut set = AssumptionCardSet::new();
 
         set.add(AssumptionCard::confirmed(
-            "c1", "f1", "Field 1", "Value 1", "Desc", AssumptionCategory::General,
+            "c1",
+            "f1",
+            "Field 1",
+            "Value 1",
+            "Desc",
+            AssumptionCategory::General,
         ));
 
         let blocks = render_assumption_card_set_slack_blocks(&set);
@@ -1471,15 +1516,13 @@ mod tests {
             ambiguity_type: AmbiguityType::MissingTerm,
             description: "Term not specified".to_string(),
             clarification_prompt: "What term?".to_string(),
-            options: vec![
-                AmbiguityOption {
-                    id: "12".to_string(),
-                    label: "12 months".to_string(),
-                    description: None,
-                    value: serde_json::json!(12),
-                    confidence: 1.0,
-                },
-            ],
+            options: vec![AmbiguityOption {
+                id: "12".to_string(),
+                label: "12 months".to_string(),
+                description: None,
+                value: serde_json::json!(12),
+                confidence: 1.0,
+            }],
             field: "term_months".to_string(),
             original_value: None,
         };

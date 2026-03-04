@@ -158,6 +158,23 @@ Add a comment.
 ### GET `/quote/{token}/download`
 Download quote PDF.
 
+## PWA Route Plan (Mobile Approvals)
+
+Planned PWA routes for manager-first mobile workflows:
+
+- `GET /approvals` - Pending approvals list.
+- `GET /approvals/:id` - Approval detail and decision actions.
+- `GET /settings` - Notification and cache preferences.
+- `GET /manifest.webmanifest` - PWA install metadata.
+- `GET /sw.js` - Service worker.
+
+Design constraints:
+
+1. Reuse existing deterministic approval endpoints (`/quote/{token}/approve|reject`) for writes.
+2. Keep static shell assets cacheable; keep approval mutation calls network-only.
+3. If offline, block approve/reject and show explicit retry guidance.
+4. Log push notification send/open events to `audit_event`.
+
 ## Styling
 
 ### CSS Variables

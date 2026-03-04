@@ -363,6 +363,26 @@ impl QuoteyMcpServer {
         &self.protocol_version
     }
 
+    async fn sanitize_quote_id_for_audit(&self, quote_id: Option<&str>) -> Option<String> {
+        let candidate = quote_id.map(str::trim).filter(|value| !value.is_empty())?;
+        match sqlx::query_scalar::<_, i64>("SELECT 1 FROM quote WHERE id = ? LIMIT 1")
+            .bind(candidate)
+            .fetch_optional(self.db())
+            .await
+        {
+            Ok(Some(_)) => Some(candidate.to_string()),
+            Ok(None) => None,
+            Err(error) => {
+                warn!(
+                    error = %error,
+                    quote_id = %candidate,
+                    "failed to validate quote_id for MCP audit_event"
+                );
+                None
+            }
+        }
+    }
+
     async fn record_mcp_audit_event(
         &self,
         tool_name: &str,
@@ -381,6 +401,7 @@ impl QuoteyMcpServer {
             "tool_name": tool_name
         })
         .to_string();
+        let quote_id = self.sanitize_quote_id_for_audit(quote_id).await;
 
         if let Err(error) = sqlx::query(
             r#"
@@ -395,7 +416,7 @@ impl QuoteyMcpServer {
         .bind(chrono::Utc::now().to_rfc3339())
         .bind("agent:mcp")
         .bind("agent")
-        .bind(quote_id.map(str::to_string))
+        .bind(quote_id)
         .bind(format!("mcp.{tool_name}.invoked"))
         .bind("mcp_tool")
         .bind(payload_json)
@@ -404,6 +425,59 @@ impl QuoteyMcpServer {
         .await
         {
             warn!(error = %error, tool_name = %tool_name, "failed to persist MCP audit_event");
+        }
+    }
+
+    async fn record_mcp_invocation_received(&self, envelope: &McpInvocationAuditEnvelope) {
+        let tool_name = envelope.tool_name.as_str();
+        let payload = serde_json::json!({
+            "tool_name": tool_name,
+            "actor": envelope.actor,
+            "request_id": envelope.request_id,
+            "correlation_id": envelope.correlation_id,
+            "input_hash": envelope.input_hash,
+            "timestamp": chrono::Utc::now().to_rfc3339(),
+        });
+        let payload_json = match serde_json::to_string(&payload) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(error = %error, tool_name = %tool_name, "failed to serialize MCP invocation-received payload");
+                "{}".to_string()
+            }
+        };
+        let metadata_json = serde_json::json!({
+            "source": "quotey-mcp",
+            "tool_name": tool_name,
+            "audit_version": 1,
+            "request_id": envelope.request_id,
+            "correlation_id": envelope.correlation_id,
+            "input_hash": envelope.input_hash
+        })
+        .to_string();
+        let quote_id = self.sanitize_quote_id_for_audit(envelope.quote_id.as_deref()).await;
+
+        if let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO audit_event (
+                id, timestamp, actor, actor_type, quote_id,
+                event_type, event_category, payload_json, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(format!("mcp-audit-{}", uuid::Uuid::new_v4()))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind(&envelope.actor)
+        .bind("agent")
+        .bind(quote_id)
+        .bind(format!("mcp.{tool_name}.received"))
+        .bind("mcp_tool")
+        .bind(payload_json)
+        .bind(Some(metadata_json))
+        .execute(self.db())
+        .await
+        {
+            warn!(error = %error, tool_name = %tool_name, "failed to persist MCP invocation-received audit_event");
         }
     }
 
@@ -437,6 +511,7 @@ impl QuoteyMcpServer {
             "input_hash": envelope.input_hash
         })
         .to_string();
+        let quote_id = self.sanitize_quote_id_for_audit(envelope.quote_id.as_deref()).await;
 
         if let Err(error) = sqlx::query(
             r#"
@@ -451,7 +526,7 @@ impl QuoteyMcpServer {
         .bind(chrono::Utc::now().to_rfc3339())
         .bind(&envelope.actor)
         .bind("agent")
-        .bind(envelope.quote_id.clone())
+        .bind(quote_id)
         .bind(format!("mcp.{tool_name}.completed"))
         .bind("mcp_tool")
         .bind(payload_json)
@@ -547,7 +622,7 @@ impl ServerHandler for QuoteyMcpServer {
         let auth_result = match self.check_auth(&context.meta).await {
             Ok(result) => result,
             Err(error) => {
-                self.record_mcp_invocation_outcome(&McpInvocationAuditEnvelope {
+                let envelope = McpInvocationAuditEnvelope {
                     tool_name: tool_name.clone(),
                     quote_id: quote_id_for_audit.clone(),
                     actor: "agent:mcp:anonymous".to_string(),
@@ -557,21 +632,35 @@ impl ServerHandler for QuoteyMcpServer {
                     success: false,
                     outcome_code: "AUTH_DENIED".to_string(),
                     error_message: Some(error.message.to_string()),
-                })
-                .await;
+                };
+                self.record_mcp_invocation_received(&envelope).await;
+                self.record_mcp_invocation_outcome(&envelope).await;
                 return Err(error);
             }
         };
-
-        // Route to tool handler
-        let tool_call_context = ToolCallContext::new(self, request, context);
-        let result = self.tool_router.call(tool_call_context).await;
-        let (success, outcome_code, error_message) = outcome_from_tool_result(&result);
 
         let actor = match &auth_result {
             AuthResult::Allowed { key_name, .. } => format!("agent:mcp:{key_name}"),
             AuthResult::Denied { .. } => "agent:mcp:anonymous".to_string(),
         };
+
+        self.record_mcp_invocation_received(&McpInvocationAuditEnvelope {
+            tool_name: tool_name.clone(),
+            quote_id: quote_id_for_audit.clone(),
+            actor: actor.clone(),
+            request_id: request_id.clone(),
+            correlation_id: correlation_id.clone(),
+            input_hash: input_hash.clone(),
+            success: true,
+            outcome_code: "RECEIVED".to_string(),
+            error_message: None,
+        })
+        .await;
+
+        // Route to tool handler
+        let tool_call_context = ToolCallContext::new(self, request, context);
+        let result = self.tool_router.call(tool_call_context).await;
+        let (success, outcome_code, error_message) = outcome_from_tool_result(&result);
 
         self.record_mcp_invocation_outcome(&McpInvocationAuditEnvelope {
             tool_name,
@@ -2237,6 +2326,7 @@ impl QuoteyMcpServer {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use sqlx::Row;
 
     /// Create a test DB with all migrations applied.
     async fn test_db() -> quotey_db::DbPool {
@@ -2262,6 +2352,20 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed product");
+    }
+
+    async fn seed_quote(pool: &quotey_db::DbPool, id: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO quote (id, status, currency, created_by, created_at, updated_at)
+             VALUES (?, 'draft', 'USD', 'test', ?, ?)",
+        )
+        .bind(id)
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("seed quote");
     }
 
     fn server(pool: quotey_db::DbPool) -> QuoteyMcpServer {
@@ -2323,6 +2427,154 @@ mod tests {
         assert!(success);
         assert_eq!(code, "OK");
         assert!(message.is_none());
+    }
+
+    #[tokio::test]
+    async fn record_mcp_invocation_received_persists_request_metadata() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-AUD-001").await;
+        let srv = server(pool.clone());
+        let envelope = McpInvocationAuditEnvelope {
+            tool_name: "quote_get".to_string(),
+            quote_id: Some("Q-AUD-001".to_string()),
+            actor: "agent:mcp:test-key".to_string(),
+            request_id: "req-123".to_string(),
+            correlation_id: "corr-123".to_string(),
+            input_hash: "hash-abc".to_string(),
+            success: true,
+            outcome_code: "RECEIVED".to_string(),
+            error_message: None,
+        };
+
+        srv.record_mcp_invocation_received(&envelope).await;
+
+        let row = sqlx::query(
+            "SELECT actor, actor_type, quote_id, event_type, event_category, payload_json, metadata_json
+             FROM audit_event
+             WHERE event_type = 'mcp.quote_get.received'
+             ORDER BY timestamp DESC
+             LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("received audit event");
+
+        assert_eq!(row.get::<String, _>("actor"), "agent:mcp:test-key");
+        assert_eq!(row.get::<String, _>("actor_type"), "agent");
+        assert_eq!(row.get::<String, _>("quote_id"), "Q-AUD-001");
+        assert_eq!(row.get::<String, _>("event_type"), "mcp.quote_get.received");
+        assert_eq!(row.get::<String, _>("event_category"), "mcp_tool");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&row.get::<String, _>("payload_json")).expect("payload json");
+        assert_eq!(payload["tool_name"].as_str(), Some("quote_get"));
+        assert_eq!(payload["actor"].as_str(), Some("agent:mcp:test-key"));
+        assert_eq!(payload["request_id"].as_str(), Some("req-123"));
+        assert_eq!(payload["correlation_id"].as_str(), Some("corr-123"));
+        assert_eq!(payload["input_hash"].as_str(), Some("hash-abc"));
+        assert!(payload["timestamp"].is_string());
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&row.get::<Option<String>, _>("metadata_json").expect("metadata"))
+                .expect("metadata json");
+        assert_eq!(metadata["source"].as_str(), Some("quotey-mcp"));
+        assert_eq!(metadata["tool_name"].as_str(), Some("quote_get"));
+        assert_eq!(metadata["request_id"].as_str(), Some("req-123"));
+        assert_eq!(metadata["correlation_id"].as_str(), Some("corr-123"));
+        assert_eq!(metadata["input_hash"].as_str(), Some("hash-abc"));
+    }
+
+    #[tokio::test]
+    async fn record_mcp_invocation_outcome_persists_failure_code_and_error() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-AUD-002").await;
+        let srv = server(pool.clone());
+        let envelope = McpInvocationAuditEnvelope {
+            tool_name: "quote_price".to_string(),
+            quote_id: Some("Q-AUD-002".to_string()),
+            actor: "agent:mcp:test-key".to_string(),
+            request_id: "req-456".to_string(),
+            correlation_id: "corr-456".to_string(),
+            input_hash: "hash-def".to_string(),
+            success: false,
+            outcome_code: "VALIDATION_ERROR".to_string(),
+            error_message: Some("bad input".to_string()),
+        };
+
+        srv.record_mcp_invocation_outcome(&envelope).await;
+
+        let row = sqlx::query(
+            "SELECT actor, actor_type, quote_id, event_type, event_category, payload_json, metadata_json
+             FROM audit_event
+             WHERE event_type = 'mcp.quote_price.completed'
+             ORDER BY timestamp DESC
+             LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("outcome audit event");
+
+        assert_eq!(row.get::<String, _>("actor"), "agent:mcp:test-key");
+        assert_eq!(row.get::<String, _>("actor_type"), "agent");
+        assert_eq!(row.get::<String, _>("quote_id"), "Q-AUD-002");
+        assert_eq!(row.get::<String, _>("event_type"), "mcp.quote_price.completed");
+        assert_eq!(row.get::<String, _>("event_category"), "mcp_tool");
+
+        let payload: serde_json::Value =
+            serde_json::from_str(&row.get::<String, _>("payload_json")).expect("payload json");
+        assert_eq!(payload["tool_name"].as_str(), Some("quote_price"));
+        assert_eq!(payload["request_id"].as_str(), Some("req-456"));
+        assert_eq!(payload["correlation_id"].as_str(), Some("corr-456"));
+        assert_eq!(payload["input_hash"].as_str(), Some("hash-def"));
+        assert_eq!(payload["outcome"]["success"].as_bool(), Some(false));
+        assert_eq!(payload["outcome"]["code"].as_str(), Some("VALIDATION_ERROR"));
+        assert_eq!(payload["outcome"]["error_message"].as_str(), Some("bad input"));
+        assert!(payload["timestamp"].is_string());
+
+        let metadata: serde_json::Value =
+            serde_json::from_str(&row.get::<Option<String>, _>("metadata_json").expect("metadata"))
+                .expect("metadata json");
+        assert_eq!(metadata["source"].as_str(), Some("quotey-mcp"));
+        assert_eq!(metadata["tool_name"].as_str(), Some("quote_price"));
+        assert_eq!(metadata["request_id"].as_str(), Some("req-456"));
+        assert_eq!(metadata["correlation_id"].as_str(), Some("corr-456"));
+        assert_eq!(metadata["input_hash"].as_str(), Some("hash-def"));
+    }
+
+    #[tokio::test]
+    async fn record_mcp_invocation_outcome_drops_unknown_quote_id_but_persists_event() {
+        let pool = test_db().await;
+        let srv = server(pool.clone());
+        let envelope = McpInvocationAuditEnvelope {
+            tool_name: "quote_get".to_string(),
+            quote_id: Some("Q-NOT-REAL".to_string()),
+            actor: "agent:mcp:test-key".to_string(),
+            request_id: "req-789".to_string(),
+            correlation_id: "corr-789".to_string(),
+            input_hash: "hash-ghi".to_string(),
+            success: false,
+            outcome_code: "NOT_FOUND".to_string(),
+            error_message: Some("quote missing".to_string()),
+        };
+
+        srv.record_mcp_invocation_outcome(&envelope).await;
+
+        let row = sqlx::query(
+            "SELECT quote_id, payload_json
+             FROM audit_event
+             WHERE event_type = 'mcp.quote_get.completed'
+             ORDER BY timestamp DESC
+             LIMIT 1",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("outcome audit event");
+
+        assert_eq!(row.get::<Option<String>, _>("quote_id"), None);
+        let payload: serde_json::Value =
+            serde_json::from_str(&row.get::<String, _>("payload_json")).expect("payload json");
+        assert_eq!(payload["outcome"]["code"].as_str(), Some("NOT_FOUND"));
+        assert_eq!(payload["request_id"].as_str(), Some("req-789"));
     }
 
     #[test]

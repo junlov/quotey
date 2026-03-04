@@ -97,6 +97,16 @@ templates/
 - Essential info only
 - Clean typography
 
+## Template Catalog
+
+Machine-readable metadata for deterministic template selection lives at:
+
+- `templates/quotes/template_catalog.json`
+
+The catalog defines template IDs, intended use-cases, and capability flags
+(`supports_comparison`, `supports_renewal_delta`) so server/CLI flows can
+pick the correct variant without hardcoded string drift.
+
 ## Data Model
 
 Templates expect the following data structure:
@@ -169,6 +179,14 @@ Pass these variables to customize the appearance:
 - `primary_color` - Main brand color (default: #2563eb)
 - `secondary_color` - Secondary color (default: #1e40af)
 - `accent_color` - Accent color (default: #3b82f6)
+- `company_phone` - Optional contact phone number
+- `footer_text` - Optional footer override text
+
+Branding input precedence used by the renderer:
+
+1. `branding.*` object in the payload (preferred)
+2. top-level legacy keys (`company_name`, `primary_color`, etc.)
+3. built-in defaults
 
 ### White Label
 

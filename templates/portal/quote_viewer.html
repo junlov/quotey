@@ -4,6 +4,8 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="description" content="Quote {{ quote.quote_id }} for {{ customer.name }}">
+    <meta name="theme-color" content="#2563eb">
+    <link rel="manifest" href="/portal/manifest.webmanifest">
     <title>Quote {{ quote.quote_id }} - {{ customer.name }}</title>
     <style>
         :root {
@@ -721,6 +723,47 @@
         .contact-value.secondary {
             color: var(--text-secondary);
             font-weight: 400;
+        }
+
+        .context-list {
+            display: flex;
+            flex-direction: column;
+            gap: 14px;
+        }
+
+        .context-item {
+            display: flex;
+            flex-direction: column;
+            gap: 3px;
+        }
+
+        .context-label {
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 0.5px;
+        }
+
+        .context-value {
+            font-size: 14px;
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        .context-value.secondary {
+            color: var(--text-secondary);
+            font-weight: 400;
+        }
+
+        .similar-deals {
+            margin-top: 8px;
+            padding-left: 16px;
+            display: flex;
+            flex-direction: column;
+            gap: 6px;
+            color: var(--text-secondary);
+            font-size: 13px;
         }
 
         /* ========== COMMENTS SECTION ========== */
@@ -1558,6 +1601,7 @@
                     <form onsubmit="submitComment(event)" aria-label="Add a comment">
                         <div class="form-group">
                             <textarea 
+                                id="commentInput"
                                 class="form-textarea" 
                                 placeholder="Type your question or comment here..." 
                                 required
@@ -1632,6 +1676,61 @@
                                 </svg>
                                 PDF
                             </a>
+                        </div>
+                        <div style="display: flex; gap: 8px;">
+                            <button class="btn btn-secondary" onclick="requestNeedInfo()" style="flex: 1;">
+                                Need Info
+                            </button>
+                            <button class="btn btn-secondary" onclick="snoozeDecision()" style="flex: 1;">
+                                Snooze
+                            </button>
+                        </div>
+                    </div>
+                </div>
+
+                <div class="card">
+                    <div class="card-header">
+                        <h3 class="card-title">
+                            <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M9 17v-6m4 6V7m4 10v-4M5 21h14a2 2 0 002-2V5a2 2 0 00-2-2H5a2 2 0 00-2 2v14a2 2 0 002 2z"/></svg>
+                            Decision Context
+                        </h3>
+                    </div>
+                    <div class="card-body">
+                        <div class="context-list">
+                            <div class="context-item">
+                                <span class="context-label">Discount Impact</span>
+                                <span class="context-value">{{ decision_context.discount_amount }} ({{ decision_context.discount_percent }})</span>
+                            </div>
+                            <div class="context-item">
+                                <span class="context-label">Timeline</span>
+                                <span class="context-value">{{ decision_context.quote_age_days }} days old</span>
+                                <span class="context-value secondary">{{ decision_context.days_to_expiry }} days to expiry</span>
+                            </div>
+                            <div class="context-item">
+                                <span class="context-label">Customer History</span>
+                                <span class="context-value">{{ decision_context.prior_quotes_count }} prior deals</span>
+                                <span class="context-value secondary">{{ decision_context.prior_approved_count }} previously approved</span>
+                            </div>
+                            <div class="context-item">
+                                <span class="context-label">Competitive Context</span>
+                                <span class="context-value secondary">{{ decision_context.competitive_context }}</span>
+                            </div>
+                            <div class="context-item">
+                                <span class="context-label">Rep Justification</span>
+                                <span class="context-value secondary">{{ decision_context.rep_justification }}</span>
+                            </div>
+                            <div class="context-item">
+                                <span class="context-label">Similar Deals</span>
+                                {% if decision_context.similar_deals and decision_context.similar_deals | length > 0 %}
+                                <ul class="similar-deals">
+                                    {% for similar in decision_context.similar_deals %}
+                                    <li>{{ similar.quote_id }} · {{ similar.status }} · {{ similar.created_at }}</li>
+                                    {% endfor %}
+                                </ul>
+                                {% else %}
+                                <span class="context-value secondary">No similar deals found for this customer yet.</span>
+                                {% endif %}
+                            </div>
                         </div>
                     </div>
                 </div>
@@ -1895,6 +1994,25 @@
             document.getElementById('assumptionsModal').classList.add('active');
             document.getElementById('taxRate').focus();
             document.body.style.overflow = 'hidden';
+        }
+
+        function seedComment(text) {
+            const input = document.getElementById('commentInput');
+            if (!input) return;
+            input.value = text;
+            input.focus();
+            input.scrollIntoView({ behavior: 'smooth', block: 'center' });
+        }
+
+        function requestNeedInfo() {
+            seedComment('Need more info before I can approve: ');
+            showToast('Added a "Need Info" draft comment. Add details and submit.', 'info');
+        }
+
+        function snoozeDecision() {
+            const hours = 4;
+            seedComment(`Snoozed for ${hours} hours. Please remind me at the next check-in with updates.`);
+            showToast('Snooze note drafted as a comment. Submit to notify the rep.', 'info');
         }
 
         function closeModal(modalId) {

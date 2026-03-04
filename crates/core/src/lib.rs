@@ -3,9 +3,11 @@ pub use chrono;
 
 pub mod ambiguity;
 pub use ambiguity::{
-    render_ambiguity_slack_blocks, Ambiguity, AmbiguityDetectionEngine, AmbiguityDetectionInput,
-    AmbiguityOption, AmbiguitySet, AmbiguitySeverity, AmbiguityType, DateMention, ProductMention,
-    QuantityMention,
+    ambiguity_set_to_card_set, render_ambiguity_slack_blocks,
+    render_assumption_card_set_slack_blocks, render_assumption_card_slack_blocks, Ambiguity,
+    AmbiguityDetectionEngine, AmbiguityDetectionInput, AmbiguityOption, AmbiguitySet,
+    AmbiguitySeverity, AmbiguityType, AssumptionCard, AssumptionCardSet, AssumptionCategory,
+    AssumptionState, DateMention, ProductMention, QuantityMention,
 };
 pub mod approvals;
 pub mod archaeology;
@@ -44,10 +46,28 @@ pub use collab::{
     OperationAuthority, OperationHistoryEntry, OperationStatus, OperationType,
     OperationalTransform, QuoteOperation, TransformResult,
 };
+pub use cpq::constraint_rule_builder::{
+    build_constraint_rule, ConstraintRuleAction, ConstraintRuleBuilderError,
+    ConstraintRuleCondition, ConstraintRuleDraft, ConstraintRuleOperator,
+};
+pub use cpq::discount_policy_builder::{
+    build_discount_policy, DiscountPolicyBuilderError, DiscountPolicyDraft,
+};
+pub use cpq::draft_quote_builder::{
+    DraftQuoteBuildError, DraftQuoteBuildRequest, DraftQuoteBuildResult, DraftQuoteBuilder,
+};
+pub use cpq::product_matcher::{MatchAmbiguity, ProductMatch, ProductMatchResult, ProductMatcher};
+pub use cpq::rule_builder::{
+    build_pricing_rule, PricingRuleAction, PricingRuleBuilderError, PricingRuleCondition,
+    PricingRuleDraft, PricingRuleOperator,
+};
 pub use dna::{
     ClosedDealOutcome, ConfigurationFingerprint, DealDnaLifecycleService, DealOutcomeMetadata,
     DealOutcomeStatus, DnaLifecycleError, DnaLifecycleStore, FingerprintGenerator,
     FingerprintSnapshot, SimilarDeal, SimilarityCandidate, SimilarityEngine,
+};
+pub use domain::analytics::{
+    AnalyticsContractError, AnalyticsQuerySpec, DimensionKind, MetricKind, ANALYTICS_SCHEMA_VERSION,
 };
 pub use domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
 pub use domain::autopsy::*;
@@ -60,7 +80,17 @@ pub use domain::optimizer::*;
 pub use domain::precedent::*;
 pub use domain::product::{Product, ProductId};
 pub use domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
+pub use domain::requirement_extraction::{
+    ExtractedRequirement, ExtractedRequirements, RequirementAmbiguity,
+    RequirementExtractionValidationError, RequirementSourceType,
+    REQUIREMENT_EXTRACTION_SCHEMA_VERSION,
+};
 pub use domain::simulation::*;
+pub use domain::visual_rule::{
+    LogicalConnector, VisualActionType, VisualOperator, VisualRuleAction, VisualRuleCondition,
+    VisualRuleDefinition, VisualRuleMetadata, VisualRuleType, VisualRuleValidationError,
+    VISUAL_RULE_SCHEMA_VERSION,
+};
 pub use errors::{ApplicationError, DomainError, InterfaceError};
 pub use execution_engine::{
     ClaimResult, DeterministicExecutionEngine, ExecutionEngineConfig, ExecutionError,
