@@ -3200,6 +3200,7 @@ async fn list_comments(
 async fn list_live_approvals(
     State(state): State<PortalState>,
 ) -> Result<Json<serde_json::Value>, (StatusCode, Json<PortalError>)> {
+    let now = Utc::now().to_rfc3339();
     let rows = sqlx::query(
         r#"SELECT
                 ar.id AS approval_id,
@@ -3213,9 +3214,17 @@ async fn list_live_approvals(
                 ) AS latest_comment_at
            FROM approval_request ar
            WHERE LOWER(COALESCE(ar.status, 'pending')) = 'pending'
+             AND EXISTS (
+                 SELECT 1
+                 FROM portal_link pl
+                 WHERE pl.quote_id = ar.quote_id
+                   AND pl.revoked = 0
+                   AND pl.expires_at > ?
+             )
            ORDER BY ar.created_at DESC
            LIMIT 150"#,
     )
+    .bind(&now)
     .fetch_all(&state.db_pool)
     .await
     .map_err(db_error)?;
@@ -3259,6 +3268,25 @@ async fn get_live_approval_status(
         .ok_or_else(|| (StatusCode::NOT_FOUND, Json(PortalError::not_found("approval request"))))?;
 
     let quote_id = approval_row.try_get::<String, _>("quote_id").unwrap_or_default();
+    let now = Utc::now().to_rfc3339();
+    let has_active_link: Option<i64> = sqlx::query_scalar(
+        "SELECT 1
+         FROM portal_link
+         WHERE quote_id = ?
+           AND revoked = 0
+           AND expires_at > ?
+         ORDER BY created_at DESC
+         LIMIT 1",
+    )
+    .bind(&quote_id)
+    .bind(&now)
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+    if has_active_link.is_none() {
+        return Err((StatusCode::NOT_FOUND, Json(PortalError::not_found("approval request"))));
+    }
+
     let status =
         approval_row.try_get::<String, _>("status").unwrap_or_else(|_| "pending".to_string());
     let updated_at = approval_row.try_get::<String, _>("updated_at").unwrap_or_default();
