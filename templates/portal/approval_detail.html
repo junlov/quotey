@@ -962,12 +962,13 @@
                 const signature = approvalSignatureFromLive(payload);
                 if (!payload.is_pending) {
                     showStale(payload.status);
+                    if (!approvalLiveSignature || signature !== approvalLiveSignature) {
+                        showLiveUpdateBanner();
+                        showBanner('Approval status changed in another session.', 'error');
+                    }
                 }
                 if (approvalLiveSignature && signature !== approvalLiveSignature) {
                     showLiveUpdateBanner();
-                    if (!payload.is_pending) {
-                        showBanner('Approval status changed in another session.', 'error');
-                    }
                 }
                 approvalLiveSignature = signature;
                 livePollFailures = 0;
