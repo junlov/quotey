@@ -50,6 +50,37 @@ If that audit trail is missing, then you must act as if the operation never happ
 
 ---
 
+## skillshare Skills Sync
+
+Quotey uses **project-mode skillshare** with a bridge to global storage.
+
+- Default skillshare behavior is global mode (`~/.config/skillshare/...`).
+- This repo defines project mode in `.skillshare/config.yaml`.
+- Source of truth for repo skills is `.skillshare/skills/` (do not treat global as canonical for this repo).
+
+### Repo Behavior
+
+- `skillshare sync -p` syncs project skills to project targets (`.claude/skills`, `.agents/skills`, `.crush/skills`, `.gemini/skills`).
+- The project config also bridges to global via custom target:
+  - `name: global-skillshare`
+  - `path: ~/.config/skillshare/skills`
+  - `mode: copy`
+
+### Agent Workflow
+
+1. Add/edit skills in `.skillshare/skills/`.
+2. Preview changes: `skillshare sync -p --dry-run`.
+3. Apply changes: `skillshare sync -p`.
+4. Commit `.skillshare/` changes with related docs/code updates.
+
+### Guardrails
+
+- Do not edit `~/.config/skillshare/skills` directly for Quotey-specific changes.
+- If `skillshare` is missing, install with:
+  - `curl -fsSL https://raw.githubusercontent.com/runkids/skillshare/main/install.sh | sh`
+
+---
+
 ## Planning Source of Truth (Read Before Coding)
 
 Quotey uses planning-driven development. Before implementing non-trivial work, read:
@@ -245,6 +276,8 @@ Common pitfalls:
 ## Issue Tracking with br (Beads)
 
 All issue tracking goes through **Beads**. No other TODO systems.
+
+Compatibility note: some environments may expose `bd` as an alias/shim to `br`, but `br` is the canonical command in this repo and docs.
 
 Key invariants:
 

@@ -18,6 +18,12 @@ out/
 target/
 *.egg-info/
 
+# Local scratch/build artifacts used by iterative agent/test workflows
+.tmp/
+.tmp-target/
+.tmp-rustc/
+.tmp-*/
+
 # Test artifacts
 coverage/
 .coverage

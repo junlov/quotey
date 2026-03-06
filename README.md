@@ -15,6 +15,31 @@ Phase 0 tooling baseline (`bd-3d8.12`) is documented in `.planning/FOUNDATION_QU
 including minimum Rust version checks and required `cargo sqlx`, `cargo nextest`,
 and `cargo deny` verification commands.
 
+## Skillshare Setup (Project + Global Bridge)
+
+This repo includes project-mode skillshare config in `.skillshare/config.yaml`.
+
+- Project source of truth: `.skillshare/skills/`
+- Project targets: `.claude/skills`, `.agents/skills` (codex), `.crush/skills`, `.gemini/skills`
+- Global bridge target: `~/.config/skillshare/skills` (copy mode)
+
+Commands:
+
+```bash
+# Install skillshare if needed
+curl -fsSL https://raw.githubusercontent.com/runkids/skillshare/main/install.sh | sh
+
+# From repository root, preview then apply project sync
+skillshare sync -p --dry-run
+skillshare sync -p
+```
+
+Notes:
+
+- Project mode and global mode are separate configs.
+- This repo is configured so project sync also copies skills into the global skillshare directory.
+- Treat `.skillshare/skills/` as source of truth to avoid drift.
+
 ## Workspace Boundaries
 
 `bd-3d8.1` introduces a six-crate scaffold with explicit ownership boundaries:

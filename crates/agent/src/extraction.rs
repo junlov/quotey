@@ -1,5 +1,6 @@
 use anyhow::{anyhow, Context, Result};
 use quotey_core::{ExtractedRequirements, RequirementSourceType};
+use serde::Deserialize;
 
 use crate::llm::LlmClient;
 use crate::prompts::build_requirement_extraction_prompt;
@@ -50,30 +51,53 @@ fn parse_extracted_requirements(response: &str) -> Result<ExtractedRequirements>
         return Ok(parsed);
     }
 
-    if let Some(json_payload) = strip_markdown_code_fence(response) {
-        return serde_json::from_str::<ExtractedRequirements>(&json_payload)
-            .context("failed to parse fenced JSON payload");
+    for payload in extract_markdown_code_fence_payloads(response) {
+        if let Ok(parsed) = parse_first_json_value(payload) {
+            return Ok(parsed);
+        }
+    }
+
+    for (idx, ch) in response.char_indices() {
+        if ch != '{' && ch != '[' {
+            continue;
+        }
+        if let Ok(parsed) = parse_first_json_value(&response[idx..]) {
+            return Ok(parsed);
+        }
     }
 
     Err(anyhow!("response did not contain valid JSON object"))
 }
 
-fn strip_markdown_code_fence(response: &str) -> Option<String> {
-    let trimmed = response.trim();
-    let fenced = trimmed.strip_prefix("```")?;
-    let fenced = fenced.strip_suffix("```")?;
-    let fenced = fenced.trim_start();
-    let payload = if fenced.starts_with('{') || fenced.starts_with('[') {
-        fenced
-    } else {
-        fenced.split_once('\n').map(|(_, rest)| rest).unwrap_or("")
-    };
-    let fenced = payload.trim();
-    if fenced.is_empty() {
-        None
-    } else {
-        Some(fenced.to_string())
+fn parse_first_json_value(candidate: &str) -> Result<ExtractedRequirements, serde_json::Error> {
+    let mut deserializer = serde_json::Deserializer::from_str(candidate);
+    ExtractedRequirements::deserialize(&mut deserializer)
+}
+
+fn extract_markdown_code_fence_payloads(response: &str) -> Vec<&str> {
+    let mut payloads = Vec::new();
+    let mut remainder = response;
+
+    while let Some(start_idx) = remainder.find("```") {
+        let after_start = &remainder[start_idx + 3..];
+        let Some(end_idx) = after_start.find("```") else {
+            break;
+        };
+
+        let mut fenced_body = after_start[..end_idx].trim_start();
+        if !fenced_body.starts_with('{') && !fenced_body.starts_with('[') {
+            fenced_body = fenced_body.split_once('\n').map(|(_, rest)| rest).unwrap_or("");
+        }
+
+        let payload = fenced_body.trim();
+        if !payload.is_empty() {
+            payloads.push(payload);
+        }
+
+        remainder = &after_start[end_idx + 3..];
     }
+
+    payloads
 }
 
 fn normalize_optional_hint(value: Option<String>) -> Option<String> {
@@ -223,5 +247,55 @@ mod tests {
         assert_eq!(parsed.source_type, RequirementSourceType::Email);
         assert_eq!(parsed.sender_hint.as_deref(), Some("buyer@example.com"));
         assert_eq!(parsed.context_hint.as_deref(), Some("Urgent quote request"));
+    }
+
+    #[tokio::test]
+    async fn parse_requirements_accepts_embedded_json_with_preface_and_suffix() {
+        let client = MockLlmClient {
+            response: format!(
+                "I extracted these requirements:\n{{\"schema_version\":\"{}\",\"source_type\":\"email\",\"sender_hint\":\"buyer@example.com\",\"context_hint\":\"Renewal\",\"requirements\":[],\"ambiguities\":[],\"missing_info\":[\"start date\"]}}\nPlease validate before sending.",
+                REQUIREMENT_EXTRACTION_SCHEMA_VERSION
+            ),
+        };
+
+        let parsed = parse_requirements(&client, RequirementSourceType::Email, "raw")
+            .await
+            .expect("embedded JSON should parse");
+
+        assert_eq!(parsed.source_type, RequirementSourceType::Email);
+        assert_eq!(parsed.missing_info, vec!["start date".to_string()]);
+    }
+
+    #[tokio::test]
+    async fn parse_requirements_accepts_nested_payload_inside_wrapper_json() {
+        let client = MockLlmClient {
+            response: format!(
+                "{{\"draft_warnings\":[\"Need clarification\"],\"extracted\":{{\"schema_version\":\"{}\",\"source_type\":\"email\",\"sender_hint\":\"buyer@example.com\",\"context_hint\":\"Expansion\",\"requirements\":[],\"ambiguities\":[],\"missing_info\":[]}}}}",
+                REQUIREMENT_EXTRACTION_SCHEMA_VERSION
+            ),
+        };
+
+        let parsed = parse_requirements(&client, RequirementSourceType::Email, "raw")
+            .await
+            .expect("nested payload should parse");
+
+        assert_eq!(parsed.source_type, RequirementSourceType::Email);
+        assert_eq!(parsed.context_hint.as_deref(), Some("Expansion"));
+    }
+
+    #[tokio::test]
+    async fn parse_requirements_accepts_fenced_payload_with_surrounding_text() {
+        let client = MockLlmClient {
+            response: format!(
+                "Parsed output follows.\n```json\n{{\"schema_version\":\"{}\",\"source_type\":\"rfp\",\"requirements\":[],\"ambiguities\":[],\"missing_info\":[]}}\n```\nEnd of output.",
+                REQUIREMENT_EXTRACTION_SCHEMA_VERSION
+            ),
+        };
+
+        let parsed = parse_requirements(&client, RequirementSourceType::Rfp, "raw")
+            .await
+            .expect("fenced payload with surrounding text should parse");
+
+        assert_eq!(parsed.source_type, RequirementSourceType::Rfp);
     }
 }

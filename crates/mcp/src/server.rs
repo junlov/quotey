@@ -1472,10 +1472,7 @@ impl QuoteyMcpServer {
             if item.quantity == 0 || item.quantity > MAX_QUANTITY {
                 return tool_error(
                     "VALIDATION_ERROR",
-                    &format!(
-                        "line_items[{}].quantity must be between 1 and {}",
-                        i, MAX_QUANTITY
-                    ),
+                    &format!("line_items[{}].quantity must be between 1 and {}", i, MAX_QUANTITY),
                     None,
                 );
             }

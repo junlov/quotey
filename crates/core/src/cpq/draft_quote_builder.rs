@@ -42,6 +42,18 @@ impl DraftQuoteBuilder {
 
         let mut lines = Vec::new();
         let mut warnings = Vec::new();
+        let mut push_warning = |warning: String| {
+            if !warnings.contains(&warning) {
+                warnings.push(warning);
+            }
+        };
+
+        for ambiguity in &extracted.ambiguities {
+            push_warning(format!("Clarification required: {}", ambiguity.question));
+        }
+        for missing_entry in &extracted.missing_info {
+            push_warning(format!("Missing information required: {}", missing_entry));
+        }
 
         for matched in &matches.matches {
             let product = catalog
@@ -60,7 +72,7 @@ impl DraftQuoteBuilder {
 
             let unit_price = product.base_price.unwrap_or(Decimal::ZERO);
             if unit_price == Decimal::ZERO {
-                warnings.push(format!(
+                push_warning(format!(
                     "Product '{}' has no base price; draft line priced at 0 for review",
                     product.name
                 ));
@@ -78,21 +90,15 @@ impl DraftQuoteBuilder {
             });
         }
 
-        warnings.extend(
-            matches
-                .ambiguities
-                .iter()
-                .map(|entry| format!("Clarification required for '{}'", entry.requirement_name)),
-        );
-        warnings.extend(
-            matches
-                .unmatched_requirements
-                .iter()
-                .map(|entry| format!("Unmatched requirement '{}'", entry)),
-        );
+        for entry in &matches.ambiguities {
+            push_warning(format!("Clarification required for '{}'", entry.requirement_name));
+        }
+        for entry in &matches.unmatched_requirements {
+            push_warning(format!("Unmatched requirement '{}'", entry));
+        }
 
         if lines.is_empty() {
-            warnings.push("No matched products available to build draft quote".to_string());
+            push_warning("No matched products available to build draft quote".to_string());
             return Ok(DraftQuoteBuildResult { quote: None, warnings });
         }
 
@@ -270,5 +276,38 @@ mod tests {
         assert!(result.warnings.iter().any(|warning| warning.contains("No matched products")));
         assert!(result.warnings.iter().any(|warning| warning.contains("Clarification required")));
         assert!(result.warnings.iter().any(|warning| warning.contains("Unmatched requirement")));
+    }
+
+    #[test]
+    fn preserves_extraction_missing_info_and_ambiguity_warnings() {
+        let builder = DraftQuoteBuilder;
+        let mut extracted = extracted();
+        extracted.ambiguities = vec![crate::RequirementAmbiguity {
+            text: "renewal term".to_string(),
+            question: "Do you need 12 or 24 month term?".to_string(),
+            options: vec!["12 months".to_string(), "24 months".to_string()],
+            confidence: 0.51,
+        }];
+        extracted.missing_info = vec!["contract start date".to_string()];
+
+        let matches = ProductMatchResult {
+            matches: vec![ProductMatch {
+                requirement_name: "SSO integration".to_string(),
+                product_id: "prod-sso".to_string(),
+                product_name: "SSO Add-on".to_string(),
+                confidence: 0.95,
+                reasoning: "synonym".to_string(),
+            }],
+            ambiguities: vec![],
+            unmatched_requirements: vec![],
+        };
+
+        let result = builder
+            .build_from_matches(&request(), &extracted, &matches, &catalog())
+            .expect("build should succeed");
+
+        assert!(result.quote.is_some());
+        assert!(result.warnings.iter().any(|warning| warning.contains("12 or 24 month term")));
+        assert!(result.warnings.iter().any(|warning| warning.contains("contract start date")));
     }
 }

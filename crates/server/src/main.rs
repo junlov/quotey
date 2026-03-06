@@ -3,6 +3,7 @@ mod crm;
 mod health;
 mod pdf;
 pub mod portal;
+mod web;
 
 use anyhow::Result;
 use quotey_core::config::{AppConfig, LoadOptions};
@@ -44,6 +45,13 @@ pub async fn run() -> Result<()> {
         app.config.server.health_check_port,
         app.db_pool.clone(),
         app.config.crm.clone(),
+    )
+    .await?;
+
+    let _web_server = web::spawn(
+        &app.config.server.bind_address,
+        app.config.server.web_port,
+        app.db_pool.clone(),
     )
     .await?;
 

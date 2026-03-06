@@ -43,6 +43,7 @@ pub struct LlmConfig {
 pub struct ServerConfig {
     pub bind_address: String,
     pub health_check_port: u16,
+    pub web_port: u16,
     pub graceful_shutdown_secs: u64,
 }
 
@@ -141,6 +142,7 @@ impl Default for AppConfig {
             server: ServerConfig {
                 bind_address: "127.0.0.1".to_string(),
                 health_check_port: 8080,
+                web_port: 3847,
                 graceful_shutdown_secs: 15,
             },
             crm: CrmConfig {
@@ -261,6 +263,9 @@ impl AppConfig {
             if let Some(health_check_port) = server.health_check_port {
                 self.server.health_check_port = health_check_port;
             }
+            if let Some(web_port) = server.web_port {
+                self.server.web_port = web_port;
+            }
             if let Some(graceful_shutdown_secs) = server.graceful_shutdown_secs {
                 self.server.graceful_shutdown_secs = graceful_shutdown_secs;
             }
@@ -342,6 +347,9 @@ impl AppConfig {
         }
         if let Some(value) = read_env("QUOTEY_SERVER_HEALTH_CHECK_PORT") {
             self.server.health_check_port = parse_u16("QUOTEY_SERVER_HEALTH_CHECK_PORT", &value)?;
+        }
+        if let Some(value) = read_env("QUOTEY_SERVER_WEB_PORT") {
+            self.server.web_port = parse_u16("QUOTEY_SERVER_WEB_PORT", &value)?;
         }
         if let Some(value) = read_env("QUOTEY_SERVER_GRACEFUL_SHUTDOWN_SECS") {
             self.server.graceful_shutdown_secs =
@@ -590,6 +598,18 @@ fn validate_server(server: &ServerConfig) -> Result<(), ConfigError> {
         ));
     }
 
+    if server.web_port == 0 {
+        return Err(ConfigError::Validation(
+            "server.web_port must be greater than zero".to_string(),
+        ));
+    }
+
+    if server.web_port == server.health_check_port {
+        return Err(ConfigError::Validation(
+            "server.web_port and server.health_check_port must be different".to_string(),
+        ));
+    }
+
     if server.graceful_shutdown_secs == 0 {
         return Err(ConfigError::Validation(
             "server.graceful_shutdown_secs must be greater than zero".to_string(),
@@ -707,6 +727,7 @@ struct LlmPatch {
 struct ServerPatch {
     bind_address: Option<String>,
     health_check_port: Option<u16>,
+    web_port: Option<u16>,
     graceful_shutdown_secs: Option<u64>,
 }
 
