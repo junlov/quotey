@@ -312,6 +312,165 @@
             font-weight: 500;
         }
 
+        .pipeline-section {
+            background: var(--bg-white);
+            border-radius: var(--radius-lg);
+            box-shadow: var(--shadow-sm);
+            overflow: hidden;
+            margin-bottom: 24px;
+        }
+
+        .pipeline-grid {
+            display: grid;
+            grid-template-columns: repeat(5, minmax(180px, 1fr));
+            gap: 12px;
+            padding: 16px 20px 20px;
+        }
+
+        .pipeline-column {
+            background: var(--bg-light);
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            display: flex;
+            flex-direction: column;
+            min-height: 220px;
+        }
+
+        .pipeline-column-header {
+            padding: 10px 12px;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 8px;
+        }
+
+        .pipeline-column-title {
+            font-size: 11px;
+            letter-spacing: 0.08em;
+            text-transform: uppercase;
+            color: var(--text-light);
+            font-weight: 700;
+        }
+
+        .pipeline-column-count {
+            font-size: 12px;
+            font-weight: 700;
+            border-radius: 999px;
+            background: var(--bg-white);
+            color: var(--text-dark);
+            padding: 3px 8px;
+            min-width: 28px;
+            text-align: center;
+        }
+
+        .pipeline-cards {
+            padding: 10px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .pipeline-card {
+            display: block;
+            border: 1px solid var(--border-color);
+            border-radius: var(--radius);
+            background: var(--bg-white);
+            padding: 10px;
+            color: inherit;
+            text-decoration: none;
+            transition:
+                border-color var(--motion-fast),
+                box-shadow var(--motion-fast),
+                transform var(--motion-fast);
+        }
+
+        .pipeline-card:hover {
+            border-color: var(--primary-color);
+            box-shadow: var(--shadow-sm);
+            transform: translateY(-1px);
+        }
+
+        .pipeline-card-top {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            gap: 8px;
+            margin-bottom: 8px;
+        }
+
+        .pipeline-card-id {
+            color: var(--primary-color);
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .pipeline-card-meta {
+            display: grid;
+            gap: 2px;
+            font-size: 12px;
+            color: var(--text-light);
+            margin-top: 8px;
+        }
+
+        .pipeline-signals {
+            display: grid;
+            gap: 6px;
+            margin-top: 8px;
+        }
+
+        .owner-signal,
+        .lock-signal {
+            display: inline-flex;
+            align-items: center;
+            border-radius: 999px;
+            padding: 3px 8px;
+            font-size: 11px;
+            font-weight: 600;
+            width: fit-content;
+        }
+
+        .owner-signal {
+            background: #e2e8f0;
+            color: #334155;
+        }
+
+        .owner-signal.rep-profile {
+            background: #dbeafe;
+            color: #1d4ed8;
+        }
+
+        .owner-signal.legacy-actor {
+            background: #fef3c7;
+            color: #92400e;
+        }
+
+        .owner-signal.unassigned {
+            background: #e2e8f0;
+            color: #475569;
+        }
+
+        .lock-signal.locked {
+            background: #fee2e2;
+            color: #b91c1c;
+        }
+
+        .lock-signal.available {
+            background: #dcfce7;
+            color: #166534;
+        }
+
+        .pipeline-lock-detail {
+            font-size: 11px;
+            color: var(--text-light);
+            margin-top: 2px;
+        }
+
+        .pipeline-empty {
+            font-size: 12px;
+            color: var(--text-light);
+            padding: 10px 2px 6px;
+        }
+
         .quotes-table {
             width: 100%;
             border-collapse: collapse;
@@ -504,6 +663,15 @@
                 grid-template-columns: 1fr;
             }
 
+            .pipeline-grid {
+                grid-template-columns: 1fr;
+                padding: 12px 16px 16px;
+            }
+
+            .pipeline-column {
+                min-height: 0;
+            }
+
             .quotes-table {
                 display: block;
                 overflow-x: auto;
@@ -518,6 +686,8 @@
 
         .stat-card,
         .pending-approval-card,
+        .pipeline-section,
+        .pipeline-card,
         .quotes-section,
         .filters-bar,
         .pending-approvals {
@@ -567,6 +737,7 @@
         }
 
         .filters-bar,
+        .pipeline-section,
         .quotes-section,
         .pending-approvals,
         .stat-card,
@@ -593,6 +764,7 @@
                 transition-duration: 0.01ms !important;
             }
             .filters-bar,
+            .pipeline-section,
             .quotes-section,
             .pending-approvals,
             .stat-card,
@@ -691,8 +863,9 @@
                 <select id="status-filter" class="filter-select" onchange="filterQuotes(this.value)">
                     <option value="all" {% if status_filter == "all" %}selected{% endif %}>All Quotes</option>
                     <option value="pending" {% if status_filter == "pending" %}selected{% endif %}>Pending</option>
+                    <option value="sent" {% if status_filter == "sent" %}selected{% endif %}>Sent</option>
                     <option value="approved" {% if status_filter == "approved" %}selected{% endif %}>Approved</option>
-                    <option value="rejected" {% if status_filter == "rejected" %}selected{% endif %}>Rejected</option>
+                    <option value="declined" {% if status_filter == "declined" %}selected{% endif %}>Declined</option>
                     <option value="expired" {% if status_filter == "expired" %}selected{% endif %}>Expired</option>
                 </select>
             </div>
@@ -727,6 +900,196 @@
             </div>
         </div>
 
+        {% if quotes and quotes | length > 0 %}
+        <section class="pipeline-section" aria-label="Quote pipeline">
+            <div class="section-header">
+                <h2>Quote Pipeline</h2>
+                <span class="section-meta" id="pipeline-results" aria-live="polite" aria-atomic="true"></span>
+            </div>
+            <div class="pipeline-grid">
+                <article class="pipeline-column" data-column-status="pending">
+                    <header class="pipeline-column-header">
+                        <h3 class="pipeline-column-title">Pending</h3>
+                        <span class="pipeline-column-count" data-count-status="pending">{{ stats.pending | default(value=0) }}</span>
+                    </header>
+                    <div class="pipeline-cards">
+                        {% for quote in quotes %}
+                        {% if quote.status == "pending" %}
+                        <a
+                            href="/quote/{{ quote.token }}"
+                            class="pipeline-card"
+                            data-status="{{ quote.status }}"
+                            data-amount="{{ quote.total_amount_raw | default(value=0) }}"
+                            data-date="{{ quote.created_at }}"
+                        >
+                            <div class="pipeline-card-top">
+                                <span class="pipeline-card-id">{{ quote.quote_id }}</span>
+                                <span class="status-badge status-{{ quote.status }}">{{ quote.status }}</span>
+                            </div>
+                            <div class="amount">{{ quote.total_amount }}</div>
+                            <div class="pipeline-card-meta">
+                                <span>Created {{ quote.created_at }}</span>
+                                <span>Valid until {{ quote.valid_until }}</span>
+                            </div>
+                            <div class="pipeline-signals">
+                                <span class="owner-signal {{ quote.owner_signal | default(value='unassigned') }}">Owner: {{ quote.owner_display | default(value='Unassigned') }}</span>
+                                <span class="lock-signal {{ quote.lock_state | default(value='available') }}">{% if quote.lock_state == "locked" %}Locked{% else %}Available{% endif %}</span>
+                            </div>
+                            <p class="pipeline-lock-detail">{{ quote.lock_signal | default(value='Available for collaboration') }}</p>
+                        </a>
+                        {% endif %}
+                        {% endfor %}
+                        <p class="pipeline-empty" style="display:none;">No pending quotes.</p>
+                    </div>
+                </article>
+
+                <article class="pipeline-column" data-column-status="sent">
+                    <header class="pipeline-column-header">
+                        <h3 class="pipeline-column-title">Sent</h3>
+                        <span class="pipeline-column-count" data-count-status="sent">0</span>
+                    </header>
+                    <div class="pipeline-cards">
+                        {% for quote in quotes %}
+                        {% if quote.status == "sent" %}
+                        <a
+                            href="/quote/{{ quote.token }}"
+                            class="pipeline-card"
+                            data-status="{{ quote.status }}"
+                            data-amount="{{ quote.total_amount_raw | default(value=0) }}"
+                            data-date="{{ quote.created_at }}"
+                        >
+                            <div class="pipeline-card-top">
+                                <span class="pipeline-card-id">{{ quote.quote_id }}</span>
+                                <span class="status-badge status-{{ quote.status }}">{{ quote.status }}</span>
+                            </div>
+                            <div class="amount">{{ quote.total_amount }}</div>
+                            <div class="pipeline-card-meta">
+                                <span>Created {{ quote.created_at }}</span>
+                                <span>Valid until {{ quote.valid_until }}</span>
+                            </div>
+                            <div class="pipeline-signals">
+                                <span class="owner-signal {{ quote.owner_signal | default(value='unassigned') }}">Owner: {{ quote.owner_display | default(value='Unassigned') }}</span>
+                                <span class="lock-signal {{ quote.lock_state | default(value='available') }}">{% if quote.lock_state == "locked" %}Locked{% else %}Available{% endif %}</span>
+                            </div>
+                            <p class="pipeline-lock-detail">{{ quote.lock_signal | default(value='Available for collaboration') }}</p>
+                        </a>
+                        {% endif %}
+                        {% endfor %}
+                        <p class="pipeline-empty" style="display:none;">No sent quotes.</p>
+                    </div>
+                </article>
+
+                <article class="pipeline-column" data-column-status="approved">
+                    <header class="pipeline-column-header">
+                        <h3 class="pipeline-column-title">Approved</h3>
+                        <span class="pipeline-column-count" data-count-status="approved">{{ stats.approved | default(value=0) }}</span>
+                    </header>
+                    <div class="pipeline-cards">
+                        {% for quote in quotes %}
+                        {% if quote.status == "approved" %}
+                        <a
+                            href="/quote/{{ quote.token }}"
+                            class="pipeline-card"
+                            data-status="{{ quote.status }}"
+                            data-amount="{{ quote.total_amount_raw | default(value=0) }}"
+                            data-date="{{ quote.created_at }}"
+                        >
+                            <div class="pipeline-card-top">
+                                <span class="pipeline-card-id">{{ quote.quote_id }}</span>
+                                <span class="status-badge status-{{ quote.status }}">{{ quote.status }}</span>
+                            </div>
+                            <div class="amount">{{ quote.total_amount }}</div>
+                            <div class="pipeline-card-meta">
+                                <span>Created {{ quote.created_at }}</span>
+                                <span>Valid until {{ quote.valid_until }}</span>
+                            </div>
+                            <div class="pipeline-signals">
+                                <span class="owner-signal {{ quote.owner_signal | default(value='unassigned') }}">Owner: {{ quote.owner_display | default(value='Unassigned') }}</span>
+                                <span class="lock-signal {{ quote.lock_state | default(value='available') }}">{% if quote.lock_state == "locked" %}Locked{% else %}Available{% endif %}</span>
+                            </div>
+                            <p class="pipeline-lock-detail">{{ quote.lock_signal | default(value='Available for collaboration') }}</p>
+                        </a>
+                        {% endif %}
+                        {% endfor %}
+                        <p class="pipeline-empty" style="display:none;">No approved quotes.</p>
+                    </div>
+                </article>
+
+                <article class="pipeline-column" data-column-status="declined">
+                    <header class="pipeline-column-header">
+                        <h3 class="pipeline-column-title">Declined</h3>
+                        <span class="pipeline-column-count" data-count-status="declined">{{ stats.declined | default(value=0) }}</span>
+                    </header>
+                    <div class="pipeline-cards">
+                        {% for quote in quotes %}
+                        {% if quote.status == "declined" %}
+                        <a
+                            href="/quote/{{ quote.token }}"
+                            class="pipeline-card"
+                            data-status="{{ quote.status }}"
+                            data-amount="{{ quote.total_amount_raw | default(value=0) }}"
+                            data-date="{{ quote.created_at }}"
+                        >
+                            <div class="pipeline-card-top">
+                                <span class="pipeline-card-id">{{ quote.quote_id }}</span>
+                                <span class="status-badge status-{{ quote.status }}">{{ quote.status }}</span>
+                            </div>
+                            <div class="amount">{{ quote.total_amount }}</div>
+                            <div class="pipeline-card-meta">
+                                <span>Created {{ quote.created_at }}</span>
+                                <span>Valid until {{ quote.valid_until }}</span>
+                            </div>
+                            <div class="pipeline-signals">
+                                <span class="owner-signal {{ quote.owner_signal | default(value='unassigned') }}">Owner: {{ quote.owner_display | default(value='Unassigned') }}</span>
+                                <span class="lock-signal {{ quote.lock_state | default(value='available') }}">{% if quote.lock_state == "locked" %}Locked{% else %}Available{% endif %}</span>
+                            </div>
+                            <p class="pipeline-lock-detail">{{ quote.lock_signal | default(value='Available for collaboration') }}</p>
+                        </a>
+                        {% endif %}
+                        {% endfor %}
+                        <p class="pipeline-empty" style="display:none;">No declined quotes.</p>
+                    </div>
+                </article>
+
+                <article class="pipeline-column" data-column-status="expired">
+                    <header class="pipeline-column-header">
+                        <h3 class="pipeline-column-title">Expired</h3>
+                        <span class="pipeline-column-count" data-count-status="expired">{{ stats.expired | default(value=0) }}</span>
+                    </header>
+                    <div class="pipeline-cards">
+                        {% for quote in quotes %}
+                        {% if quote.status == "expired" %}
+                        <a
+                            href="/quote/{{ quote.token }}"
+                            class="pipeline-card"
+                            data-status="{{ quote.status }}"
+                            data-amount="{{ quote.total_amount_raw | default(value=0) }}"
+                            data-date="{{ quote.created_at }}"
+                        >
+                            <div class="pipeline-card-top">
+                                <span class="pipeline-card-id">{{ quote.quote_id }}</span>
+                                <span class="status-badge status-{{ quote.status }}">{{ quote.status }}</span>
+                            </div>
+                            <div class="amount">{{ quote.total_amount }}</div>
+                            <div class="pipeline-card-meta">
+                                <span>Created {{ quote.created_at }}</span>
+                                <span>Valid until {{ quote.valid_until }}</span>
+                            </div>
+                            <div class="pipeline-signals">
+                                <span class="owner-signal {{ quote.owner_signal | default(value='unassigned') }}">Owner: {{ quote.owner_display | default(value='Unassigned') }}</span>
+                                <span class="lock-signal {{ quote.lock_state | default(value='available') }}">{% if quote.lock_state == "locked" %}Locked{% else %}Available{% endif %}</span>
+                            </div>
+                            <p class="pipeline-lock-detail">{{ quote.lock_signal | default(value='Available for collaboration') }}</p>
+                        </a>
+                        {% endif %}
+                        {% endfor %}
+                        <p class="pipeline-empty" style="display:none;">No expired quotes.</p>
+                    </div>
+                </article>
+            </div>
+        </section>
+        {% endif %}
+
         <!-- Quotes List -->
         <section class="quotes-section">
             <div class="section-header">
@@ -748,16 +1111,14 @@
                 </thead>
                 <tbody>
                     {% for quote in quotes %}
-                    <tr class="table-row-link" data-status="{% if quote.status == 'declined' %}rejected{% else %}{{ quote.status }}{% endif %}" data-amount="{{ quote.total_amount_raw | default(value=0) }}" data-href="/quote/{{ quote.token }}">
+                    <tr class="table-row-link" data-status="{{ quote.status }}" data-amount="{{ quote.total_amount_raw | default(value=0) }}" data-date="{{ quote.created_at }}" data-href="/quote/{{ quote.token }}">
                         <td>
                             <a href="/quote/{{ quote.token }}" class="quote-link">{{ quote.quote_id }}</a>
                         </td>
                         <td>{{ quote.created_at }}</td>
                         <td>{{ quote.valid_until }}</td>
                         <td>
-                            <span class="status-badge status-{% if quote.status == 'declined' %}rejected{% else %}{{ quote.status }}{% endif %}">
-                                {% if quote.status == "declined" %}rejected{% else %}{{ quote.status }}{% endif %}
-                            </span>
+                            <span class="status-badge status-{{ quote.status }}">{{ quote.status }}</span>
                         </td>
                         <td class="amount text-right">{{ quote.total_amount }}</td>
                         <td>
@@ -805,10 +1166,43 @@
             return Number.isFinite(ts) ? ts : 0;
         }
 
-        function updateNoResultsState(rows) {
+        function compareBySort(a, b) {
+            const amountA = parseAmount(a.dataset.amount);
+            const amountB = parseAmount(b.dataset.amount);
+            const dateA = parseDate(a.dataset.date || a.cells?.[1]?.textContent || '');
+            const dateB = parseDate(b.dataset.date || b.cells?.[1]?.textContent || '');
+
+            switch (currentSortBy) {
+                case 'date-asc':
+                    return dateA - dateB;
+                case 'amount-desc':
+                    return amountB - amountA;
+                case 'amount-asc':
+                    return amountA - amountB;
+                case 'date-desc':
+                default:
+                    return dateB - dateA;
+            }
+        }
+
+        function itemMatchesFilters(item) {
+            const status = item.dataset.status || '';
+            const statusOk = statusMatchesFilter(status);
+            const textOk = (item.textContent || '').toLowerCase().includes(currentSearchQuery);
+            return statusOk && textOk;
+        }
+
+        function statusMatchesFilter(status) {
+            if (currentStatusFilter === 'all') return true;
+            if (currentStatusFilter === 'pending') {
+                return status === 'pending' || status === 'sent';
+            }
+            return status === currentStatusFilter;
+        }
+
+        function updateNoResultsState(rows, visibleCount) {
             const noResults = document.getElementById('no-results-state');
             if (!noResults) return;
-            const visibleCount = rows.filter((row) => row.style.display !== 'none').length;
             noResults.style.display = visibleCount === 0 ? '' : 'none';
             const resultsCount = document.getElementById('results-count');
             if (resultsCount) {
@@ -818,62 +1212,93 @@
             }
         }
 
-        function applyFilters(rows) {
-            rows.forEach((row) => {
-                const statusOk =
-                    currentStatusFilter === 'all' || (row.dataset.status || '') === currentStatusFilter;
-                const textOk = row.textContent.toLowerCase().includes(currentSearchQuery);
-                row.style.display = statusOk && textOk ? '' : 'none';
-            });
-        }
-
-        function applySort(rows, tbody) {
-            rows.sort((a, b) => {
-                const amountA = parseAmount(a.dataset.amount);
-                const amountB = parseAmount(b.dataset.amount);
-                const dateA = parseDate(a.cells[1]?.textContent);
-                const dateB = parseDate(b.cells[1]?.textContent);
-
-                switch (currentSortBy) {
-                    case 'date-asc':
-                        return dateA - dateB;
-                    case 'amount-desc':
-                        return amountB - amountA;
-                    case 'amount-asc':
-                        return amountA - amountB;
-                    case 'date-desc':
-                    default:
-                        return dateB - dateA;
-                }
-            });
-
-            rows.forEach((row) => tbody.appendChild(row));
-        }
-
         function applyTableState() {
             const tbody = document.querySelector('.quotes-table tbody');
             if (!tbody) return;
             const rows = Array.from(tbody.querySelectorAll('tr'));
             if (rows.length === 0) return;
 
-            applySort(rows, tbody);
-            applyFilters(rows);
-            updateNoResultsState(rows);
+            rows.sort(compareBySort);
+            rows.forEach((row) => tbody.appendChild(row));
+
+            let visibleCount = 0;
+            rows.forEach((row) => {
+                const visible = itemMatchesFilters(row);
+                row.style.display = visible ? '' : 'none';
+                if (visible) visibleCount += 1;
+            });
+            updateNoResultsState(rows, visibleCount);
+        }
+
+        function applyPipelineState() {
+            const columns = Array.from(document.querySelectorAll('.pipeline-column'));
+            if (columns.length === 0) return;
+
+            let totalCards = 0;
+            let visibleCards = 0;
+
+            columns.forEach((column) => {
+                const columnStatus = column.dataset.columnStatus || '';
+                const cardsContainer = column.querySelector('.pipeline-cards');
+                if (!cardsContainer) return;
+
+                const cards = Array.from(cardsContainer.querySelectorAll('.pipeline-card'));
+                cards.sort(compareBySort);
+                cards.forEach((card) => cardsContainer.appendChild(card));
+
+                const showColumn = statusMatchesFilter(columnStatus);
+                column.style.display = showColumn ? '' : 'none';
+
+                let visibleInColumn = 0;
+                cards.forEach((card) => {
+                    const visible = showColumn && itemMatchesFilters(card);
+                    card.style.display = visible ? '' : 'none';
+                    if (visible) visibleInColumn += 1;
+                });
+
+                totalCards += cards.length;
+                visibleCards += visibleInColumn;
+
+                const countBadge = column.querySelector('.pipeline-column-count');
+                if (countBadge) countBadge.textContent = `${visibleInColumn}`;
+
+                const emptyState = column.querySelector('.pipeline-empty');
+                if (emptyState) {
+                    emptyState.style.display = showColumn && visibleInColumn === 0 ? '' : 'none';
+                }
+            });
+
+            const pipelineResults = document.getElementById('pipeline-results');
+            if (pipelineResults) {
+                if (totalCards === 0) {
+                    pipelineResults.textContent = 'No cards';
+                } else {
+                    pipelineResults.textContent =
+                        visibleCards === totalCards
+                            ? `${totalCards} cards`
+                            : `${visibleCards} of ${totalCards} cards`;
+                }
+            }
+        }
+
+        function applyPortalListState() {
+            applyTableState();
+            applyPipelineState();
         }
 
         function filterQuotes(status) {
             currentStatusFilter = status || 'all';
-            applyTableState();
+            applyPortalListState();
         }
 
         function sortQuotes(sortBy) {
             currentSortBy = sortBy || 'date-desc';
-            applyTableState();
+            applyPortalListState();
         }
 
         function searchQuotes(query) {
             currentSearchQuery = (query || '').toLowerCase();
-            applyTableState();
+            applyPortalListState();
         }
 
         function resetQuoteFilters() {
@@ -889,7 +1314,7 @@
             if (sortSelect) sortSelect.value = 'date-desc';
             if (searchInput) searchInput.value = '';
 
-            applyTableState();
+            applyPortalListState();
         }
 
         function subscriptionFromBrowser(existingSubscription) {
@@ -971,7 +1396,7 @@
             if (searchInput) {
                 currentSearchQuery = (searchInput.value || '').toLowerCase();
             }
-            applyTableState();
+            applyPortalListState();
 
             document.querySelectorAll('.table-row-link').forEach((row) => {
                 row.addEventListener('click', (event) => {

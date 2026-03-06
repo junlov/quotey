@@ -1504,6 +1504,19 @@ async fn portal_index_page(
             .await
             .unwrap_or(0);
 
+    let pipeline_pending_count: i64 =
+        sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE status IN (?, ?)")
+            .bind(INDEX_PENDING_STATUSES[0])
+            .bind(INDEX_PENDING_STATUSES[1])
+            .fetch_one(&state.db_pool)
+            .await
+            .unwrap_or(0);
+
+    let sent_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE status = 'sent'")
+        .fetch_one(&state.db_pool)
+        .await
+        .unwrap_or(0);
+
     let approved_count: i64 =
         sqlx::query_scalar("SELECT COUNT(*) FROM quote WHERE status = 'approved'")
             .fetch_one(&state.db_pool)
@@ -1672,6 +1685,17 @@ async fn portal_index_page(
             "approved": approved_count,
             "expired": total_expired_count,
             "declined": declined_count,
+        }),
+    );
+
+    context.insert(
+        "pipeline_counts",
+        &serde_json::json!({
+            "pending": pipeline_pending_count,
+            "sent": sent_count,
+            "approved": approved_count,
+            "declined": declined_count,
+            "expired": total_expired_count,
         }),
     );
 
@@ -5170,6 +5194,83 @@ mod tests {
                 .0;
 
         assert!(!html.contains("Pending Approvals"));
+    }
+
+    #[tokio::test]
+    async fn portal_index_page_renders_pipeline_with_owner_and_lock_signals() {
+        let (pool, quote_id, _token) = setup().await;
+        let now = Utc::now().to_rfc3339();
+        let lock_expires_at = (Utc::now() + chrono::Duration::minutes(15)).to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO sales_rep
+                (id, external_user_ref, name, email, role, title, team_id, reports_to, status,
+                 max_discount_pct, auto_approve_threshold_cents, capabilities_json, config_json,
+                 created_at, updated_at)
+             VALUES (?, ?, ?, ?, 'ae', 'Account Executive', 'team-east', NULL, 'active',
+                     20.0, 100000, '[]', '{}', ?, ?)",
+        )
+        .bind("rep-portal-1")
+        .bind("U-REP-PORTAL")
+        .bind("Taylor Seller")
+        .bind("taylor@example.com")
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("insert sales rep");
+
+        sqlx::query(
+            "UPDATE quote
+             SET status = 'pending',
+                 created_by = 'legacy-actor-123',
+                 created_by_sales_rep_id = 'rep-portal-1',
+                 locked_by = 'ops-manager-9',
+                 lock_expires_at = ?,
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(&lock_expires_at)
+        .bind(&now)
+        .bind(&quote_id)
+        .execute(&pool)
+        .await
+        .expect("update quote ownership and lock");
+
+        let html =
+            portal_index_page(Query(PortalIndexQuery::default()), state_with_real_templates(pool))
+                .await
+                .expect("render portal index")
+                .0;
+
+        assert!(html.contains("Quote Pipeline"));
+        assert!(html.contains("Owner: Taylor Seller"));
+        assert!(html.contains("lock-signal locked"));
+        assert!(html.contains("Locked by ops-manager-9"));
+    }
+
+    #[tokio::test]
+    async fn portal_index_page_rejected_filter_alias_selects_declined() {
+        let (pool, quote_id, _token) = setup().await;
+        let now = Utc::now().to_rfc3339();
+
+        sqlx::query("UPDATE quote SET status = 'rejected', updated_at = ? WHERE id = ?")
+            .bind(&now)
+            .bind(&quote_id)
+            .execute(&pool)
+            .await
+            .expect("set quote rejected");
+
+        let html = portal_index_page(
+            Query(PortalIndexQuery { status: Some("rejected".to_string()), search: None }),
+            state_with_real_templates(pool),
+        )
+        .await
+        .expect("render portal index with rejected alias")
+        .0;
+
+        assert!(html.contains("option value=\"declined\" selected"));
+        assert!(html.contains("status-declined"));
     }
 
     #[tokio::test]
