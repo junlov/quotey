@@ -287,9 +287,22 @@ fn render_where_clause(conditions: &[PricingRuleCondition]) -> String {
     }
 }
 
+/// Renders a pricing rule condition as SQL.
+/// 
+/// # Security Note
+/// This function assumes field_key has already been validated against ALLOWED_PRICING_FIELD_KEYS.
+/// The is_safe_sql_identifier check here is defense-in-depth.
 fn render_condition_sql(condition: &PricingRuleCondition) -> String {
     let field = condition.field_key.trim();
     let value = condition.value.trim();
+
+    // Defense in depth: ensure field key passes SQL identifier safety check
+    // This should always pass if build_condition was used, but protects against
+    // direct construction of PricingRuleCondition
+    if !is_safe_sql_identifier(field) {
+        // Return a no-op condition that won't match anything
+        return "1=0".to_string();
+    }
 
     match condition.operator {
         PricingRuleOperator::Equals => {
