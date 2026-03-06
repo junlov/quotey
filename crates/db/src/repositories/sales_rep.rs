@@ -167,6 +167,56 @@ impl SalesRepRepository for SqlSalesRepRepository {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Budget-specific operations (not on the general trait)
+// ---------------------------------------------------------------------------
+
+impl SqlSalesRepRepository {
+    /// Atomically add `discount_cents` to the rep's `spent_discount_cents`.
+    /// Returns the updated spent total, or `None` if the rep was not found.
+    pub async fn record_discount_spend(
+        &self,
+        rep_id: &SalesRepId,
+        discount_cents: i64,
+    ) -> Result<Option<i64>, RepositoryError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE sales_rep \
+             SET spent_discount_cents = spent_discount_cents + ?, updated_at = ? \
+             WHERE id = ?",
+        )
+        .bind(discount_cents)
+        .bind(&now)
+        .bind(&rep_id.0)
+        .execute(&self.pool)
+        .await?;
+
+        if result.rows_affected() == 0 {
+            return Ok(None);
+        }
+
+        let row: (i64,) =
+            sqlx::query_as("SELECT spent_discount_cents FROM sales_rep WHERE id = ?")
+                .bind(&rep_id.0)
+                .fetch_one(&self.pool)
+                .await?;
+        Ok(Some(row.0))
+    }
+
+    /// Reset `spent_discount_cents` to 0 for all active reps (monthly reset).
+    /// Returns the number of reps affected.
+    pub async fn reset_monthly_budgets(&self) -> Result<u64, RepositoryError> {
+        let now = Utc::now().to_rfc3339();
+        let result = sqlx::query(
+            "UPDATE sales_rep SET spent_discount_cents = 0, updated_at = ? WHERE status = 'active'",
+        )
+        .bind(&now)
+        .execute(&self.pool)
+        .await?;
+        Ok(result.rows_affected())
+    }
+}
+
 fn row_to_sales_rep(row: sqlx::sqlite::SqliteRow) -> Result<SalesRep, RepositoryError> {
     let id: String = row.try_get("id").map_err(RepositoryError::Database)?;
     let role_raw: String = row.try_get("role").map_err(RepositoryError::Database)?;

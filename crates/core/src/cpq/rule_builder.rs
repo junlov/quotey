@@ -421,6 +421,50 @@ fn canonical_value(value: &Value) -> String {
     }
 }
 
+/// Allowed field keys for SQL preview generation in pricing rules.
+/// These are the only fields that can be used in conditions to prevent SQL injection.
+const ALLOWED_PRICING_FIELD_KEYS: &[&str] = &[
+    "account_tier",
+    "customer_segment",
+    "product_category",
+    "product_id",
+    "deal_value",
+    "region",
+    "industry",
+    "quote_currency",
+];
+
+/// Validates that a field key is allowed for SQL preview generation.
+fn validate_field_key(field_key: &str) -> Result<(), PricingRuleBuilderError> {
+    let normalized = field_key.trim();
+    if ALLOWED_PRICING_FIELD_KEYS.contains(&normalized) {
+        Ok(())
+    } else {
+        Err(PricingRuleBuilderError::DisallowedFieldKey {
+            key: field_key.to_string(),
+            allowed: ALLOWED_PRICING_FIELD_KEYS,
+        })
+    }
+}
+
+/// Validates a field key for SQL identifier safety.
+/// Rejects any characters that could enable SQL injection in identifier position.
+fn is_safe_sql_identifier(field_key: &str) -> bool {
+    // Must be non-empty
+    if field_key.is_empty() {
+        return false;
+    }
+
+    // Must start with letter or underscore
+    let first = field_key.chars().next().unwrap();
+    if !first.is_ascii_alphabetic() && first != '_' {
+        return false;
+    }
+
+    // Can only contain alphanumeric and underscore
+    field_key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Error)]
 pub enum PricingRuleBuilderError {
     #[error("visual rule validation failed: {0}")]
@@ -439,6 +483,8 @@ pub enum PricingRuleBuilderError {
     InvalidDecimal { key: String, value: String },
     #[error("currency cannot be empty")]
     InvalidCurrency,
+    #[error("disallowed field key `{key}`: not in allowed list {allowed:?}")]
+    DisallowedFieldKey { key: String, allowed: &'static [&'static str] },
 }
 
 #[cfg(test)]
