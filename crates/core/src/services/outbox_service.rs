@@ -72,11 +72,7 @@ pub trait OutboxService: Send + Sync {
     ) -> Result<Vec<(ExecutionTaskId, OutboxOperation)>>;
 
     /// Mark an operation as completed successfully
-    async fn complete(
-        &self,
-        task_id: &ExecutionTaskId,
-        result_json: Option<String>,
-    ) -> Result<()>;
+    async fn complete(&self, task_id: &ExecutionTaskId, result_json: Option<String>) -> Result<()>;
 
     /// Mark an operation as failed (may trigger retry or dead letter)
     async fn fail(&self, task_id: &ExecutionTaskId, error: &OutboxServiceError) -> Result<()>;
@@ -88,12 +84,7 @@ pub trait OutboxService: Send + Sync {
     async fn replay(&self, request: ReplayRequest) -> Result<ReplayResult>;
 
     /// Abandon a failed operation (manual override)
-    async fn abandon(
-        &self,
-        dead_letter_id: &str,
-        reason: &str,
-        abandoned_by: &str,
-    ) -> Result<()>;
+    async fn abandon(&self, dead_letter_id: &str, reason: &str, abandoned_by: &str) -> Result<()>;
 
     /// Get statistics for monitoring
     async fn get_stats(&self) -> Result<OutboxStats>;
@@ -178,10 +169,7 @@ impl<T: OutboxService + ?Sized> OutboxServiceExt for T {
             }
         }
 
-        Ok(BatchEnqueueResult {
-            task_ids,
-            duplicates,
-        })
+        Ok(BatchEnqueueResult { task_ids, duplicates })
     }
 
     async fn cancel_pending(&self, quote_id: &QuoteId, reason: &str) -> Result<usize> {

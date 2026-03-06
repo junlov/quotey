@@ -1,7 +1,9 @@
+use std::str::FromStr;
+
 use chrono::{DateTime, Utc};
 use sqlx::Row;
 
-use quotey_core::domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
+use quotey_core::domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus, ApprovalType};
 use quotey_core::domain::quote::QuoteId;
 
 use super::{ApprovalRepository, RepositoryError};
@@ -17,23 +19,25 @@ impl SqlApprovalRepository {
     }
 }
 
-fn parse_status(s: &str) -> ApprovalStatus {
-    match s {
-        "approved" => ApprovalStatus::Approved,
-        "rejected" => ApprovalStatus::Rejected,
-        "escalated" => ApprovalStatus::Escalated,
-        _ => ApprovalStatus::Pending,
-    }
+fn parse_status(s: &str) -> Result<ApprovalStatus, RepositoryError> {
+    ApprovalStatus::from_str(s).map_err(|error| {
+        RepositoryError::Decode(format!("invalid approval_request.status `{s}`: {error}"))
+    })
 }
 
 pub fn approval_status_as_str(status: &ApprovalStatus) -> &'static str {
-    match status {
-        ApprovalStatus::Pending => "pending",
-        ApprovalStatus::Approved => "approved",
-        ApprovalStatus::Rejected => "rejected",
-        ApprovalStatus::Escalated => "escalated",
-    }
+    status.as_str()
 }
+
+fn parse_approval_type(s: &str) -> Result<ApprovalType, RepositoryError> {
+    ApprovalType::from_str(s).map_err(|error| {
+        RepositoryError::Decode(format!("invalid approval_request.approval_type `{s}`: {error}"))
+    })
+}
+
+const APPROVAL_SELECT_COLUMNS: &str =
+    "id, quote_id, approver_role, approval_type, reason, justification, payload_json,
+     status, decision_note, requested_by, expires_at, created_at, updated_at";
 
 fn row_to_approval(row: &sqlx::sqlite::SqliteRow) -> Result<ApprovalRequest, RepositoryError> {
     let id: String = row.try_get("id").map_err(|e| RepositoryError::Decode(e.to_string()))?;
@@ -41,12 +45,18 @@ fn row_to_approval(row: &sqlx::sqlite::SqliteRow) -> Result<ApprovalRequest, Rep
         row.try_get("quote_id").map_err(|e| RepositoryError::Decode(e.to_string()))?;
     let approver_role: String =
         row.try_get("approver_role").map_err(|e| RepositoryError::Decode(e.to_string()))?;
+    let approval_type_str: String =
+        row.try_get("approval_type").map_err(|e| RepositoryError::Decode(e.to_string()))?;
     let reason: String =
         row.try_get("reason").map_err(|e| RepositoryError::Decode(e.to_string()))?;
     let justification: String =
         row.try_get("justification").map_err(|e| RepositoryError::Decode(e.to_string()))?;
+    let payload_json: String =
+        row.try_get("payload_json").map_err(|e| RepositoryError::Decode(e.to_string()))?;
     let status_str: String =
         row.try_get("status").map_err(|e| RepositoryError::Decode(e.to_string()))?;
+    let decision_note: Option<String> =
+        row.try_get("decision_note").map_err(|e| RepositoryError::Decode(e.to_string()))?;
     let requested_by: String =
         row.try_get("requested_by").map_err(|e| RepositoryError::Decode(e.to_string()))?;
     let expires_at_str: Option<String> =
@@ -85,9 +95,12 @@ fn row_to_approval(row: &sqlx::sqlite::SqliteRow) -> Result<ApprovalRequest, Rep
         id: ApprovalId(id),
         quote_id: QuoteId(quote_id),
         approver_role,
+        approval_type: parse_approval_type(&approval_type_str)?,
         reason,
         justification,
-        status: parse_status(&status_str),
+        payload_json,
+        status: parse_status(&status_str)?,
+        decision_note,
         requested_by,
         expires_at,
         created_at,
@@ -101,14 +114,8 @@ impl ApprovalRepository for SqlApprovalRepository {
         &self,
         id: &ApprovalId,
     ) -> Result<Option<ApprovalRequest>, RepositoryError> {
-        let row = sqlx::query(
-            "SELECT id, quote_id, approver_role, reason, justification, status,
-                    requested_by, expires_at, created_at, updated_at
-             FROM approval_request WHERE id = ?",
-        )
-        .bind(&id.0)
-        .fetch_optional(&self.pool)
-        .await?;
+        let sql = format!("SELECT {APPROVAL_SELECT_COLUMNS} FROM approval_request WHERE id = ?");
+        let row = sqlx::query(&sql).bind(&id.0).fetch_optional(&self.pool).await?;
 
         match row {
             Some(ref r) => Ok(Some(row_to_approval(r)?)),
@@ -131,15 +138,19 @@ impl ApprovalRepository for SqlApprovalRepository {
         .await?;
 
         sqlx::query(
-            "INSERT INTO approval_request (id, quote_id, approver_role, reason, justification,
-                                           status, requested_by, expires_at, created_at, updated_at,
+            "INSERT INTO approval_request (id, quote_id, approver_role, approval_type, reason,
+                                           justification, payload_json, status, decision_note,
+                                           requested_by, expires_at, created_at, updated_at,
                                            requested_by_sales_rep_id)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                  approver_role = excluded.approver_role,
+                 approval_type = excluded.approval_type,
                  reason = excluded.reason,
                  justification = excluded.justification,
+                 payload_json = excluded.payload_json,
                  status = excluded.status,
+                 decision_note = excluded.decision_note,
                  requested_by = excluded.requested_by,
                  expires_at = excluded.expires_at,
                  requested_by_sales_rep_id =
@@ -149,9 +160,12 @@ impl ApprovalRepository for SqlApprovalRepository {
         .bind(&approval.id.0)
         .bind(&approval.quote_id.0)
         .bind(&approval.approver_role)
+        .bind(approval.approval_type.as_str())
         .bind(&approval.reason)
         .bind(&approval.justification)
+        .bind(&approval.payload_json)
         .bind(status_str)
+        .bind(&approval.decision_note)
         .bind(&approval.requested_by)
         .bind(&expires_at_str)
         .bind(approval.created_at.to_rfc3339())
@@ -167,14 +181,12 @@ impl ApprovalRepository for SqlApprovalRepository {
         &self,
         quote_id: &QuoteId,
     ) -> Result<Vec<ApprovalRequest>, RepositoryError> {
-        let rows: Vec<sqlx::sqlite::SqliteRow> = sqlx::query(
-            "SELECT id, quote_id, approver_role, reason, justification, status,
-                    requested_by, expires_at, created_at, updated_at
-             FROM approval_request WHERE quote_id = ? ORDER BY created_at DESC",
-        )
-        .bind(&quote_id.0)
-        .fetch_all(&self.pool)
-        .await?;
+        let sql = format!(
+            "SELECT {APPROVAL_SELECT_COLUMNS}
+             FROM approval_request WHERE quote_id = ? ORDER BY created_at DESC"
+        );
+        let rows: Vec<sqlx::sqlite::SqliteRow> =
+            sqlx::query(&sql).bind(&quote_id.0).fetch_all(&self.pool).await?;
 
         rows.iter().map(row_to_approval).collect::<Result<Vec<_>, _>>()
     }
@@ -185,30 +197,23 @@ impl ApprovalRepository for SqlApprovalRepository {
         limit: u32,
     ) -> Result<Vec<ApprovalRequest>, RepositoryError> {
         let rows: Vec<sqlx::sqlite::SqliteRow> = if let Some(role) = approver_role {
-            sqlx::query(
-                "SELECT id, quote_id, approver_role, reason, justification, status,
-                        requested_by, expires_at, created_at, updated_at
+            let sql = format!(
+                "SELECT {APPROVAL_SELECT_COLUMNS}
                  FROM approval_request
                  WHERE status = 'pending' AND approver_role = ?
                  ORDER BY created_at ASC
-                 LIMIT ?",
-            )
-            .bind(role)
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?
+                 LIMIT ?"
+            );
+            sqlx::query(&sql).bind(role).bind(limit).fetch_all(&self.pool).await?
         } else {
-            sqlx::query(
-                "SELECT id, quote_id, approver_role, reason, justification, status,
-                        requested_by, expires_at, created_at, updated_at
+            let sql = format!(
+                "SELECT {APPROVAL_SELECT_COLUMNS}
                  FROM approval_request
                  WHERE status = 'pending'
                  ORDER BY created_at ASC
-                 LIMIT ?",
-            )
-            .bind(limit)
-            .fetch_all(&self.pool)
-            .await?
+                 LIMIT ?"
+            );
+            sqlx::query(&sql).bind(limit).fetch_all(&self.pool).await?
         };
 
         rows.iter().map(row_to_approval).collect::<Result<Vec<_>, _>>()
@@ -220,7 +225,9 @@ mod tests {
     use chrono::Utc;
     use rust_decimal::Decimal;
 
-    use quotey_core::domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
+    use quotey_core::domain::approval::{
+        ApprovalId, ApprovalRequest, ApprovalStatus, ApprovalType,
+    };
     use quotey_core::domain::product::ProductId;
     use quotey_core::domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
 
@@ -270,9 +277,12 @@ mod tests {
             id: ApprovalId(id.to_string()),
             quote_id: QuoteId(quote_id.to_string()),
             approver_role: "sales_manager".to_string(),
+            approval_type: ApprovalType::DiscountOverride,
             reason: "Discount exceeds threshold".to_string(),
             justification: "Loyal customer, 3-year history".to_string(),
+            payload_json: "{}".to_string(),
             status: ApprovalStatus::Pending,
+            decision_note: None,
             requested_by: "agent:mcp".to_string(),
             expires_at: Some(now + chrono::Duration::hours(4)),
             created_at: now,
@@ -314,7 +324,10 @@ mod tests {
         assert_eq!(found.id, approval.id);
         assert_eq!(found.quote_id, approval.quote_id);
         assert_eq!(found.approver_role, "sales_manager");
+        assert_eq!(found.approval_type, ApprovalType::DiscountOverride);
         assert_eq!(found.status, ApprovalStatus::Pending);
+        assert_eq!(found.payload_json, "{}");
+        assert!(found.decision_note.is_none());
     }
 
     #[tokio::test]
@@ -375,11 +388,14 @@ mod tests {
 
         let mut updated = approval;
         updated.status = ApprovalStatus::Approved;
+        updated.decision_note = Some("Looks good, approved.".to_string());
         updated.updated_at = Utc::now();
         repo.save(updated).await.expect("upsert");
 
         let found = repo.find_by_id(&ApprovalId("APR-001".to_string())).await.expect("find");
-        assert_eq!(found.unwrap().status, ApprovalStatus::Approved);
+        let found = found.unwrap();
+        assert_eq!(found.status, ApprovalStatus::Approved);
+        assert_eq!(found.decision_note.as_deref(), Some("Looks good, approved."));
     }
 
     #[tokio::test]
@@ -403,5 +419,52 @@ mod tests {
         .expect("load approval sales_rep mapping");
 
         assert_eq!(mapped_rep_id.as_deref(), Some("rep-manager-1"));
+    }
+
+    #[tokio::test]
+    async fn rich_approval_type_round_trips() {
+        let pool = setup().await;
+        insert_quote(&pool, "Q-RICH").await;
+
+        let repo = SqlApprovalRepository::new(pool);
+
+        let mut approval = sample_approval("APR-RICH-1", "Q-RICH");
+        approval.approval_type = ApprovalType::CompetitorMatch;
+        approval.payload_json = serde_json::json!({
+            "competitor": "Acme Corp",
+            "competitor_price_cents": 5000,
+            "our_price_cents": 6000,
+        })
+        .to_string();
+        repo.save(approval).await.expect("save");
+
+        let found = repo
+            .find_by_id(&ApprovalId("APR-RICH-1".to_string()))
+            .await
+            .expect("find")
+            .expect("exists");
+        assert_eq!(found.approval_type, ApprovalType::CompetitorMatch);
+        assert!(found.payload_json.contains("Acme Corp"));
+    }
+
+    #[tokio::test]
+    async fn revision_requested_status_round_trips() {
+        let pool = setup().await;
+        insert_quote(&pool, "Q-REV").await;
+
+        let repo = SqlApprovalRepository::new(pool);
+
+        let mut approval = sample_approval("APR-REV-1", "Q-REV");
+        approval.status = ApprovalStatus::RevisionRequested;
+        approval.decision_note = Some("Please provide competitive intel".to_string());
+        repo.save(approval).await.expect("save");
+
+        let found = repo
+            .find_by_id(&ApprovalId("APR-REV-1".to_string()))
+            .await
+            .expect("find")
+            .expect("exists");
+        assert_eq!(found.status, ApprovalStatus::RevisionRequested);
+        assert_eq!(found.decision_note.as_deref(), Some("Please provide competitive intel"));
     }
 }

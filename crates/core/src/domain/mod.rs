@@ -7,6 +7,7 @@ pub mod customer;
 pub mod dialogue;
 pub mod execution;
 pub mod explanation;
+pub mod integration;
 pub mod negotiation;
 pub mod optimizer;
 pub mod org_settings;

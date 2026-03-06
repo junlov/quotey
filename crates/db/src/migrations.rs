@@ -262,6 +262,22 @@ mod tests {
         "idx_ai_cost_event_quote_id",
         "idx_ai_cost_event_tool_name",
         "idx_ai_cost_event_created_at",
+        // 0039 — outbox dead letter
+        "outbox_dead_letter",
+        "idx_outbox_dl_resolution",
+        "idx_outbox_dl_quote",
+        "idx_outbox_dl_idempotency",
+        // 0040 — rich approval types
+        "idx_approval_request_type",
+        // 0041 — integration config
+        "integration_config",
+        "idx_integration_config_type",
+        "idx_integration_config_adapter",
+        "idx_integration_config_status",
+        // 0042 — audit enrichment
+        "idx_audit_event_entity",
+        "idx_audit_event_action",
+        "idx_audit_event_actor_type",
     ];
 
     async fn managed_object_count(pool: &sqlx::SqlitePool, object_name: &str) -> TestResult<i64> {

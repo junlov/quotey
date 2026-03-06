@@ -29,7 +29,7 @@ use quotey_core::cpq::constraints::{
 };
 use quotey_core::cpq::policy::{evaluate_policy_input, PolicyInput};
 use quotey_core::cpq::pricing::price_quote_with_trace;
-use quotey_core::domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
+use quotey_core::domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus, ApprovalType};
 use quotey_core::domain::product::{Product, ProductId};
 use quotey_core::domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
 use quotey_core::flows::engine::{FlowEngine, NetNewFlow};
@@ -393,9 +393,12 @@ async fn s002_approval_path_policy_violation_approve_deliver() -> TestResult {
         id: ApprovalId("APR-E2E-001".to_string()),
         quote_id: QuoteId("Q-E2E-AP-001".to_string()),
         approver_role: required_role.to_string(),
+        approval_type: ApprovalType::DiscountOverride,
         reason: "Discount exceeds 20% threshold".to_string(),
         justification: "Strategic deal — competitor pricing pressure".to_string(),
+        payload_json: "{}".to_string(),
         status: ApprovalStatus::Pending,
+        decision_note: None,
         requested_by: "e2e-harness".to_string(),
         expires_at: Some(now + chrono::Duration::hours(4)),
         created_at: now,
@@ -504,9 +507,12 @@ async fn s003_rejection_path_policy_violation_denied() -> TestResult {
         id: ApprovalId("APR-E2E-RJ-001".to_string()),
         quote_id: QuoteId("Q-E2E-RJ-001".to_string()),
         approver_role: "vp_finance".to_string(),
+        approval_type: ApprovalType::DiscountOverride,
         reason: "Discount exceeds 30% hard cap".to_string(),
         justification: "Attempted strategic pricing".to_string(),
+        payload_json: "{}".to_string(),
         status: ApprovalStatus::Rejected,
+        decision_note: None,
         requested_by: "e2e-harness".to_string(),
         expires_at: Some(now + chrono::Duration::hours(4)),
         created_at: now,
@@ -1341,9 +1347,12 @@ async fn s013_quote_expiration_from_approval_state() -> TestResult {
         id: ApprovalId("APR-E2E-EXP-001".to_string()),
         quote_id: QuoteId("Q-E2E-EXP-001".to_string()),
         approver_role: "sales_manager".to_string(),
+        approval_type: ApprovalType::DiscountOverride,
         reason: "Discount requires approval".to_string(),
         justification: "Strategic deal".to_string(),
+        payload_json: "{}".to_string(),
         status: ApprovalStatus::Pending,
+        decision_note: None,
         requested_by: "e2e-harness".to_string(),
         expires_at: Some(now - chrono::Duration::hours(1)), // already expired
         created_at: now - chrono::Duration::hours(5),
@@ -1569,12 +1578,15 @@ async fn s014_renewal_expansion_prior_context_discount_approval() -> TestResult 
         id: ApprovalId("APR-E2E-REN-001".to_string()),
         quote_id: QuoteId("Q-E2E-REN-001".to_string()),
         approver_role: required_role.to_string(),
+        approval_type: ApprovalType::DiscountOverride,
         reason: format!(
             "Renewal discount 25% on ${:.2} deal (expansion ${:.2} over prior)",
             pricing.total, expansion_delta
         ),
         justification: "Strategic renewal — customer expanding usage significantly".to_string(),
+        payload_json: "{}".to_string(),
         status: ApprovalStatus::Pending,
+        decision_note: None,
         requested_by: "e2e-harness".to_string(),
         expires_at: Some(now + chrono::Duration::hours(24)),
         created_at: now,
@@ -1945,9 +1957,12 @@ async fn s016_approval_denied_rejected_then_revised_and_reapproved() -> TestResu
         id: ApprovalId("APR-E2E-REJ-001".to_string()),
         quote_id: QuoteId("Q-E2E-REJ-001".to_string()),
         approver_role: "sales_manager".to_string(),
+        approval_type: ApprovalType::DiscountOverride,
         reason: "Discount exceeds threshold".to_string(),
         justification: "Large deal".to_string(),
+        payload_json: "{}".to_string(),
         status: ApprovalStatus::Pending,
+        decision_note: None,
         requested_by: "e2e-harness".to_string(),
         expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
         created_at: Utc::now(),
@@ -2004,9 +2019,12 @@ async fn s016_approval_denied_rejected_then_revised_and_reapproved() -> TestResu
         id: ApprovalId("APR-E2E-REJ-002".to_string()),
         quote_id: QuoteId("Q-E2E-REJ-001".to_string()),
         approver_role: "vp_sales".to_string(),
+        approval_type: ApprovalType::DiscountOverride,
         reason: "Revised discount still exceeds threshold".to_string(),
         justification: "Strategic account retention".to_string(),
+        payload_json: "{}".to_string(),
         status: ApprovalStatus::Approved,
+        decision_note: None,
         requested_by: "e2e-harness".to_string(),
         expires_at: Some(Utc::now() + chrono::Duration::hours(1)),
         created_at: Utc::now(),
@@ -2111,9 +2129,12 @@ async fn s017_revision_after_expired_approval_resets_lifecycle() -> TestResult {
         id: ApprovalId("APR-E2E-EXPREV-001".to_string()),
         quote_id: QuoteId("Q-E2E-EXPREV-001".to_string()),
         approver_role: "sales_manager".to_string(),
+        approval_type: ApprovalType::DiscountOverride,
         reason: "Discount exceeds threshold".to_string(),
         justification: "Large enterprise deal".to_string(),
+        payload_json: "{}".to_string(),
         status: ApprovalStatus::Pending,
+        decision_note: None,
         requested_by: "e2e-harness".to_string(),
         expires_at: Some(Utc::now() - chrono::Duration::hours(1)), // Already expired
         created_at: Utc::now() - chrono::Duration::hours(2),

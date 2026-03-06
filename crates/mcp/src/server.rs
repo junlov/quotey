@@ -1646,6 +1646,40 @@ pub struct OrgAuthorityInput {
     pub discount_pct: f64,
 }
 
+// Integration Adapter Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IntegrationListInput {
+    /// Filter by integration type (crm, notification, pdf, erp). Omit for all.
+    #[serde(default)]
+    pub integration_type: Option<String>,
+    /// If true, only return active integrations (default: false)
+    #[serde(default)]
+    pub active_only: bool,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IntegrationRegisterInput {
+    /// Integration category: crm, notification, pdf, or erp
+    pub integration_type: String,
+    /// Adapter provider: salesforce, hubspot, slack, teams, email, webhook, builtin, docusign, netsuite, none
+    pub adapter_type: String,
+    /// Human-readable name for this integration
+    pub name: String,
+    /// JSON configuration for the adapter (credentials, endpoints, etc.)
+    #[serde(default = "default_adapter_config")]
+    pub adapter_config: String,
+}
+
+fn default_adapter_config() -> String {
+    "{}".to_string()
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct IntegrationTestInput {
+    /// The integration config ID to test connectivity for
+    pub integration_id: String,
+}
+
 fn default_limit() -> u32 {
     DEFAULT_PAGE_LIMIT
 }
@@ -2794,9 +2828,12 @@ impl QuoteyMcpServer {
             id: ApprovalId(approval_id.clone()),
             quote_id: quote.id.clone(),
             approver_role: approver_role.clone(),
+            approval_type: quotey_core::domain::approval::ApprovalType::DiscountOverride,
             reason: format!("Approval requested for quote {}", quote.id.0),
             justification: justification.clone(),
+            payload_json: "{}".to_string(),
             status: ApprovalStatus::Pending,
+            decision_note: None,
             requested_by: "agent:mcp".to_string(),
             expires_at: Some(expires_at),
             created_at: now,
@@ -4370,37 +4407,40 @@ impl QuoteyMcpServer {
 
     // ── Org Hierarchy ─────────────────────────────────────────────────
 
-    #[tool(description = "Get the approval chain for a sales rep. Walks the reports_to hierarchy from the given rep up through managers, VP, and CRO.")]
+    #[tool(
+        description = "Get the approval chain for a sales rep. Walks the reports_to hierarchy from the given rep up through managers, VP, and CRO."
+    )]
     pub async fn org_chain(&self, Parameters(input): Parameters<OrgChainInput>) -> String {
-        use quotey_core::cpq::hierarchy::find_approval_chain;
         use quotey_core::domain::sales_rep::SalesRepId;
         use quotey_db::repositories::SalesRepRepository;
 
+        let rep_id = input.rep_id.trim();
+        if rep_id.is_empty() {
+            return tool_error("VALIDATION_ERROR", "rep_id is required", None);
+        }
+
         let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
 
-        let start_id = SalesRepId(input.rep_id.clone());
+        let start_id = SalesRepId(rep_id.to_string());
         let start = match repo.find_by_id(&start_id).await {
             Ok(Some(rep)) => rep,
             Ok(None) => {
-                return tool_error("VALIDATION_ERROR", &format!("Sales rep '{}' not found", input.rep_id), None);
+                return tool_error(
+                    "VALIDATION_ERROR",
+                    &format!("Sales rep '{rep_id}' not found"),
+                    None,
+                );
             }
             Err(e) => return internal_tool_error(&e),
         };
 
-        let chain = find_approval_chain(&start, |id| {
-            // Synchronous lookup via blocking — hierarchy chains are short (< 20)
-            // and this avoids making find_approval_chain async
-            let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(repo.find_by_id(id))
-                    .ok()
-                    .flatten()
-            })
-        });
+        // Async chain walk (avoids block_in_place)
+        let chain = match walk_chain_async(&repo, start).await {
+            Ok(chain) => chain,
+            Err(e) => return internal_tool_error(&e),
+        };
 
         let items: Vec<serde_json::Value> = chain
-            .chain
             .iter()
             .enumerate()
             .map(|(i, rep)| {
@@ -4416,41 +4456,60 @@ impl QuoteyMcpServer {
             .collect();
 
         let result = serde_json::json!({
-            "rep_id": input.rep_id,
+            "rep_id": rep_id,
             "chain_length": items.len(),
             "chain": items,
         });
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
 
-    #[tool(description = "Find who in the org hierarchy has authority to approve a given discount percentage. Walks up from the specified rep to find the first person with sufficient max_discount_pct.")]
-    pub async fn org_authority(
-        &self,
-        Parameters(input): Parameters<OrgAuthorityInput>,
-    ) -> String {
+    #[tool(
+        description = "Find who in the org hierarchy has authority to approve a given discount percentage. Walks up from the specified rep to find the first person with sufficient max_discount_pct."
+    )]
+    pub async fn org_authority(&self, Parameters(input): Parameters<OrgAuthorityInput>) -> String {
         use quotey_core::cpq::hierarchy::find_authority_for_discount;
         use quotey_core::domain::sales_rep::SalesRepId;
         use quotey_db::repositories::SalesRepRepository;
+        use std::collections::HashMap;
+
+        let rep_id = input.rep_id.trim();
+        if rep_id.is_empty() {
+            return tool_error("VALIDATION_ERROR", "rep_id is required", None);
+        }
+        if !input.discount_pct.is_finite() || !(0.0..=100.0).contains(&input.discount_pct) {
+            return tool_error(
+                "VALIDATION_ERROR",
+                "discount_pct must be a finite percentage between 0 and 100",
+                None,
+            );
+        }
 
         let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
 
-        let start_id = SalesRepId(input.rep_id.clone());
+        let start_id = SalesRepId(rep_id.to_string());
         let start = match repo.find_by_id(&start_id).await {
             Ok(Some(rep)) => rep,
             Ok(None) => {
-                return tool_error("VALIDATION_ERROR", &format!("Sales rep '{}' not found", input.rep_id), None);
+                return tool_error(
+                    "VALIDATION_ERROR",
+                    &format!("Sales rep '{rep_id}' not found"),
+                    None,
+                );
             }
             Err(e) => return internal_tool_error(&e),
         };
 
+        let chain = match walk_chain_async(&repo, start.clone()).await {
+            Ok(chain) => chain,
+            Err(e) => return internal_tool_error(&e),
+        };
+        let mut chain_lookup: HashMap<String, quotey_core::domain::sales_rep::SalesRep> =
+            HashMap::new();
+        for rep in &chain {
+            chain_lookup.insert(rep.id.0.clone(), rep.clone());
+        }
         let authority = find_authority_for_discount(&start, input.discount_pct, |id| {
-            let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
-            tokio::task::block_in_place(|| {
-                tokio::runtime::Handle::current()
-                    .block_on(repo.find_by_id(id))
-                    .ok()
-                    .flatten()
-            })
+            chain_lookup.get(&id.0).cloned()
         });
 
         let chain_items: Vec<serde_json::Value> = authority
@@ -4466,11 +4525,12 @@ impl QuoteyMcpServer {
             })
             .collect();
 
+        let authorizer = authority.authorizer;
         let result = serde_json::json!({
-            "rep_id": input.rep_id,
+            "rep_id": rep_id,
             "requested_discount_pct": input.discount_pct,
-            "authority_found": authority.authorizer.is_some(),
-            "authorizer": authority.authorizer.as_ref().map(|rep| serde_json::json!({
+            "authority_found": authorizer.is_some(),
+            "authorizer": authorizer.as_ref().map(|rep| serde_json::json!({
                 "id": rep.id.0,
                 "name": rep.name,
                 "role": rep.role.as_str(),
@@ -4479,6 +4539,190 @@ impl QuoteyMcpServer {
             "chain_traversed": chain_items,
         });
         serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration Adapter tools
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        name = "integration_list",
+        description = "List registered integration adapters. Optionally filter by integration_type (crm, notification, pdf, erp) and active_only flag."
+    )]
+    pub async fn integration_list(
+        &self,
+        Parameters(input): Parameters<IntegrationListInput>,
+    ) -> String {
+        use quotey_db::repositories::IntegrationConfigRepository;
+        let repo =
+            quotey_db::repositories::SqlIntegrationConfigRepository::new(self.db_pool.clone());
+
+        let configs = if let Some(ref int_type) = input.integration_type {
+            let trimmed = int_type.trim();
+            if quotey_core::domain::integration::IntegrationType::parse_label(trimmed).is_none() {
+                return tool_error(
+                    "VALIDATION_ERROR",
+                    &format!("Unknown integration_type '{trimmed}'. Must be: crm, notification, pdf, erp"),
+                    None,
+                );
+            }
+            match repo.list_by_type(trimmed, input.active_only).await {
+                Ok(list) => list,
+                Err(e) => return internal_tool_error(&e),
+            }
+        } else {
+            match repo.list_all(input.active_only).await {
+                Ok(list) => list,
+                Err(e) => return internal_tool_error(&e),
+            }
+        };
+
+        let items: Vec<serde_json::Value> = configs
+            .iter()
+            .map(|c| {
+                serde_json::json!({
+                    "id": c.id,
+                    "integration_type": c.integration_type.as_str(),
+                    "adapter_type": c.adapter_type.as_str(),
+                    "name": c.name,
+                    "status": c.status.as_str(),
+                    "status_message": c.status_message,
+                })
+            })
+            .collect();
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "count": items.len(),
+            "integrations": items,
+        }))
+        .unwrap_or_default()
+    }
+
+    #[tool(
+        name = "integration_register",
+        description = "Register a new integration adapter. Specify integration_type (crm/notification/pdf/erp), adapter_type (salesforce/hubspot/slack/teams/email/webhook/builtin/docusign/netsuite/none), a human-readable name, and optional adapter_config JSON."
+    )]
+    pub async fn integration_register(
+        &self,
+        Parameters(input): Parameters<IntegrationRegisterInput>,
+    ) -> String {
+        use quotey_core::domain::integration::{
+            AdapterStatus, AdapterType, IntegrationConfig, IntegrationType,
+        };
+        use quotey_db::repositories::IntegrationConfigRepository;
+
+        let int_type_str = input.integration_type.trim();
+        let adp_type_str = input.adapter_type.trim();
+
+        let Some(int_type) = IntegrationType::parse_label(int_type_str) else {
+            return tool_error(
+                "VALIDATION_ERROR",
+                &format!("Unknown integration_type '{int_type_str}'. Must be: crm, notification, pdf, erp"),
+                None,
+            );
+        };
+
+        let Some(adp_type) = AdapterType::parse_label(adp_type_str) else {
+            return tool_error(
+                "VALIDATION_ERROR",
+                &format!("Unknown adapter_type '{adp_type_str}'. Must be: salesforce, hubspot, slack, teams, email, webhook, builtin, docusign, netsuite, none"),
+                None,
+            );
+        };
+
+        let name = input.name.trim();
+        if name.is_empty() {
+            return tool_error("VALIDATION_ERROR", "name is required", None);
+        }
+
+        // Validate adapter_config is valid JSON
+        if serde_json::from_str::<serde_json::Value>(&input.adapter_config).is_err() {
+            return tool_error("VALIDATION_ERROR", "adapter_config must be valid JSON", None);
+        }
+
+        let now = chrono::Utc::now();
+        let id = format!("INT-{:.8}", uuid::Uuid::new_v4());
+        let config = IntegrationConfig {
+            id: id.clone(),
+            integration_type: int_type,
+            adapter_type: adp_type,
+            name: name.to_string(),
+            adapter_config: input.adapter_config,
+            status: AdapterStatus::Active,
+            status_message: None,
+            created_at: now,
+            updated_at: now,
+        };
+
+        let repo =
+            quotey_db::repositories::SqlIntegrationConfigRepository::new(self.db_pool.clone());
+        if let Err(e) = repo.save(config).await {
+            return internal_tool_error(&e);
+        }
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "id": id,
+            "integration_type": int_type_str,
+            "adapter_type": adp_type_str,
+            "name": name,
+            "status": "active",
+        }))
+        .unwrap_or_default()
+    }
+
+    #[tool(
+        name = "integration_test",
+        description = "Test connectivity for a registered integration adapter. Returns health status and latency."
+    )]
+    pub async fn integration_test(
+        &self,
+        Parameters(input): Parameters<IntegrationTestInput>,
+    ) -> String {
+        use quotey_db::repositories::IntegrationConfigRepository;
+
+        let id = input.integration_id.trim();
+        if id.is_empty() {
+            return tool_error("VALIDATION_ERROR", "integration_id is required", None);
+        }
+
+        let repo =
+            quotey_db::repositories::SqlIntegrationConfigRepository::new(self.db_pool.clone());
+
+        let config = match repo.find_by_id(id).await {
+            Ok(Some(c)) => c,
+            Ok(None) => {
+                return tool_error(
+                    "VALIDATION_ERROR",
+                    &format!("Integration '{id}' not found"),
+                    None,
+                );
+            }
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        // Use the NoopAdapter for all adapters for now — concrete adapter
+        // implementations will be registered at runtime by each integration crate.
+        let adapter = quotey_core::services::NoopAdapter;
+        let result = match quotey_core::services::IntegrationAdapter::test(&adapter, &config).await
+        {
+            Ok(r) => r,
+            Err(e) => {
+                // Update status to error in the DB
+                let _ = repo.update_status(id, "error", Some(&e.to_string())).await;
+                return tool_error("ADAPTER_ERROR", &e.to_string(), None);
+            }
+        };
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "integration_id": id,
+            "integration_type": config.integration_type.as_str(),
+            "adapter_type": config.adapter_type.as_str(),
+            "name": config.name,
+            "test_ok": result.ok,
+            "latency_ms": result.latency_ms,
+            "message": result.message,
+        }))
+        .unwrap_or_default()
     }
 }
 
@@ -4537,6 +4781,38 @@ async fn load_policy_thresholds(
     }
 
     thresholds
+}
+
+/// Walk the reports_to chain asynchronously, returning the full chain from start upward.
+async fn walk_chain_async(
+    repo: &quotey_db::repositories::SqlSalesRepRepository,
+    start: quotey_core::domain::sales_rep::SalesRep,
+) -> Result<Vec<quotey_core::domain::sales_rep::SalesRep>, quotey_db::repositories::RepositoryError>
+{
+    use quotey_db::repositories::SalesRepRepository;
+
+    let mut chain = vec![start.clone()];
+    let mut visited = std::collections::HashSet::new();
+    visited.insert(start.id.0.clone());
+
+    let mut current = start;
+    for _ in 0..quotey_core::cpq::hierarchy::MAX_CHAIN_DEPTH {
+        match &current.reports_to {
+            Some(manager_id) if !visited.contains(&manager_id.0) => {
+                visited.insert(manager_id.0.clone());
+                match repo.find_by_id(manager_id).await {
+                    Ok(Some(manager)) => {
+                        chain.push(manager.clone());
+                        current = manager;
+                    }
+                    Ok(None) => break,
+                    Err(error) => return Err(error),
+                }
+            }
+            _ => break,
+        }
+    }
+    Ok(chain)
 }
 
 /// Record an AI cost event for a tool invocation. Non-blocking: logs failures.
@@ -7110,5 +7386,378 @@ mod tests {
         let json = parse_output(&result);
         assert_eq!(json["count"], 1);
         assert_eq!(json["items"][0]["tool_name"].as_str().unwrap(), "quote_price");
+    }
+
+    // ── Org Hierarchy Tests ───────────────────────────────────────────
+
+    async fn seed_rep_hierarchy(pool: &quotey_db::DbPool) {
+        use quotey_core::domain::sales_rep::{SalesRep, SalesRepId, SalesRepRole, SalesRepStatus};
+        use quotey_db::repositories::SalesRepRepository;
+
+        let repo = quotey_db::repositories::SqlSalesRepRepository::new(pool.clone());
+        let now = chrono::Utc::now();
+
+        let make = |id: &str,
+                    name: &str,
+                    role: SalesRepRole,
+                    reports_to: Option<&str>,
+                    max_disc: Option<f64>|
+         -> SalesRep {
+            SalesRep {
+                id: SalesRepId(id.to_string()),
+                external_user_ref: None,
+                name: name.to_string(),
+                email: None,
+                role,
+                title: None,
+                team_id: None,
+                reports_to: reports_to.map(|s| SalesRepId(s.to_string())),
+                status: SalesRepStatus::Active,
+                max_discount_pct: max_disc,
+                auto_approve_threshold_cents: None,
+                capabilities_json: "[]".to_string(),
+                config_json: "{}".to_string(),
+                discount_budget_monthly_cents: 0,
+                spent_discount_cents: 0,
+                created_at: now,
+                updated_at: now,
+            }
+        };
+
+        repo.save(make("cro-1", "CRO", SalesRepRole::Cro, None, Some(100.0))).await.expect("cro");
+        repo.save(make("vp-1", "VP Sales", SalesRepRole::Vp, Some("cro-1"), Some(30.0)))
+            .await
+            .expect("vp");
+        repo.save(make("mgr-1", "Manager", SalesRepRole::Manager, Some("vp-1"), Some(20.0)))
+            .await
+            .expect("mgr");
+        repo.save(make("ae-1", "Account Exec", SalesRepRole::Ae, Some("mgr-1"), Some(10.0)))
+            .await
+            .expect("ae");
+    }
+
+    #[tokio::test]
+    async fn org_chain_returns_full_hierarchy() {
+        let pool = test_db().await;
+        seed_rep_hierarchy(&pool).await;
+        let srv = server(pool);
+
+        let result = srv.org_chain(Parameters(OrgChainInput { rep_id: "ae-1".to_string() })).await;
+        let json = parse_output(&result);
+        assert_eq!(json["chain_length"], 4);
+        assert_eq!(json["chain"][0]["id"].as_str().unwrap(), "ae-1");
+        assert_eq!(json["chain"][1]["id"].as_str().unwrap(), "mgr-1");
+        assert_eq!(json["chain"][2]["id"].as_str().unwrap(), "vp-1");
+        assert_eq!(json["chain"][3]["id"].as_str().unwrap(), "cro-1");
+    }
+
+    #[tokio::test]
+    async fn org_chain_returns_one_for_top_level() {
+        let pool = test_db().await;
+        seed_rep_hierarchy(&pool).await;
+        let srv = server(pool);
+
+        let result = srv.org_chain(Parameters(OrgChainInput { rep_id: "cro-1".to_string() })).await;
+        let json = parse_output(&result);
+        assert_eq!(json["chain_length"], 1);
+    }
+
+    #[tokio::test]
+    async fn org_chain_not_found() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv.org_chain(Parameters(OrgChainInput { rep_id: "ghost".to_string() })).await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn org_chain_rejects_blank_rep_id() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv.org_chain(Parameters(OrgChainInput { rep_id: "   ".to_string() })).await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn org_authority_finds_manager_for_15_pct() {
+        let pool = test_db().await;
+        seed_rep_hierarchy(&pool).await;
+        let srv = server(pool);
+
+        let result = srv
+            .org_authority(Parameters(OrgAuthorityInput {
+                rep_id: "ae-1".to_string(),
+                discount_pct: 15.0,
+            }))
+            .await;
+        let json = parse_output(&result);
+        assert_eq!(json["authority_found"], true);
+        assert_eq!(json["authorizer"]["id"].as_str().unwrap(), "mgr-1");
+    }
+
+    #[tokio::test]
+    async fn org_authority_finds_vp_for_25_pct() {
+        let pool = test_db().await;
+        seed_rep_hierarchy(&pool).await;
+        let srv = server(pool);
+
+        let result = srv
+            .org_authority(Parameters(OrgAuthorityInput {
+                rep_id: "ae-1".to_string(),
+                discount_pct: 25.0,
+            }))
+            .await;
+        let json = parse_output(&result);
+        assert_eq!(json["authority_found"], true);
+        assert_eq!(json["authorizer"]["id"].as_str().unwrap(), "vp-1");
+    }
+
+    #[tokio::test]
+    async fn org_authority_ae_approves_own_small_discount() {
+        let pool = test_db().await;
+        seed_rep_hierarchy(&pool).await;
+        let srv = server(pool);
+
+        let result = srv
+            .org_authority(Parameters(OrgAuthorityInput {
+                rep_id: "ae-1".to_string(),
+                discount_pct: 8.0,
+            }))
+            .await;
+        let json = parse_output(&result);
+        assert_eq!(json["authority_found"], true);
+        assert_eq!(json["authorizer"]["id"].as_str().unwrap(), "ae-1");
+    }
+
+    #[tokio::test]
+    async fn org_authority_not_found_for_nonexistent_rep() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .org_authority(Parameters(OrgAuthorityInput {
+                rep_id: "ghost".to_string(),
+                discount_pct: 10.0,
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn org_authority_rejects_out_of_range_discount() {
+        let pool = test_db().await;
+        seed_rep_hierarchy(&pool).await;
+        let srv = server(pool);
+
+        let result = srv
+            .org_authority(Parameters(OrgAuthorityInput {
+                rep_id: "ae-1".to_string(),
+                discount_pct: 101.0,
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn org_authority_rejects_blank_rep_id() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .org_authority(Parameters(OrgAuthorityInput {
+                rep_id: " ".to_string(),
+                discount_pct: 10.0,
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    // -----------------------------------------------------------------------
+    // Integration adapter tests
+    // -----------------------------------------------------------------------
+
+    #[tokio::test]
+    async fn integration_list_empty() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .integration_list(Parameters(IntegrationListInput {
+                integration_type: None,
+                active_only: false,
+            }))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["count"], 0);
+    }
+
+    #[tokio::test]
+    async fn integration_register_and_list() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .integration_register(Parameters(IntegrationRegisterInput {
+                integration_type: "crm".to_string(),
+                adapter_type: "salesforce".to_string(),
+                name: "SF Production".to_string(),
+                adapter_config: r#"{"instance_url":"https://example.my.salesforce.com"}"#
+                    .to_string(),
+            }))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(v["id"].as_str().unwrap().starts_with("INT-"));
+        assert_eq!(v["integration_type"], "crm");
+        assert_eq!(v["adapter_type"], "salesforce");
+        assert_eq!(v["status"], "active");
+
+        // List by type
+        let list_result = srv
+            .integration_list(Parameters(IntegrationListInput {
+                integration_type: Some("crm".to_string()),
+                active_only: false,
+            }))
+            .await;
+        let lv: serde_json::Value = serde_json::from_str(&list_result).unwrap();
+        assert_eq!(lv["count"], 1);
+        assert_eq!(lv["integrations"][0]["name"], "SF Production");
+    }
+
+    #[tokio::test]
+    async fn integration_register_invalid_type() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .integration_register(Parameters(IntegrationRegisterInput {
+                integration_type: "invalid".to_string(),
+                adapter_type: "salesforce".to_string(),
+                name: "Test".to_string(),
+                adapter_config: "{}".to_string(),
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn integration_register_invalid_adapter() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .integration_register(Parameters(IntegrationRegisterInput {
+                integration_type: "crm".to_string(),
+                adapter_type: "invalid".to_string(),
+                name: "Test".to_string(),
+                adapter_config: "{}".to_string(),
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn integration_register_invalid_json_config() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .integration_register(Parameters(IntegrationRegisterInput {
+                integration_type: "pdf".to_string(),
+                adapter_type: "builtin".to_string(),
+                name: "PDF".to_string(),
+                adapter_config: "not json".to_string(),
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn integration_test_connectivity() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        // Register first
+        let reg = srv
+            .integration_register(Parameters(IntegrationRegisterInput {
+                integration_type: "notification".to_string(),
+                adapter_type: "none".to_string(),
+                name: "Noop".to_string(),
+                adapter_config: "{}".to_string(),
+            }))
+            .await;
+        let rv: serde_json::Value = serde_json::from_str(&reg).unwrap();
+        let id = rv["id"].as_str().unwrap().to_string();
+
+        // Test connectivity
+        let result = srv
+            .integration_test(Parameters(IntegrationTestInput {
+                integration_id: id.clone(),
+            }))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["test_ok"], true);
+        assert_eq!(v["integration_id"], id);
+    }
+
+    #[tokio::test]
+    async fn integration_test_not_found() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .integration_test(Parameters(IntegrationTestInput {
+                integration_id: "NOPE".to_string(),
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn integration_list_filters_by_type() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        // Register CRM and PDF
+        srv.integration_register(Parameters(IntegrationRegisterInput {
+            integration_type: "crm".to_string(),
+            adapter_type: "hubspot".to_string(),
+            name: "HS".to_string(),
+            adapter_config: "{}".to_string(),
+        }))
+        .await;
+        srv.integration_register(Parameters(IntegrationRegisterInput {
+            integration_type: "pdf".to_string(),
+            adapter_type: "builtin".to_string(),
+            name: "PDF".to_string(),
+            adapter_config: "{}".to_string(),
+        }))
+        .await;
+
+        // Filter by crm
+        let result = srv
+            .integration_list(Parameters(IntegrationListInput {
+                integration_type: Some("crm".to_string()),
+                active_only: false,
+            }))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["integrations"][0]["adapter_type"], "hubspot");
+    }
+
+    #[tokio::test]
+    async fn integration_list_invalid_type_rejected() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .integration_list(Parameters(IntegrationListInput {
+                integration_type: Some("bogus".to_string()),
+                active_only: false,
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
     }
 }

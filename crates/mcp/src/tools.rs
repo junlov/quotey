@@ -38,6 +38,9 @@ pub struct SettingsTools;
 /// Cost tools category
 pub struct CostTools;
 
+/// Org hierarchy tools category
+pub struct OrgTools;
+
 /// Tool category trait
 pub trait ToolCategory {
     /// Category name
@@ -100,12 +103,7 @@ impl ToolCategory for LockTools {
         "lock"
     }
     fn tool_names() -> &'static [&'static str] {
-        &[
-            "quote_lock",
-            "quote_unlock",
-            "quote_force_unlock",
-            "quote_lock_status",
-        ]
+        &["quote_lock", "quote_unlock", "quote_force_unlock", "quote_lock_status"]
     }
 }
 
@@ -124,6 +122,27 @@ impl ToolCategory for CostTools {
     }
     fn tool_names() -> &'static [&'static str] {
         &["cost_summary", "cost_list"]
+    }
+}
+
+impl ToolCategory for OrgTools {
+    fn category_name() -> &'static str {
+        "org"
+    }
+    fn tool_names() -> &'static [&'static str] {
+        &["org_chain", "org_authority"]
+    }
+}
+
+/// Integration tools category
+pub struct IntegrationTools;
+
+impl ToolCategory for IntegrationTools {
+    fn category_name() -> &'static str {
+        "integration"
+    }
+    fn tool_names() -> &'static [&'static str] {
+        &["integration_list", "integration_register", "integration_test"]
     }
 }
 
@@ -158,6 +177,13 @@ pub const ALL_TOOL_NAMES: &[&str] = &[
     // Cost
     "cost_summary",
     "cost_list",
+    // Org Hierarchy
+    "org_chain",
+    "org_authority",
+    // Integration
+    "integration_list",
+    "integration_register",
+    "integration_test",
 ];
 
 /// Total number of tools in the registry
@@ -177,6 +203,8 @@ mod tests {
         assert_eq!(LockTools::tool_names().len(), 4);
         assert_eq!(SettingsTools::tool_names().len(), 3);
         assert_eq!(CostTools::tool_names().len(), 2);
-        assert_eq!(TOTAL_TOOLS, 21);
+        assert_eq!(OrgTools::tool_names().len(), 2);
+        assert_eq!(IntegrationTools::tool_names().len(), 3);
+        assert_eq!(TOTAL_TOOLS, 26);
     }
 }

@@ -8,6 +8,7 @@ pub mod counteroffer;
 pub mod discount_policy_builder;
 pub mod draft_quote_builder;
 pub mod escalation;
+pub mod hierarchy;
 pub mod negotiation_audit;
 pub mod policy;
 pub mod precedent;

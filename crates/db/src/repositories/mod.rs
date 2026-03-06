@@ -23,6 +23,7 @@ pub mod customer;
 pub mod dialogue;
 pub mod execution_queue;
 pub mod explanation;
+pub mod integration_config;
 pub mod memory;
 pub mod negotiation;
 pub mod optimizer;
@@ -46,6 +47,7 @@ pub use customer::SqlCustomerRepository;
 pub use dialogue::{DialogueSessionRepository, SqlDialogueSessionRepository};
 pub use execution_queue::SqlExecutionQueueRepository;
 pub use explanation::{ExplanationRepository, SqlExplanationRepository};
+pub use integration_config::{IntegrationConfigRepository, SqlIntegrationConfigRepository};
 pub use memory::{
     InMemoryApprovalRepository, InMemoryExecutionQueueRepository, InMemoryIdempotencyRepository,
     InMemoryPolicyOptimizerRepository, InMemoryProductRepository, InMemoryQuoteRepository,
