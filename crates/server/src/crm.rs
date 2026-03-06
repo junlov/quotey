@@ -213,6 +213,8 @@ struct SyncEventPayloadRequest {
     direction: Option<String>,
     #[serde(default)]
     provider: Option<String>,
+    #[serde(default)]
+    event_type: Option<String>,
 }
 
 #[derive(Debug, Serialize)]
@@ -228,6 +230,23 @@ struct SyncAttempt {
     status: String,
     message: String,
     attempts: i32,
+}
+
+#[derive(Debug, Deserialize)]
+struct BatchSyncQuery {
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct BatchSyncResponse {
+    processed: usize,
+    succeeded: usize,
+    failed: usize,
+    skipped: usize,
+    provider_results: Vec<SyncAttempt>,
 }
 
 #[derive(Debug, Serialize)]
@@ -1015,6 +1034,7 @@ pub fn router(db_pool: DbPool, config: CrmConfig) -> Router {
     Router::new()
         .route("/api/v1/crm/connect/{provider}", get(start_oauth))
         .route("/api/v1/crm/oauth/{provider}/callback", get(oauth_callback))
+        .route("/api/v1/crm/sync/batch", post(batch_retry_quotey_sync_events))
         .route("/api/v1/crm/sync/{quote_id}", post(sync_quote_to_crm))
         .route("/api/v1/crm/mappings/catalog", get(list_mapping_catalog))
         .route("/api/v1/crm/mappings", get(list_mappings).post(upsert_mappings))
@@ -1076,7 +1096,7 @@ async fn crm_state_guard(
 }
 
 fn next_retry_delay_seconds(status: &str, attempts: i32) -> Option<i64> {
-    if !matches!(status, "failed" | "retrying" | "skipped") {
+    if !matches!(status, "queued" | "failed" | "retrying" | "skipped") {
         return None;
     }
     if attempts >= MAX_SYNC_ATTEMPTS {
@@ -1090,6 +1110,70 @@ fn next_retry_delay_seconds(status: &str, attempts: i32) -> Option<i64> {
         delay = delay.saturating_mul(2);
     }
     Some(delay.min(CRM_SYNC_MAX_RETRY_DELAY_SECONDS))
+}
+
+#[derive(Debug, Clone)]
+struct OutboundSyncSemantics {
+    event_type: String,
+    sync_action: String,
+}
+
+fn outbound_sync_semantics_for_status(status: Option<&str>) -> OutboundSyncSemantics {
+    let normalized = status.unwrap_or_default().trim().to_ascii_lowercase();
+    match normalized.as_str() {
+        "draft" => OutboundSyncSemantics {
+            event_type: "quote_created".to_string(),
+            sync_action: "create_opportunity".to_string(),
+        },
+        "finalized" => OutboundSyncSemantics {
+            event_type: "quote_finalized".to_string(),
+            sync_action: "update_amount_stage".to_string(),
+        },
+        "approved" => OutboundSyncSemantics {
+            event_type: "quote_approved".to_string(),
+            sync_action: "post_approval".to_string(),
+        },
+        "rejected" => OutboundSyncSemantics {
+            event_type: "quote_rejected".to_string(),
+            sync_action: "post_rejection".to_string(),
+        },
+        "expired" => OutboundSyncSemantics {
+            event_type: "quote_expired".to_string(),
+            sync_action: "update_stage".to_string(),
+        },
+        _ => OutboundSyncSemantics {
+            event_type: "quote_updated".to_string(),
+            sync_action: "update_quote".to_string(),
+        },
+    }
+}
+
+fn normalize_outbound_event_type_override(raw: Option<&str>) -> Option<String> {
+    let value = raw?.trim();
+    if value.is_empty() {
+        return None;
+    }
+
+    let normalized: String = value
+        .chars()
+        .map(|ch| {
+            if ch.is_ascii_alphanumeric() {
+                ch.to_ascii_lowercase()
+            } else if ch == '-' || ch == '_' || ch == ' ' {
+                '_'
+            } else {
+                '\0'
+            }
+        })
+        .filter(|ch| *ch != '\0')
+        .collect();
+
+    let normalized = normalized.trim_matches('_').to_string();
+    if normalized.is_empty() {
+        None
+    } else {
+        Some(normalized)
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1131,7 +1215,7 @@ fn crm_sync_queue_status(task_state: &ExecutionTaskState) -> &'static str {
 }
 
 fn sync_status_is_retryable(status: &str) -> bool {
-    matches!(status, "failed" | "retrying" | "skipped")
+    matches!(status, "queued" | "failed" | "retrying" | "skipped")
 }
 
 fn classify_retry_policy(error: &str) -> RetryPolicy {
@@ -1344,11 +1428,6 @@ async fn sync_quote_to_crm(
         ));
     }
 
-    let mut payload = fetch_quote_payload(&state, &quote_id).await?;
-    let quote_line_payload =
-        fetch_quote_lines_payload(&state, &quote_id).await.unwrap_or_else(|_| json!([]));
-    payload["lines"] = quote_line_payload;
-
     let selected_provider = query.provider.as_deref().and_then(CrmProvider::parse);
     let providers = list_connected_integrations(&state, selected_provider).await?;
 
@@ -1366,12 +1445,13 @@ async fn sync_quote_to_crm(
 
     let mut results = Vec::with_capacity(providers.len());
     for integration in providers {
-        let mappings = fetch_mappings(&state, direction, Some(integration.provider)).await?;
-        let mut event_payload =
-            map_quote_payload_for_provider(&payload, &integration.provider, &mappings);
-        event_payload["provider"] = json!(integration.provider.as_str());
-        event_payload["crm_account_id"] = json!(integration.crm_account_id);
-        event_payload["quote_id"] = json!(&quote_id);
+        let (event_payload, semantics) = build_outbound_sync_payload(
+            &state,
+            &integration,
+            &quote_id,
+            query.event_type.as_deref(),
+        )
+        .await?;
 
         let event_id = format!("CRMES-{}", Uuid::new_v4().simple());
         create_sync_event(
@@ -1379,7 +1459,7 @@ async fn sync_quote_to_crm(
             &event_id,
             integration.provider,
             direction,
-            "quote_sync",
+            semantics.event_type.as_str(),
             Some(&quote_id),
             Some("quote"),
             Some(&quote_id),
@@ -1396,7 +1476,7 @@ async fn sync_quote_to_crm(
             &event_id,
             quote_id.as_str(),
             direction,
-            "quote_sync",
+            semantics.event_type.as_str(),
             &event_payload,
             1,
             "queued",
@@ -1929,7 +2009,8 @@ async fn retry_sync_event(
         return Err((
             StatusCode::CONFLICT,
             Json(CrmError {
-                error: "only failed, retrying, or skipped events can be retried".to_string(),
+                error: "only queued, failed, retrying, or skipped events can be retried"
+                    .to_string(),
             }),
         ));
     }
@@ -1950,14 +2031,19 @@ async fn retry_sync_event(
 
     match direction {
         CrmDirection::QuoteyToCrm => {
-            let quote_id = event.quote_id.as_deref().ok_or_else(|| {
-                (
-                    StatusCode::BAD_REQUEST,
-                    Json(CrmError {
-                        error: "quotey_to_crm retry requires quote_id in event record".to_string(),
-                    }),
-                )
-            })?;
+            let quote_id = event
+                .quote_id
+                .as_deref()
+                .or_else(|| payload.get("quote_id").and_then(Value::as_str))
+                .ok_or_else(|| {
+                    (
+                        StatusCode::BAD_REQUEST,
+                        Json(CrmError {
+                            error: "quotey_to_crm retry requires quote_id in event record"
+                                .to_string(),
+                        }),
+                    )
+                })?;
 
             let integrations = list_connected_integrations(&state, Some(provider)).await?;
             if integrations.is_empty() {
@@ -1976,14 +2062,23 @@ async fn retry_sync_event(
                         }),
                     )
                 })?;
+                let (refresh_payload, semantics) =
+                    build_outbound_sync_payload(&state, &integration, quote_id, None).await?;
+                update_sync_event_payload(
+                    &state,
+                    &event_id,
+                    semantics.event_type.as_str(),
+                    &refresh_payload,
+                )
+                .await?;
                 let _ = run_crm_sync_task(
                     &state,
                     &integration,
                     &event_id,
                     quote_id,
                     direction,
-                    &event.event_type,
-                    &payload,
+                    semantics.event_type.as_str(),
+                    &refresh_payload,
                     next_attempt,
                     "queued",
                     None,
@@ -2073,6 +2168,98 @@ async fn retry_sync_event(
         created_at: event.created_at,
         updated_at: event.updated_at,
         completed_at: event.completed_at,
+    }))
+}
+
+async fn batch_retry_quotey_sync_events(
+    State(state): State<CrmState>,
+    Query(query): Query<BatchSyncQuery>,
+) -> Result<Json<BatchSyncResponse>, (StatusCode, Json<CrmError>)> {
+    crm_state_guard(&HeaderMap::new(), &state, None, false).await?;
+    let provider = query.provider.as_deref().map(parse_provider).transpose()?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+
+    let rows = if let Some(provider) = provider {
+        sqlx::query(
+            "SELECT id\n             FROM crm_sync_event\n             WHERE direction = 'quotey_to_crm'\n               AND provider = ?\n               AND status IN ('queued', 'failed', 'retrying', 'skipped')\n               AND attempts < ?\n             ORDER BY created_at ASC\n             LIMIT ?",
+        )
+        .bind(provider.as_str())
+        .bind(MAX_SYNC_ATTEMPTS)
+        .bind(limit)
+        .fetch_all(&state.db_pool)
+        .await
+        .map_err(db_error)?
+    } else {
+        sqlx::query(
+            "SELECT id\n             FROM crm_sync_event\n             WHERE direction = 'quotey_to_crm'\n               AND status IN ('queued', 'failed', 'retrying', 'skipped')\n               AND attempts < ?\n             ORDER BY created_at ASC\n             LIMIT ?",
+        )
+        .bind(MAX_SYNC_ATTEMPTS)
+        .bind(limit)
+        .fetch_all(&state.db_pool)
+        .await
+        .map_err(db_error)?
+    };
+
+    let mut results = Vec::with_capacity(rows.len());
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+
+    for row in rows {
+        let event_id: String = row.try_get("id").unwrap_or_default();
+        if event_id.is_empty() {
+            continue;
+        }
+
+        match retry_sync_event(
+            Path(SyncRetryPath { event_id: event_id.clone() }),
+            State(state.clone()),
+        )
+        .await
+        {
+            Ok(Json(replayed)) => {
+                let message = replayed.error_message.clone().unwrap_or_else(|| {
+                    if replayed.status == "success" {
+                        "batch replay completed".to_string()
+                    } else {
+                        format!("batch replay finished with status `{}`", replayed.status)
+                    }
+                });
+
+                match replayed.status.as_str() {
+                    "success" => succeeded += 1,
+                    "queued" | "running" | "retrying" => succeeded += 1,
+                    "skipped" => skipped += 1,
+                    _ => failed += 1,
+                }
+
+                results.push(SyncAttempt {
+                    provider: replayed.provider,
+                    event_id: replayed.id,
+                    status: replayed.status,
+                    message,
+                    attempts: replayed.attempts,
+                });
+            }
+            Err((status, Json(err))) => {
+                failed += 1;
+                results.push(SyncAttempt {
+                    provider: provider.map(|p| p.as_str().to_string()).unwrap_or_default(),
+                    event_id,
+                    status: "failed".to_string(),
+                    message: format!("batch replay failed ({}): {}", status.as_u16(), err.error),
+                    attempts: 0,
+                });
+            }
+        }
+    }
+
+    Ok(Json(BatchSyncResponse {
+        processed: results.len(),
+        succeeded,
+        failed,
+        skipped,
+        provider_results: results,
     }))
 }
 
@@ -2430,6 +2617,60 @@ async fn fetch_quote_lines_payload(
         })
         .collect();
     Ok(json!(rows))
+}
+
+async fn build_outbound_sync_payload(
+    state: &CrmState,
+    integration: &CrmIntegration,
+    quote_id: &str,
+    event_type_override: Option<&str>,
+) -> Result<(Value, OutboundSyncSemantics), (StatusCode, Json<CrmError>)> {
+    let mut payload = fetch_quote_payload(state, quote_id).await?;
+    let quote_line_payload =
+        fetch_quote_lines_payload(state, quote_id).await.unwrap_or_else(|_| json!([]));
+    payload["lines"] = quote_line_payload;
+
+    let mappings =
+        fetch_mappings(state, CrmDirection::QuoteyToCrm, Some(integration.provider)).await?;
+    let mut event_payload =
+        map_quote_payload_for_provider(&payload, &integration.provider, &mappings);
+
+    let mut semantics =
+        outbound_sync_semantics_for_status(payload.get("status").and_then(Value::as_str));
+    if let Some(override_event_type) = normalize_outbound_event_type_override(event_type_override) {
+        event_payload["event_type"] = json!(override_event_type.clone());
+        semantics.event_type = override_event_type;
+    } else {
+        event_payload["event_type"] = json!(semantics.event_type.as_str());
+    }
+
+    event_payload["provider"] = json!(integration.provider.as_str());
+    event_payload["crm_account_id"] = json!(integration.crm_account_id);
+    event_payload["quote_id"] = json!(quote_id);
+    event_payload["sync_action"] = json!(semantics.sync_action.as_str());
+    event_payload["conflict_resolution"] = json!("quotey_wins");
+    event_payload["source_of_truth"] = json!("quotey");
+
+    Ok((event_payload, semantics))
+}
+
+async fn update_sync_event_payload(
+    state: &CrmState,
+    event_id: &str,
+    event_type: &str,
+    payload: &Value,
+) -> Result<(), (StatusCode, Json<CrmError>)> {
+    sqlx::query(
+        "UPDATE crm_sync_event\n         SET event_type = ?, payload_json = ?, updated_at = ?\n         WHERE id = ?",
+    )
+    .bind(event_type)
+    .bind(payload.to_string())
+    .bind(Utc::now().to_rfc3339())
+    .bind(event_id)
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+    Ok(())
 }
 
 fn parse_provider(raw: &str) -> Result<CrmProvider, (StatusCode, Json<CrmError>)> {
@@ -3286,10 +3527,14 @@ mod tests {
     use chrono::{Duration, Utc};
     use quotey_core::config::CrmConfig;
     use quotey_db::{connect_with_settings, migrations};
+    use serde_json::Value;
+    use sqlx::Row;
 
     use super::{
-        encode_query, fetch_and_reserve_oauth_state, oauth_callback, start_oauth, CrmProvider,
-        CrmRuntimeConfig, CrmState, OAuthCallbackQuery, OAuthConnectRequest,
+        batch_retry_quotey_sync_events, encode_query, fetch_and_reserve_oauth_state,
+        oauth_callback, outbound_sync_semantics_for_status, retry_sync_event, start_oauth,
+        sync_quote_to_crm, BatchSyncQuery, CrmProvider, CrmRuntimeConfig, CrmState,
+        OAuthCallbackQuery, OAuthConnectRequest, SyncEventPayloadRequest,
     };
 
     async fn setup_state() -> CrmState {
@@ -3308,6 +3553,57 @@ mod tests {
             hubspot_client_secret: Some("hs-client-secret".to_string()),
         };
         CrmState { db_pool, config: CrmRuntimeConfig::from(&crm), client: reqwest::Client::new() }
+    }
+
+    async fn seed_connected_integration(state: &CrmState, provider: &str) {
+        let now = Utc::now().to_rfc3339();
+        let expires_at = (Utc::now() + Duration::days(30)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO crm_integration
+                (id, provider, status, crm_account_id, instance_url, access_token, refresh_token, token_type, scope, token_expires_at, last_error, created_at, updated_at)
+             VALUES
+                (?, ?, 'connected', ?, 'https://example.crm.local', 'token-123', NULL, 'Bearer', NULL, ?, NULL, ?, ?)",
+        )
+        .bind(format!("CRMINT-{provider}-test"))
+        .bind(provider)
+        .bind(format!("acct-{provider}"))
+        .bind(&expires_at)
+        .bind(&now)
+        .bind(&now)
+        .execute(&state.db_pool)
+        .await
+        .expect("seed crm integration");
+    }
+
+    async fn seed_quote_with_line(state: &CrmState, quote_id: &str, status: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO quote
+                (id, status, currency, created_by, account_id, deal_id, notes, version, term_months, created_at, updated_at)
+             VALUES
+                (?, ?, 'USD', 'test-rep', 'A-001', 'D-001', 'seed quote', 1, 12, ?, ?)",
+        )
+        .bind(quote_id)
+        .bind(status)
+        .bind(&now)
+        .bind(&now)
+        .execute(&state.db_pool)
+        .await
+        .expect("seed quote");
+
+        sqlx::query(
+            "INSERT INTO quote_line
+                (id, quote_id, product_id, quantity, unit_price, subtotal, discount_pct, notes, created_at, updated_at)
+             VALUES
+                (?, ?, 'plan-pro', 2, 100.0, 200.0, 0.0, 'line note', ?, ?)",
+        )
+        .bind(format!("QL-{quote_id}"))
+        .bind(quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&state.db_pool)
+        .await
+        .expect("seed quote line");
     }
 
     #[tokio::test]
@@ -3514,6 +3810,195 @@ mod tests {
                 .await
                 .expect("state row should exist");
         assert!(used, "matched provider should consume oauth state token");
+
+        state.db_pool.close().await;
+    }
+
+    #[test]
+    fn outbound_sync_semantics_maps_required_lifecycle_events() {
+        let created = outbound_sync_semantics_for_status(Some("draft"));
+        assert_eq!(created.event_type, "quote_created");
+        assert_eq!(created.sync_action, "create_opportunity");
+
+        let finalized = outbound_sync_semantics_for_status(Some("finalized"));
+        assert_eq!(finalized.event_type, "quote_finalized");
+        assert_eq!(finalized.sync_action, "update_amount_stage");
+
+        let approved = outbound_sync_semantics_for_status(Some("approved"));
+        assert_eq!(approved.event_type, "quote_approved");
+        assert_eq!(approved.sync_action, "post_approval");
+
+        let rejected = outbound_sync_semantics_for_status(Some("rejected"));
+        assert_eq!(rejected.event_type, "quote_rejected");
+        assert_eq!(rejected.sync_action, "post_rejection");
+
+        let expired = outbound_sync_semantics_for_status(Some("expired"));
+        assert_eq!(expired.event_type, "quote_expired");
+        assert_eq!(expired.sync_action, "update_stage");
+    }
+
+    #[tokio::test]
+    async fn sync_quote_to_crm_persists_lifecycle_event_and_conflict_policy() {
+        let state = setup_state().await;
+        seed_connected_integration(&state, "salesforce").await;
+        seed_quote_with_line(&state, "Q-CRM-001", "draft").await;
+
+        let Json(response) = sync_quote_to_crm(
+            Path("Q-CRM-001".to_string()),
+            State(state.clone()),
+            Query(SyncEventPayloadRequest {
+                direction: None,
+                provider: Some("salesforce".to_string()),
+                event_type: None,
+            }),
+        )
+        .await
+        .expect("outbound sync should succeed");
+
+        assert_eq!(response.provider_results.len(), 1);
+        let attempt = response.provider_results.first().expect("provider attempt");
+        assert_eq!(attempt.status, "success");
+
+        let row = sqlx::query("SELECT event_type, payload_json FROM crm_sync_event WHERE id = ?")
+            .bind(&attempt.event_id)
+            .fetch_one(&state.db_pool)
+            .await
+            .expect("fetch sync event");
+
+        let event_type: String = row.try_get("event_type").expect("event_type");
+        let payload_json: String = row.try_get("payload_json").expect("payload_json");
+        let payload: Value = serde_json::from_str(&payload_json).expect("parse payload json");
+
+        assert_eq!(event_type, "quote_created");
+        assert_eq!(
+            payload.get("sync_action").and_then(Value::as_str).expect("sync_action field"),
+            "create_opportunity"
+        );
+        assert_eq!(
+            payload
+                .get("conflict_resolution")
+                .and_then(Value::as_str)
+                .expect("conflict_resolution field"),
+            "quotey_wins"
+        );
+        assert_eq!(
+            payload.get("source_of_truth").and_then(Value::as_str).expect("source_of_truth field"),
+            "quotey"
+        );
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn retry_sync_event_refreshes_outbound_payload_from_latest_quote_state() {
+        let state = setup_state().await;
+        seed_connected_integration(&state, "salesforce").await;
+        seed_quote_with_line(&state, "Q-CRM-002", "draft").await;
+
+        let Json(initial) = sync_quote_to_crm(
+            Path("Q-CRM-002".to_string()),
+            State(state.clone()),
+            Query(SyncEventPayloadRequest {
+                direction: None,
+                provider: Some("salesforce".to_string()),
+                event_type: None,
+            }),
+        )
+        .await
+        .expect("initial outbound sync");
+        let event_id = initial.provider_results.first().expect("provider result").event_id.clone();
+
+        sqlx::query("UPDATE quote SET status = 'finalized', notes = 'latest snapshot', updated_at = ? WHERE id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind("Q-CRM-002")
+            .execute(&state.db_pool)
+            .await
+            .expect("update quote status to finalized");
+
+        sqlx::query("UPDATE crm_sync_event SET status = 'failed', attempts = 1, error_message = 'simulated failure' WHERE id = ?")
+            .bind(&event_id)
+            .execute(&state.db_pool)
+            .await
+            .expect("mark sync event retryable");
+
+        let Json(retried) = retry_sync_event(
+            Path(super::SyncRetryPath { event_id: event_id.clone() }),
+            State(state.clone()),
+        )
+        .await
+        .expect("retry should succeed");
+
+        assert_eq!(retried.event_type, "quote_finalized");
+        assert_eq!(retried.status, "success");
+
+        let row = sqlx::query("SELECT event_type, payload_json FROM crm_sync_event WHERE id = ?")
+            .bind(&event_id)
+            .fetch_one(&state.db_pool)
+            .await
+            .expect("fetch retried sync event");
+        let event_type: String = row.try_get("event_type").expect("event_type");
+        let payload_json: String = row.try_get("payload_json").expect("payload_json");
+        let payload: Value = serde_json::from_str(&payload_json).expect("parse payload json");
+
+        assert_eq!(event_type, "quote_finalized");
+        assert_eq!(
+            payload.get("status").and_then(Value::as_str).expect("status field"),
+            "finalized"
+        );
+        assert_eq!(
+            payload.get("sync_action").and_then(Value::as_str).expect("sync_action field"),
+            "update_amount_stage"
+        );
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn batch_retry_replays_retryable_quotey_events() {
+        let state = setup_state().await;
+        seed_connected_integration(&state, "salesforce").await;
+        seed_quote_with_line(&state, "Q-CRM-003", "approved").await;
+
+        let Json(initial) = sync_quote_to_crm(
+            Path("Q-CRM-003".to_string()),
+            State(state.clone()),
+            Query(SyncEventPayloadRequest {
+                direction: None,
+                provider: Some("salesforce".to_string()),
+                event_type: None,
+            }),
+        )
+        .await
+        .expect("initial outbound sync");
+        let event_id = initial.provider_results.first().expect("provider result").event_id.clone();
+
+        sqlx::query(
+            "UPDATE crm_sync_event SET status = 'failed', attempts = 1, error_message = 'seed failure' WHERE id = ?",
+        )
+        .bind(&event_id)
+        .execute(&state.db_pool)
+        .await
+        .expect("mark event retryable for batch");
+
+        let Json(batch) = batch_retry_quotey_sync_events(
+            State(state.clone()),
+            Query(BatchSyncQuery { provider: Some("salesforce".to_string()), limit: Some(10) }),
+        )
+        .await
+        .expect("batch fallback should run");
+
+        assert_eq!(batch.processed, 1);
+        assert_eq!(batch.succeeded + batch.failed + batch.skipped, 1);
+        assert_eq!(batch.provider_results.len(), 1);
+        assert_eq!(batch.provider_results[0].event_id, event_id);
+        assert!(
+            matches!(
+                batch.provider_results[0].status.as_str(),
+                "success" | "retrying" | "failed" | "skipped"
+            ),
+            "unexpected batch replay status: {}",
+            batch.provider_results[0].status
+        );
 
         state.db_pool.close().await;
     }
