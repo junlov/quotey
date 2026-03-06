@@ -1221,7 +1221,7 @@ async fn start_oauth(
         "{authorize}?response_type=code&client_id={client}&redirect_uri={redirect_uri}&scope={scope}&state={state}",
         authorize = provider_config.authorize_url,
         client = provider_credentials(&state, provider)?,
-        redirect_uri = callback,
+        redirect_uri = encode_query(&callback),
         scope = encode_query(&scope),
         state = encode_query(&state_token),
     );
@@ -1258,7 +1258,7 @@ async fn oauth_callback(
         )
     })?;
 
-    let state_row = fetch_and_reserve_oauth_state(&state, &query.state).await?;
+    let state_row = fetch_and_reserve_oauth_state(&state, provider, &query.state).await?;
     let provider_config = ProviderConfig::from_provider(provider);
     let (client_id, client_secret) = provider.credentials(&state.config).ok_or_else(|| {
         (
@@ -2942,13 +2942,16 @@ struct OAuthStateRow {
 
 async fn fetch_and_reserve_oauth_state(
     state: &CrmState,
+    provider: CrmProvider,
     token: &str,
 ) -> Result<OAuthStateRow, (StatusCode, Json<CrmError>)> {
+    let now = Utc::now().to_rfc3339();
     let row = sqlx::query(
-        "SELECT redirect_uri, scope\n         FROM crm_oauth_state\n         WHERE state_token = ?\n           AND used = 0\n           AND expires_at > ?",
+        "SELECT redirect_uri, scope\n         FROM crm_oauth_state\n         WHERE state_token = ?\n           AND provider = ?\n           AND used = 0\n           AND expires_at > ?",
     )
     .bind(token)
-    .bind(Utc::now().to_rfc3339())
+    .bind(provider.as_str())
+    .bind(&now)
     .fetch_optional(&state.db_pool)
     .await
     .map_err(db_error)?
@@ -2974,11 +2977,27 @@ async fn fetch_and_reserve_oauth_state(
         )
     })?;
 
-    sqlx::query("UPDATE crm_oauth_state SET used = 1 WHERE state_token = ?")
-        .bind(token)
-        .execute(&state.db_pool)
-        .await
-        .map_err(db_error)?;
+    let updated = sqlx::query(
+        "UPDATE crm_oauth_state
+         SET used = 1
+         WHERE state_token = ?
+           AND provider = ?
+           AND used = 0
+           AND expires_at > ?",
+    )
+    .bind(token)
+    .bind(provider.as_str())
+    .bind(&now)
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    if updated.rows_affected() != 1 {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(CrmError { error: "invalid or expired oauth state token".to_string() }),
+        ));
+    }
 
     Ok(OAuthStateRow { redirect_uri, scope })
 }
@@ -3260,4 +3279,242 @@ fn encode_query(value: &str) -> String {
 }
 
 #[cfg(test)]
-mod tests {}
+mod tests {
+    use axum::extract::{Path, Query, State};
+    use axum::http::StatusCode;
+    use axum::Json;
+    use chrono::{Duration, Utc};
+    use quotey_core::config::CrmConfig;
+    use quotey_db::{connect_with_settings, migrations};
+
+    use super::{
+        encode_query, fetch_and_reserve_oauth_state, oauth_callback, start_oauth, CrmProvider,
+        CrmRuntimeConfig, CrmState, OAuthCallbackQuery, OAuthConnectRequest,
+    };
+
+    async fn setup_state() -> CrmState {
+        let db_pool = connect_with_settings("sqlite::memory:?cache=shared", 1, 5)
+            .await
+            .expect("connect sqlite memory pool");
+        migrations::run_pending(&db_pool).await.expect("run migrations");
+
+        let crm = CrmConfig {
+            enabled: true,
+            webhook_secret: None,
+            callback_base_url: Some("http://localhost:8080".to_string()),
+            salesforce_client_id: Some("sf-client-id".to_string()),
+            salesforce_client_secret: Some("sf-client-secret".to_string()),
+            hubspot_client_id: Some("hs-client-id".to_string()),
+            hubspot_client_secret: Some("hs-client-secret".to_string()),
+        };
+        CrmState { db_pool, config: CrmRuntimeConfig::from(&crm), client: reqwest::Client::new() }
+    }
+
+    #[tokio::test]
+    async fn start_oauth_salesforce_persists_state_and_returns_authorize_url() {
+        let state = setup_state().await;
+
+        let Json(response) = start_oauth(
+            Path("salesforce".to_string()),
+            State(state.clone()),
+            Query(OAuthConnectRequest { scope: None }),
+        )
+        .await
+        .expect("salesforce oauth connect should succeed");
+
+        assert_eq!(response.provider, "salesforce");
+        assert!(
+            response.authorization_url.starts_with(
+                "https://login.salesforce.com/services/oauth2/authorize?response_type=code"
+            ),
+            "unexpected authorize url: {}",
+            response.authorization_url
+        );
+        assert!(
+            response.authorization_url.contains("client_id=sf-client-id"),
+            "missing salesforce client id"
+        );
+        assert!(
+            response.authorization_url.contains(&format!(
+                "redirect_uri={}",
+                encode_query("http://localhost:8080/api/v1/crm/oauth/salesforce/callback")
+            )),
+            "missing callback URI"
+        );
+
+        let row = sqlx::query(
+            "SELECT provider, redirect_uri, scope, used FROM crm_oauth_state WHERE state_token = ?",
+        )
+        .bind(&response.state_token)
+        .fetch_one(&state.db_pool)
+        .await
+        .expect("oauth state row should be persisted");
+
+        let provider: String = sqlx::Row::try_get(&row, "provider").expect("provider");
+        let redirect_uri: String = sqlx::Row::try_get(&row, "redirect_uri").expect("redirect_uri");
+        let scope: String = sqlx::Row::try_get(&row, "scope").expect("scope");
+        let used: bool = sqlx::Row::try_get(&row, "used").expect("used");
+
+        assert_eq!(provider, "salesforce");
+        assert_eq!(redirect_uri, "http://localhost:8080/api/v1/crm/oauth/salesforce/callback");
+        assert_eq!(scope, "api refresh_token");
+        assert!(!used, "oauth state must start unused");
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn start_oauth_hubspot_persists_state_and_returns_authorize_url() {
+        let state = setup_state().await;
+
+        let Json(response) = start_oauth(
+            Path("hubspot".to_string()),
+            State(state.clone()),
+            Query(OAuthConnectRequest { scope: None }),
+        )
+        .await
+        .expect("hubspot oauth connect should succeed");
+
+        assert_eq!(response.provider, "hubspot");
+        assert!(
+            response
+                .authorization_url
+                .starts_with("https://app.hubspot.com/oauth/authorize?response_type=code"),
+            "unexpected authorize url: {}",
+            response.authorization_url
+        );
+        assert!(
+            response.authorization_url.contains("client_id=hs-client-id"),
+            "missing hubspot client id"
+        );
+        assert!(
+            response.authorization_url.contains(&format!(
+                "redirect_uri={}",
+                encode_query("http://localhost:8080/api/v1/crm/oauth/hubspot/callback")
+            )),
+            "missing callback URI"
+        );
+        assert!(
+            response.authorization_url.contains("scope=crm.objects.line_items.read"),
+            "missing default hubspot scope"
+        );
+
+        let row = sqlx::query(
+            "SELECT provider, redirect_uri, scope, used FROM crm_oauth_state WHERE state_token = ?",
+        )
+        .bind(&response.state_token)
+        .fetch_one(&state.db_pool)
+        .await
+        .expect("oauth state row should be persisted");
+
+        let provider: String = sqlx::Row::try_get(&row, "provider").expect("provider");
+        let redirect_uri: String = sqlx::Row::try_get(&row, "redirect_uri").expect("redirect_uri");
+        let scope: String = sqlx::Row::try_get(&row, "scope").expect("scope");
+        let used: bool = sqlx::Row::try_get(&row, "used").expect("used");
+
+        assert_eq!(provider, "hubspot");
+        assert_eq!(redirect_uri, "http://localhost:8080/api/v1/crm/oauth/hubspot/callback");
+        assert!(
+            scope.contains("crm.objects.line_items.read")
+                && scope.contains("crm.objects.contacts.write"),
+            "unexpected hubspot scope: {scope}"
+        );
+        assert!(!used, "oauth state must start unused");
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn oauth_callback_rejects_state_token_when_provider_mismatch() {
+        let state = setup_state().await;
+        let now = Utc::now();
+        let state_token = "state-provider-mismatch";
+
+        sqlx::query(
+            "INSERT INTO crm_oauth_state
+             (state_token, provider, redirect_uri, scope, requested_at, expires_at, used)
+             VALUES (?, ?, ?, ?, ?, ?, 0)",
+        )
+        .bind(state_token)
+        .bind("hubspot")
+        .bind("http://localhost:8080/api/v1/crm/oauth/hubspot/callback")
+        .bind("crm.objects.contacts.read")
+        .bind(now.to_rfc3339())
+        .bind((now + Duration::minutes(10)).to_rfc3339())
+        .execute(&state.db_pool)
+        .await
+        .expect("seed oauth state");
+
+        let result = oauth_callback(
+            Path("salesforce".to_string()),
+            State(state.clone()),
+            Query(OAuthCallbackQuery {
+                state: state_token.to_string(),
+                code: Some("fake-code".to_string()),
+                error: None,
+                error_description: None,
+            }),
+        )
+        .await;
+
+        let (status, Json(error_payload)) = result.expect_err("mismatched provider should fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(
+            error_payload.error.contains("invalid or expired oauth state token"),
+            "unexpected error: {}",
+            error_payload.error
+        );
+
+        let used: bool =
+            sqlx::query_scalar("SELECT used FROM crm_oauth_state WHERE state_token = ?")
+                .bind(state_token)
+                .fetch_one(&state.db_pool)
+                .await
+                .expect("state row should exist");
+        assert!(!used, "mismatched provider must not consume oauth state token");
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn fetch_and_reserve_oauth_state_marks_state_as_used_when_provider_matches() {
+        let state = setup_state().await;
+        let now = Utc::now();
+        let state_token = "state-salesforce-ok";
+
+        sqlx::query(
+            "INSERT INTO crm_oauth_state
+             (state_token, provider, redirect_uri, scope, requested_at, expires_at, used)
+             VALUES (?, ?, ?, ?, ?, ?, 0)",
+        )
+        .bind(state_token)
+        .bind("salesforce")
+        .bind("http://localhost:8080/api/v1/crm/oauth/salesforce/callback")
+        .bind("api refresh_token")
+        .bind(now.to_rfc3339())
+        .bind((now + Duration::minutes(10)).to_rfc3339())
+        .execute(&state.db_pool)
+        .await
+        .expect("seed oauth state");
+
+        let reserved = fetch_and_reserve_oauth_state(&state, CrmProvider::Salesforce, state_token)
+            .await
+            .expect("state should be reserved");
+
+        assert_eq!(
+            reserved.redirect_uri,
+            "http://localhost:8080/api/v1/crm/oauth/salesforce/callback"
+        );
+        assert_eq!(reserved.scope, "api refresh_token");
+
+        let used: bool =
+            sqlx::query_scalar("SELECT used FROM crm_oauth_state WHERE state_token = ?")
+                .bind(state_token)
+                .fetch_one(&state.db_pool)
+                .await
+                .expect("state row should exist");
+        assert!(used, "matched provider should consume oauth state token");
+
+        state.db_pool.close().await;
+    }
+}
