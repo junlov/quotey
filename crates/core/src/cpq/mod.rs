@@ -15,6 +15,7 @@ pub mod pricing;
 pub mod product_matcher;
 pub mod replay;
 pub mod rule_builder;
+pub mod safety;
 pub mod simulator;
 
 use crate::domain::quote::Quote;
