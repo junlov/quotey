@@ -40,6 +40,7 @@ use quotey_core::{AuthChannel, AuthContext, AuthMethod, AuthPrincipal, AuthStren
 use quotey_db::DbPool;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::sync::Arc;
 use tera::{Context, Tera};
 use tracing::{error, info, warn};
@@ -682,6 +683,233 @@ fn selected_search(raw_search: Option<&str>) -> String {
     raw_search.map(|value| value.trim().to_string()).filter(|v| !v.is_empty()).unwrap_or_default()
 }
 
+fn activity_tone(event_type: &str) -> &'static str {
+    match event_type {
+        "quote.created" => "system",
+        "portal.approval" | "portal.rejection" => "decision",
+        "portal.comment" | "portal.comment.line" => "comment",
+        "portal.assumptions.updated" => "update",
+        "portal.rep_notification.failed" | "portal.rep_notification.skipped" => "warning",
+        _ if event_type.starts_with("funnel.") => "system",
+        _ => "update",
+    }
+}
+
+fn activity_title(event_type: &str) -> String {
+    match event_type {
+        "quote.created" => "Quote created".to_string(),
+        "portal.approval" => "Quote approved".to_string(),
+        "portal.rejection" => "Quote declined".to_string(),
+        "portal.comment" | "portal.comment.line" => "Comment added".to_string(),
+        "portal.assumptions.updated" => "Assumptions updated".to_string(),
+        "portal.rep_notification.sent" => "Sales rep notified".to_string(),
+        "portal.rep_notification.failed" | "portal.rep_notification.skipped" => {
+            "Rep notification issue".to_string()
+        }
+        _ if event_type.starts_with("funnel.") => "Portal interaction".to_string(),
+        _ => event_type.replace('.', " "),
+    }
+}
+
+fn activity_actor(actor: &str) -> String {
+    let trimmed = actor.trim();
+    if trimmed.is_empty() || trimmed == "portal" {
+        return "Portal System".to_string();
+    }
+    if let Some(stripped) = trimmed.strip_prefix("portal:") {
+        let stripped = stripped.trim();
+        if stripped.is_empty() {
+            return "Portal User".to_string();
+        }
+        return stripped.to_string();
+    }
+    trimmed.to_string()
+}
+
+fn extract_activity_detail(payload_json: &str) -> Option<String> {
+    let parsed = serde_json::from_str::<serde_json::Value>(payload_json).ok()?;
+    let detail = parsed.get("detail")?.as_str()?.trim();
+    if detail.is_empty() {
+        None
+    } else {
+        Some(detail.to_string())
+    }
+}
+
+fn parse_portal_datetime(value: &str) -> Option<chrono::DateTime<Utc>> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if let Ok(dt) = chrono::DateTime::parse_from_rfc3339(trimmed) {
+        return Some(dt.with_timezone(&Utc));
+    }
+
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%d %H:%M:%S") {
+        return Some(chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+    }
+
+    if let Ok(naive) = chrono::NaiveDateTime::parse_from_str(trimmed, "%Y-%m-%dT%H:%M:%S") {
+        return Some(chrono::DateTime::<Utc>::from_naive_utc_and_offset(naive, Utc));
+    }
+
+    None
+}
+
+fn compare_portal_timestamps_desc(left: Option<&str>, right: Option<&str>) -> std::cmp::Ordering {
+    let left_raw = left.unwrap_or_default().trim();
+    let right_raw = right.unwrap_or_default().trim();
+    match (parse_portal_datetime(left_raw), parse_portal_datetime(right_raw)) {
+        (Some(left_dt), Some(right_dt)) => right_dt.cmp(&left_dt),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => right_raw.cmp(left_raw),
+    }
+}
+
+fn compare_portal_timestamps_asc(left: Option<&str>, right: Option<&str>) -> std::cmp::Ordering {
+    let left_raw = left.unwrap_or_default().trim();
+    let right_raw = right.unwrap_or_default().trim();
+    match (parse_portal_datetime(left_raw), parse_portal_datetime(right_raw)) {
+        (Some(left_dt), Some(right_dt)) => left_dt.cmp(&right_dt),
+        (Some(_), None) => std::cmp::Ordering::Less,
+        (None, Some(_)) => std::cmp::Ordering::Greater,
+        (None, None) => left_raw.cmp(right_raw),
+    }
+}
+
+fn approval_requested_age_label(requested_at: &str) -> String {
+    let Some(requested) = parse_portal_datetime(requested_at) else {
+        return "unknown".to_string();
+    };
+
+    let age = Utc::now() - requested;
+    let age_minutes = age.num_minutes().max(0);
+
+    if age_minutes < 60 {
+        format!("{age_minutes}m ago")
+    } else if age_minutes < 1440 {
+        format!("{}h ago", age_minutes / 60)
+    } else {
+        format!("{}d ago", age_minutes / 1440)
+    }
+}
+
+fn approval_sla_bucket(requested_at: &str) -> (&'static str, &'static str, &'static str) {
+    let Some(requested) = parse_portal_datetime(requested_at) else {
+        return ("at_risk", "At Risk", "No timestamp available; prioritize manual check.");
+    };
+
+    let age_hours = (Utc::now() - requested).num_hours().max(0);
+    if age_hours >= 24 {
+        ("overdue", "Overdue", "SLA window likely breached; prioritize immediate decision.")
+    } else if age_hours >= 8 {
+        ("at_risk", "At Risk", "SLA window is narrowing; resolve soon.")
+    } else {
+        ("on_track", "On Track", "Within SLA window.")
+    }
+}
+
+fn approval_type(reason: &str, discount_pct: f64) -> (&'static str, &'static str) {
+    let normalized = reason.to_ascii_lowercase();
+    if normalized.contains("discount") || discount_pct >= 10.0 {
+        ("discount_exception", "Discount Exception")
+    } else if normalized.contains("term")
+        || normalized.contains("billing")
+        || normalized.contains("contract")
+    {
+        ("commercial_terms", "Commercial Terms")
+    } else {
+        ("policy_review", "Policy Review")
+    }
+}
+
+fn approval_urgency(
+    total_amount: f64,
+    discount_pct: f64,
+    sla_bucket: &str,
+) -> (&'static str, &'static str) {
+    if sla_bucket == "overdue" || discount_pct >= 20.0 || total_amount >= 100_000.0 {
+        ("critical", "Critical")
+    } else if sla_bucket == "at_risk" || discount_pct >= 12.0 || total_amount >= 50_000.0 {
+        ("high", "High")
+    } else {
+        ("normal", "Normal")
+    }
+}
+
+fn discussion_kind(body: &str, author_email: &str) -> (&'static str, &'static str) {
+    let normalized = body.trim();
+    if normalized.starts_with("[REVISION LOOP]") {
+        ("revision", "Revision Request")
+    } else if normalized.starts_with("[INFO REQUEST]") {
+        ("question", "Info Request")
+    } else if normalized.starts_with("[LINE ITEM QUESTION]") {
+        ("line_question", "Line Question")
+    } else if author_email.starts_with("portal:") {
+        ("rep_note", "Rep Note")
+    } else {
+        ("comment", "Comment")
+    }
+}
+
+fn discussion_body_parts(raw: &str) -> (String, Option<String>) {
+    let mut main = raw.trim();
+    let mut context = None;
+
+    if let Some((head, tail)) = main.split_once("\n---\n") {
+        main = head.trim();
+        let detail = tail.trim();
+        if !detail.is_empty() {
+            context = Some(detail.to_string());
+        }
+    }
+
+    for marker in ["[REVISION LOOP]", "[INFO REQUEST]", "[LINE ITEM QUESTION]"] {
+        if let Some(stripped) = main.strip_prefix(marker) {
+            main = stripped.trim();
+        }
+    }
+
+    let normalized_main =
+        if main.is_empty() { "No details provided.".to_string() } else { main.to_string() };
+    (normalized_main, context)
+}
+
+fn collect_comment_descendants(
+    parent_id: &str,
+    comments_by_parent: &HashMap<String, Vec<serde_json::Value>>,
+    seen_comment_ids: &mut HashSet<String>,
+    replies: &mut Vec<serde_json::Value>,
+) {
+    let Some(children) = comments_by_parent.get(parent_id) else {
+        return;
+    };
+
+    let mut ordered_children = children.clone();
+    ordered_children.sort_by(|left, right| {
+        compare_portal_timestamps_asc(
+            left.get("created_at").and_then(serde_json::Value::as_str),
+            right.get("created_at").and_then(serde_json::Value::as_str),
+        )
+    });
+
+    for child in ordered_children {
+        let child_id = child
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if child_id.is_empty() || !seen_comment_ids.insert(child_id.clone()) {
+            continue;
+        }
+        replies.push(child);
+        collect_comment_descendants(&child_id, comments_by_parent, seen_comment_ids, replies);
+    }
+}
+
 #[derive(Debug, Clone, Default)]
 struct PortalHandoffQuery {
     from: Option<String>,
@@ -951,6 +1179,57 @@ async fn view_quote_page(
         })
         .collect();
 
+    let quote_created_by = quote_row.try_get::<String, _>("created_by").unwrap_or_default();
+    let mut activity_feed: Vec<serde_json::Value> = vec![serde_json::json!({
+        "event_type": "quote.created",
+        "title": activity_title("quote.created"),
+        "tone": activity_tone("quote.created"),
+        "timestamp": quote_row.try_get::<String, _>("created_at").unwrap_or_default(),
+        "actor": activity_actor(&quote_created_by),
+        "detail": "Quote initialized and shared for portal review",
+    })];
+
+    let audit_rows = sqlx::query(
+        "SELECT timestamp, event_type, actor, payload_json
+         FROM audit_event
+         WHERE quote_id = ?
+         ORDER BY timestamp DESC
+         LIMIT 24",
+    )
+    .bind(&quote_id)
+    .fetch_all(&state.db_pool)
+    .await
+    .unwrap_or_default();
+
+    for row in audit_rows {
+        let event_type = row.try_get::<String, _>("event_type").unwrap_or_default();
+        let actor = row.try_get::<String, _>("actor").unwrap_or_default();
+        let payload_json = row.try_get::<String, _>("payload_json").unwrap_or_default();
+        let detail = extract_activity_detail(&payload_json).unwrap_or_else(|| {
+            if event_type.starts_with("funnel.") {
+                "Interaction captured in portal telemetry".to_string()
+            } else {
+                "State change recorded in audit trail".to_string()
+            }
+        });
+
+        activity_feed.push(serde_json::json!({
+            "event_type": event_type,
+            "title": activity_title(&event_type),
+            "tone": activity_tone(&event_type),
+            "timestamp": row.try_get::<String, _>("timestamp").unwrap_or_default(),
+            "actor": activity_actor(&actor),
+            "detail": detail,
+        }));
+    }
+
+    activity_feed.sort_by(|left, right| {
+        compare_portal_timestamps_desc(
+            left.get("timestamp").and_then(serde_json::Value::as_str),
+            right.get("timestamp").and_then(serde_json::Value::as_str),
+        )
+    });
+
     let valid_until = quote_row.try_get::<String, _>("valid_until").unwrap_or_default();
     let created_at_value = quote_row.try_get::<String, _>("created_at").unwrap_or_default();
     let quote_age_days = created_at_value
@@ -1187,9 +1466,9 @@ async fn view_quote_page(
     context.insert(
         "rep",
         &serde_json::json!({
-            "name": quote_row.try_get::<String, _>("created_by").unwrap_or_default(),
-            "email": if quote_row.try_get::<String, _>("created_by").unwrap_or_default().contains('@') {
-                quote_row.try_get::<String, _>("created_by").unwrap_or_default()
+            "name": &quote_created_by,
+            "email": if quote_created_by.contains('@') {
+                quote_created_by.clone()
             } else {
                 String::new()
             },
@@ -1197,6 +1476,7 @@ async fn view_quote_page(
     );
 
     context.insert("comments", &comments);
+    context.insert("activity_feed", &activity_feed);
 
     // Slack-to-portal state continuity: pass preserved navigation context to template.
     let handoff = params.normalized_handoff();
@@ -1787,6 +2067,10 @@ async fn approvals_index_page(
             let requested_at = row.try_get::<String, _>("requested_at").unwrap_or_default();
             let total_amount = row.try_get::<f64, _>("total_amount").unwrap_or(0.0);
             let discount_pct = row.try_get::<f64, _>("discount_pct").unwrap_or(0.0);
+            let (sla_bucket, sla_label, sla_hint) = approval_sla_bucket(&requested_at);
+            let (type_key, type_label) = approval_type(&reason, discount_pct);
+            let (urgency_key, urgency_label) =
+                approval_urgency(total_amount, discount_pct, sla_bucket);
 
             serde_json::json!({
                 "approval_id": approval_id,
@@ -1795,16 +2079,96 @@ async fn approvals_index_page(
                 "approver_role": approver_role,
                 "reason": reason,
                 "requested_at": requested_at,
+                "requested_age": approval_requested_age_label(&requested_at),
                 "total_amount": format_price(total_amount),
+                "total_amount_raw": total_amount,
+                "discount_pct_value": (discount_pct * 10.0).round() / 10.0,
                 "discount_pct": format!("{discount_pct:.1}%"),
+                "sla_bucket": sla_bucket,
+                "sla_label": sla_label,
+                "sla_hint": sla_hint,
+                "type_key": type_key,
+                "type_label": type_label,
+                "urgency_key": urgency_key,
+                "urgency_label": urgency_label,
                 "detail_href": format!("/approvals/{approval_id}"),
             })
         })
         .collect();
 
+    let count_for_bucket = |bucket: &str| -> usize {
+        approvals
+            .iter()
+            .filter(|approval| {
+                approval
+                    .get("sla_bucket")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| value == bucket)
+                    .unwrap_or(false)
+            })
+            .count()
+    };
+
+    let count_for_type = |type_key: &str| -> usize {
+        approvals
+            .iter()
+            .filter(|approval| {
+                approval
+                    .get("type_key")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| value == type_key)
+                    .unwrap_or(false)
+            })
+            .count()
+    };
+
+    let sections = [
+        ("overdue", "Overdue SLA", "Needs immediate action to avoid extended cycle-time."),
+        ("at_risk", "At Risk", "Resolve soon to avoid falling out of SLA."),
+        ("on_track", "On Track", "Healthy queue; process in normal order."),
+    ]
+    .iter()
+    .map(|(id, title, description)| {
+        let section_items: Vec<serde_json::Value> = approvals
+            .iter()
+            .filter(|approval| {
+                approval
+                    .get("sla_bucket")
+                    .and_then(serde_json::Value::as_str)
+                    .map(|value| value == *id)
+                    .unwrap_or(false)
+            })
+            .cloned()
+            .collect();
+        serde_json::json!({
+            "id": id,
+            "title": title,
+            "description": description,
+            "count": section_items.len(),
+            "items": section_items,
+        })
+    })
+    .collect::<Vec<_>>();
+
     let mut context = Context::new();
     context.insert("approvals", &approvals);
+    context.insert("approval_sections", &sections);
     context.insert("count", &approvals.len());
+    context.insert(
+        "queue_breakdown",
+        &serde_json::json!({
+            "sla": {
+                "overdue": count_for_bucket("overdue"),
+                "at_risk": count_for_bucket("at_risk"),
+                "on_track": count_for_bucket("on_track"),
+            },
+            "types": {
+                "discount_exception": count_for_type("discount_exception"),
+                "commercial_terms": count_for_type("commercial_terms"),
+                "policy_review": count_for_type("policy_review"),
+            }
+        }),
+    );
     context.insert("branding", &state.branding);
 
     let html =
@@ -1934,6 +2298,185 @@ async fn approval_detail_page(
     let discount_pct =
         if subtotal > 0.0 { ((discount_total / subtotal) * 100.0).clamp(0.0, 100.0) } else { 0.0 };
 
+    let comment_rows = sqlx::query(
+        r#"SELECT
+                pc.id,
+                pc.quote_line_id,
+                pc.parent_id,
+                pc.author_name,
+                pc.author_email,
+                pc.body,
+                pc.created_at,
+                COALESCE(p.name, ql.product_id, '') AS line_product_name,
+                COALESCE(p.sku, '') AS line_product_sku
+           FROM portal_comment pc
+           LEFT JOIN quote_line ql ON ql.id = pc.quote_line_id
+           LEFT JOIN product p ON p.id = ql.product_id
+           WHERE pc.quote_id = ?
+           ORDER BY pc.created_at ASC"#,
+    )
+    .bind(&quote_id)
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(db_err)?;
+
+    let mut comments_by_parent: HashMap<String, Vec<serde_json::Value>> = HashMap::new();
+    let mut root_comments: Vec<serde_json::Value> = Vec::new();
+    let mut comments_by_id: BTreeMap<String, serde_json::Value> = BTreeMap::new();
+    let mut open_question_count = 0_i64;
+    let mut revision_request_count = 0_i64;
+
+    for row in comment_rows {
+        let id = row.try_get::<String, _>("id").unwrap_or_default();
+        let author_name = row.try_get::<String, _>("author_name").unwrap_or_default();
+        let author_email = row.try_get::<String, _>("author_email").unwrap_or_default();
+        let raw_body = row.try_get::<String, _>("body").unwrap_or_default();
+        let created_at = row.try_get::<String, _>("created_at").unwrap_or_default();
+        let quote_line_id = row.try_get::<Option<String>, _>("quote_line_id").unwrap_or(None);
+        let parent_id = row.try_get::<Option<String>, _>("parent_id").unwrap_or(None);
+        let line_product_name = row.try_get::<String, _>("line_product_name").unwrap_or_default();
+        let line_product_sku = row.try_get::<String, _>("line_product_sku").unwrap_or_default();
+        let (kind, kind_label) = discussion_kind(&raw_body, &author_email);
+        let (body, context_note) = discussion_body_parts(&raw_body);
+
+        if kind == "question" || kind == "line_question" {
+            open_question_count += 1;
+        }
+        if kind == "revision" {
+            revision_request_count += 1;
+        }
+
+        let line_context = quote_line_id.as_ref().map(|line_id| {
+            if line_product_name.is_empty() && line_product_sku.is_empty() {
+                format!("Line {line_id}")
+            } else if line_product_sku.is_empty() {
+                format!("Line {line_id}: {line_product_name}")
+            } else {
+                format!("Line {line_id}: {line_product_name} ({line_product_sku})")
+            }
+        });
+
+        let comment = serde_json::json!({
+            "id": id,
+            "author": if author_name.trim().is_empty() { "Portal User" } else { author_name.trim() },
+            "author_email": author_email,
+            "created_at": created_at,
+            "age": approval_requested_age_label(&created_at),
+            "kind": kind,
+            "kind_label": kind_label,
+            "body": body,
+            "context_note": context_note,
+            "line_context": line_context,
+            "is_internal": author_email.starts_with("portal:"),
+            "parent_id": parent_id,
+            "line_id": quote_line_id,
+        });
+
+        comments_by_id.insert(
+            comment.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().to_string(),
+            comment.clone(),
+        );
+
+        if let Some(parent) = comment.get("parent_id").and_then(serde_json::Value::as_str) {
+            comments_by_parent.entry(parent.to_string()).or_default().push(comment);
+        } else {
+            root_comments.push(comment);
+        }
+    }
+
+    let mut seen_comment_ids = HashSet::new();
+    let mut threads: Vec<serde_json::Value> = root_comments
+        .iter()
+        .map(|root| {
+            let mut replies = Vec::new();
+            let root_id = root
+                .get("id")
+                .and_then(serde_json::Value::as_str)
+                .unwrap_or_default()
+                .trim()
+                .to_string();
+            if !root_id.is_empty() {
+                seen_comment_ids.insert(root_id.clone());
+                collect_comment_descendants(
+                    &root_id,
+                    &comments_by_parent,
+                    &mut seen_comment_ids,
+                    &mut replies,
+                );
+            }
+            let reply_count = replies.len();
+            serde_json::json!({
+                "root": root,
+                "replies": replies,
+                "reply_count": reply_count,
+            })
+        })
+        .collect();
+
+    // Handle orphaned comment chains whose parent no longer exists.
+    let mut orphan_roots: Vec<serde_json::Value> = comments_by_id
+        .values()
+        .filter(|comment| {
+            let comment_id =
+                comment.get("id").and_then(serde_json::Value::as_str).unwrap_or_default().trim();
+            if comment_id.is_empty() || seen_comment_ids.contains(comment_id) {
+                return false;
+            }
+            comment
+                .get("parent_id")
+                .and_then(serde_json::Value::as_str)
+                .map(|parent_id| !comments_by_id.contains_key(parent_id))
+                .unwrap_or(true)
+        })
+        .cloned()
+        .collect();
+
+    orphan_roots.sort_by(|left, right| {
+        compare_portal_timestamps_desc(
+            left.get("created_at").and_then(serde_json::Value::as_str),
+            right.get("created_at").and_then(serde_json::Value::as_str),
+        )
+    });
+
+    for orphan_root in orphan_roots {
+        let orphan_id = orphan_root
+            .get("id")
+            .and_then(serde_json::Value::as_str)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
+        if orphan_id.is_empty() || !seen_comment_ids.insert(orphan_id.clone()) {
+            continue;
+        }
+
+        let mut replies = Vec::new();
+        collect_comment_descendants(
+            &orphan_id,
+            &comments_by_parent,
+            &mut seen_comment_ids,
+            &mut replies,
+        );
+        let reply_count = replies.len();
+
+        threads.push(serde_json::json!({
+            "root": orphan_root,
+            "replies": replies,
+            "reply_count": reply_count,
+        }));
+    }
+
+    threads.sort_by(|left, right| {
+        compare_portal_timestamps_desc(
+            left.get("root")
+                .and_then(|value| value.get("created_at"))
+                .and_then(serde_json::Value::as_str),
+            right
+                .get("root")
+                .and_then(|value| value.get("created_at"))
+                .and_then(serde_json::Value::as_str),
+        )
+    });
+
     // Build template context
     let mut context = Context::new();
 
@@ -1972,6 +2515,15 @@ async fn approval_detail_page(
     );
 
     context.insert("lines", &lines);
+    context.insert(
+        "discussion",
+        &serde_json::json!({
+            "threads": threads,
+            "count": comments_by_id.len(),
+            "open_question_count": open_question_count,
+            "revision_request_count": revision_request_count,
+        }),
+    );
 
     let html = state
         .templates
@@ -4336,6 +4888,21 @@ mod tests {
         (pool, "Q-TEST-001".to_string(), token)
     }
 
+    #[test]
+    fn portal_timestamp_comparator_orders_mixed_formats() {
+        let newer_rfc3339 = "2026-03-06T14:00:00Z";
+        let older_sqlite = "2026-03-06 13:59:59";
+
+        assert_eq!(
+            compare_portal_timestamps_desc(Some(newer_rfc3339), Some(older_sqlite)),
+            std::cmp::Ordering::Less
+        );
+        assert_eq!(
+            compare_portal_timestamps_asc(Some(newer_rfc3339), Some(older_sqlite)),
+            std::cmp::Ordering::Greater
+        );
+    }
+
     fn state(pool: sqlx::SqlitePool) -> State<PortalState> {
         let mut tera = Tera::default();
         // Add minimal templates for testing
@@ -5038,6 +5605,18 @@ mod tests {
         .await
         .expect("seed similar deal");
 
+        sqlx::query(
+            "INSERT INTO audit_event
+                (id, timestamp, actor, actor_type, quote_id, event_type, event_category, payload_json, metadata_json)
+             VALUES ('AUD-PORTAL-1', ?, 'portal:rep@acme.com', 'human', ?, 'portal.assumptions.updated', 'portal', ?, '{}')",
+        )
+        .bind(&now)
+        .bind(&quote_id)
+        .bind("{\"detail\":\"Payment terms updated to net_60\"}")
+        .execute(&pool)
+        .await
+        .expect("seed audit event");
+
         let html = view_quote_page(
             axum::extract::Path(token),
             axum::extract::Query(ViewQuoteParams::default()),
@@ -5061,6 +5640,10 @@ mod tests {
         assert!(html.contains("Snooze"));
         assert!(html.contains("Q-TEST-RELATED"));
         assert!(html.contains("Discount requested to match competitor proposal."));
+        assert!(html.contains("Activity Feed"));
+        assert!(html.contains("Assumptions updated"));
+        assert!(html.contains("Payment terms updated to net_60"));
+        assert!(html.contains("Actor: rep@acme.com"));
     }
 
     #[tokio::test]
@@ -5271,6 +5854,20 @@ mod tests {
 
         assert!(html.contains("option value=\"declined\" selected"));
         assert!(html.contains("status-declined"));
+    }
+
+    #[tokio::test]
+    async fn portal_index_page_pipeline_fallback_counts_distinguish_pending_and_sent() {
+        let (pool, _quote_id, _token) = setup().await;
+
+        let html =
+            portal_index_page(Query(PortalIndexQuery::default()), state_with_real_templates(pool))
+                .await
+                .expect("render portal index")
+                .0;
+
+        assert!(html.contains("data-count-status=\"pending\">0</span>"));
+        assert!(html.contains("data-count-status=\"sent\">1</span>"));
     }
 
     #[tokio::test]
@@ -6262,6 +6859,48 @@ mod tests {
             html.contains("APR-LIST-001"),
             "approvals page should show pending approval identifiers"
         );
+        assert!(
+            html.contains("SLA Segments"),
+            "approvals page should expose SLA segmentation summary"
+        );
+        assert!(
+            html.contains("Discount Exception"),
+            "approvals cards should expose approval type classification"
+        );
+    }
+
+    #[tokio::test]
+    async fn approvals_index_route_marks_overdue_items_as_critical() {
+        let (pool, quote_id, _) = setup().await;
+        sqlx::query("UPDATE quote SET status = 'pending', account_id = 'Acme Corp' WHERE id = ?")
+            .bind(&quote_id)
+            .execute(&pool)
+            .await
+            .expect("mark quote pending");
+
+        let overdue = (Utc::now() - chrono::Duration::hours(30)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO approval_request
+                (id, quote_id, approver_role, reason, justification, status, requested_by, expires_at, created_at, updated_at)
+             VALUES ('APR-OVERDUE-001', ?, 'sales_manager', 'Discount exceeds strategic cap', '{}', 'pending', 'agent:test', NULL, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&overdue)
+        .bind(&overdue)
+        .execute(&pool)
+        .await
+        .expect("seed overdue approval");
+
+        let html = approvals_index_page(state_with_real_templates(pool))
+            .await
+            .expect("render approvals page")
+            .0;
+
+        assert!(html.contains("Overdue 1"), "overdue summary should count breached approvals");
+        assert!(
+            html.contains("Critical"),
+            "overdue and high-impact approvals should render critical urgency"
+        );
     }
 
     #[tokio::test]
@@ -6363,6 +7002,50 @@ mod tests {
         .await
         .expect("seed approval");
 
+        sqlx::query(
+            "INSERT INTO portal_comment
+                (id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at)
+             VALUES ('PC-ROOT-1', ?, NULL, NULL, 'Approver A', 'approver@company.com', '[INFO REQUEST] Can you justify the 20% discount?\\n---\\nNeed policy basis before approval.', ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed root discussion comment");
+
+        sqlx::query(
+            "INSERT INTO portal_comment
+                (id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at)
+             VALUES ('PC-REPLY-1', ?, NULL, 'PC-ROOT-1', 'Rep B', 'portal:rep@company.com', 'Using strategic expansion allowance approved for this account.', ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed discussion reply");
+
+        sqlx::query(
+            "INSERT INTO portal_comment
+                (id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at)
+             VALUES ('PC-REPLY-2', ?, NULL, 'PC-REPLY-1', 'Approver A', 'approver@company.com', '[INFO REQUEST] Please attach competitor quote excerpt for records.', ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed nested discussion reply");
+
+        sqlx::query(
+            "INSERT INTO portal_comment
+                (id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at)
+             VALUES ('PC-REV-1', ?, NULL, NULL, 'Approver A', 'approver@company.com', '[REVISION LOOP] Reduce discount to 15% and resubmit for final approval.', ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed revision request comment");
+
         let html = approval_detail_page(
             axum::extract::Path("APR-CTX-001".to_string()),
             state_with_real_templates(pool),
@@ -6378,6 +7061,18 @@ mod tests {
         // Quote line context
         assert!(body.contains("Enterprise License"), "should contain product name");
         assert!(body.contains("20"), "should contain discount percentage");
+        // Discussion workspace
+        assert!(body.contains("Discussion Workspace"), "should render discussion workspace");
+        assert!(body.contains("Info Request"), "should render request kind label");
+        assert!(body.contains("Revision Request"), "should render revision request markers");
+        assert!(
+            body.contains("Using strategic expansion allowance approved for this account."),
+            "should render threaded reply content"
+        );
+        assert!(
+            body.contains("Please attach competitor quote excerpt for records."),
+            "should render nested threaded reply content"
+        );
         // Actions
         assert!(body.contains("Approve"), "should contain approve action");
         assert!(body.contains("Reject"), "should contain reject action");

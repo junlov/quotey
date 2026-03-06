@@ -18,6 +18,7 @@
             --muted: #475569;
             --ok: #047857;
             --warn: #92400e;
+            --danger: #b91c1c;
             --shadow-card: 0 10px 20px rgba(15, 23, 42, 0.08);
             --motion-fast: 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
             --motion-medium: 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
@@ -35,7 +36,7 @@
         }
 
         .shell {
-            width: min(720px, 100%);
+            width: min(860px, 100%);
             margin: 0 auto;
             padding: 20px 14px 26px;
             display: grid;
@@ -91,12 +92,55 @@
             text-decoration: none;
         }
 
-        .cards {
+        .summary-grid {
             display: grid;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
             gap: 10px;
+            margin-top: 6px;
         }
 
-        .card {
+        .summary-card {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--surface-alt);
+            padding: 10px 12px;
+            display: grid;
+            gap: 6px;
+        }
+
+        .summary-label {
+            margin: 0;
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+        }
+
+        .summary-values {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .pill {
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+            border-radius: 999px;
+            padding: 4px 8px;
+            font-size: 11px;
+            font-weight: 700;
+            border: 1px solid var(--border);
+            background: white;
+            color: var(--text);
+        }
+
+        .pill-overdue { border-color: #fecaca; color: #991b1b; background: #fee2e2; }
+        .pill-risk { border-color: #fde68a; color: #92400e; background: #fef3c7; }
+        .pill-track { border-color: #86efac; color: #166534; background: #dcfce7; }
+
+        .queue-section {
             border: 1px solid var(--border);
             border-radius: 14px;
             background: var(--surface);
@@ -105,6 +149,51 @@
             display: grid;
             gap: 10px;
         }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            gap: 10px;
+        }
+
+        .section-title {
+            margin: 0;
+            font-size: 1rem;
+            font-weight: 800;
+        }
+
+        .section-description {
+            margin: 0;
+            color: var(--muted);
+            font-size: 13px;
+        }
+
+        .section-count {
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 700;
+            background: var(--surface-alt);
+        }
+
+        .cards {
+            display: grid;
+            gap: 10px;
+        }
+
+        .card {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--surface);
+            padding: 12px;
+            display: grid;
+            gap: 9px;
+        }
+
+        .card.urgency-critical { border-color: #fecaca; box-shadow: 0 8px 20px rgba(185, 28, 28, 0.12); }
+        .card.urgency-high { border-color: #fde68a; }
 
         .card-head {
             display: flex;
@@ -140,6 +229,26 @@
             line-height: 1.45;
         }
 
+        .chips {
+            display: flex;
+            flex-wrap: wrap;
+            gap: 6px;
+        }
+
+        .chip {
+            border-radius: 999px;
+            padding: 3px 8px;
+            font-size: 11px;
+            font-weight: 700;
+            border: 1px solid var(--border);
+        }
+
+        .chip-critical { background: #fee2e2; color: #991b1b; border-color: #fecaca; }
+        .chip-high { background: #fef3c7; color: #92400e; border-color: #fde68a; }
+        .chip-normal { background: #dcfce7; color: #166534; border-color: #86efac; }
+        .chip-type { background: #eff6ff; color: #1d4ed8; border-color: #bfdbfe; }
+        .chip-sla { background: var(--surface-alt); color: var(--muted); }
+
         .decision {
             display: flex;
             align-items: center;
@@ -165,11 +274,17 @@
             font-weight: 700;
             font-size: 13px;
             padding: 8px 12px;
+            transition:
+                background-color var(--motion-fast),
+                transform var(--motion-fast),
+                box-shadow var(--motion-fast);
         }
 
         .open:hover,
         .open:focus-visible {
             background: var(--primary-dark);
+            transform: translateY(-1px);
+            box-shadow: 0 10px 18px rgba(37, 99, 235, 0.2);
         }
 
         .empty {
@@ -182,6 +297,7 @@
         }
 
         .hero,
+        .queue-section,
         .card {
             transition: box-shadow var(--motion-medium), transform var(--motion-fast), border-color var(--motion-fast);
         }
@@ -190,18 +306,6 @@
             transform: translateY(-2px);
             box-shadow: 0 14px 26px rgba(15, 23, 42, 0.1);
         }
-
-        .open {
-            transition:
-                background-color var(--motion-fast),
-                transform var(--motion-fast),
-                box-shadow var(--motion-fast);
-        }
-        .open:hover {
-            transform: translateY(-1px);
-            box-shadow: 0 10px 18px rgba(37, 99, 235, 0.2);
-        }
-        .open:active { transform: scale(0.97); }
 
         :focus-visible {
             outline: none;
@@ -220,12 +324,8 @@
         }
 
         .hero,
-        .card {
+        .queue-section {
             animation: approvals-fade-up 240ms var(--motion-medium) both;
-        }
-
-        .card:nth-child(2n) {
-            animation-delay: 35ms;
         }
 
         @media (min-width: 768px) {
@@ -241,6 +341,7 @@
                 transition-duration: 0.01ms !important;
             }
             .hero,
+            .queue-section,
             .card {
                 animation: none !important;
             }
@@ -257,30 +358,71 @@
                 <span class="badge">{{ count }} pending</span>
                 <a class="link" href="/settings">Notification Settings</a>
             </div>
+            <div class="summary-grid" aria-label="Approval queue segmentation summary">
+                <section class="summary-card">
+                    <p class="summary-label">SLA Segments</p>
+                    <div class="summary-values">
+                        <span class="pill pill-overdue">Overdue {{ queue_breakdown.sla.overdue }}</span>
+                        <span class="pill pill-risk">At Risk {{ queue_breakdown.sla.at_risk }}</span>
+                        <span class="pill pill-track">On Track {{ queue_breakdown.sla.on_track }}</span>
+                    </div>
+                </section>
+                <section class="summary-card">
+                    <p class="summary-label">Approval Types</p>
+                    <div class="summary-values">
+                        <span class="pill">Discount {{ queue_breakdown.types.discount_exception }}</span>
+                        <span class="pill">Terms {{ queue_breakdown.types.commercial_terms }}</span>
+                        <span class="pill">Policy {{ queue_breakdown.types.policy_review }}</span>
+                    </div>
+                </section>
+            </div>
         </header>
 
-        {% if approvals | length > 0 %}
-        <section class="cards" aria-live="polite">
-            {% for approval in approvals %}
-            <article class="card" aria-label="Approval {{ approval.approval_id }}">
-                <div class="card-head">
-                    <div>
-                        <h2 class="customer">{{ approval.customer_name }}</h2>
-                        <p class="quote-id">{{ approval.quote_id }} • {{ approval.approval_id }}</p>
+        {% if approval_sections | length > 0 and count > 0 %}
+        {% for section in approval_sections %}
+        <section class="queue-section queue-{{ section.id }}" aria-label="{{ section.title }} approvals">
+            <header class="section-header">
+                <div>
+                    <h2 class="section-title">{{ section.title }}</h2>
+                    <p class="section-description">{{ section.description }}</p>
+                </div>
+                <span class="section-count">{{ section.count }}</span>
+            </header>
+
+            {% if section.items | length > 0 %}
+            <div class="cards" aria-live="polite">
+                {% for approval in section.items %}
+                <article class="card urgency-{{ approval.urgency_key }}" aria-label="Approval {{ approval.approval_id }}">
+                    <div class="card-head">
+                        <div>
+                            <h3 class="customer">{{ approval.customer_name }}</h3>
+                            <p class="quote-id">{{ approval.quote_id }} • {{ approval.approval_id }}</p>
+                        </div>
+                        <p class="total">{{ approval.total_amount }}</p>
                     </div>
-                    <p class="total">{{ approval.total_amount }}</p>
-                </div>
 
-                <p class="meta">{{ approval.discount_pct }} discount • Requested {{ approval.requested_at }}</p>
-                <p class="meta">Reason: {{ approval.reason }}</p>
+                    <div class="chips" aria-label="Urgency and type">
+                        <span class="chip chip-{{ approval.urgency_key }}">{{ approval.urgency_label }}</span>
+                        <span class="chip chip-type">{{ approval.type_label }}</span>
+                        <span class="chip chip-sla">{{ approval.sla_label }}</span>
+                    </div>
 
-                <div class="decision">
-                    <p class="role">Approver role: {{ approval.approver_role }}</p>
-                    <a class="open" href="{{ approval.detail_href }}" aria-label="View approval {{ approval.approval_id }}">View</a>
-                </div>
-            </article>
-            {% endfor %}
+                    <p class="meta">{{ approval.discount_pct }} discount • Requested {{ approval.requested_age }}</p>
+                    <p class="meta">{{ approval.sla_hint }}</p>
+                    <p class="meta">Reason: {{ approval.reason }}</p>
+
+                    <div class="decision">
+                        <p class="role">Approver role: {{ approval.approver_role }}</p>
+                        <a class="open" href="{{ approval.detail_href }}" aria-label="View approval {{ approval.approval_id }}">View</a>
+                    </div>
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="empty">No approvals in this segment.</p>
+            {% endif %}
         </section>
+        {% endfor %}
         {% else %}
         <p class="empty">No pending approvals. New approval requests will appear here as soon as they are routed.</p>
         {% endif %}

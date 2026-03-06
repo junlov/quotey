@@ -910,7 +910,7 @@
                 <article class="pipeline-column" data-column-status="pending">
                     <header class="pipeline-column-header">
                         <h3 class="pipeline-column-title">Pending</h3>
-                        <span class="pipeline-column-count" data-count-status="pending">{{ stats.pending | default(value=0) }}</span>
+                        <span class="pipeline-column-count" data-count-status="pending">{{ pipeline_counts.pending | default(value=0) }}</span>
                     </header>
                     <div class="pipeline-cards">
                         {% for quote in quotes %}
@@ -946,7 +946,7 @@
                 <article class="pipeline-column" data-column-status="sent">
                     <header class="pipeline-column-header">
                         <h3 class="pipeline-column-title">Sent</h3>
-                        <span class="pipeline-column-count" data-count-status="sent">0</span>
+                        <span class="pipeline-column-count" data-count-status="sent">{{ pipeline_counts.sent | default(value=0) }}</span>
                     </header>
                     <div class="pipeline-cards">
                         {% for quote in quotes %}
@@ -982,7 +982,7 @@
                 <article class="pipeline-column" data-column-status="approved">
                     <header class="pipeline-column-header">
                         <h3 class="pipeline-column-title">Approved</h3>
-                        <span class="pipeline-column-count" data-count-status="approved">{{ stats.approved | default(value=0) }}</span>
+                        <span class="pipeline-column-count" data-count-status="approved">{{ pipeline_counts.approved | default(value=0) }}</span>
                     </header>
                     <div class="pipeline-cards">
                         {% for quote in quotes %}
@@ -1018,7 +1018,7 @@
                 <article class="pipeline-column" data-column-status="declined">
                     <header class="pipeline-column-header">
                         <h3 class="pipeline-column-title">Declined</h3>
-                        <span class="pipeline-column-count" data-count-status="declined">{{ stats.declined | default(value=0) }}</span>
+                        <span class="pipeline-column-count" data-count-status="declined">{{ pipeline_counts.declined | default(value=0) }}</span>
                     </header>
                     <div class="pipeline-cards">
                         {% for quote in quotes %}
@@ -1054,7 +1054,7 @@
                 <article class="pipeline-column" data-column-status="expired">
                     <header class="pipeline-column-header">
                         <h3 class="pipeline-column-title">Expired</h3>
-                        <span class="pipeline-column-count" data-count-status="expired">{{ stats.expired | default(value=0) }}</span>
+                        <span class="pipeline-column-count" data-count-status="expired">{{ pipeline_counts.expired | default(value=0) }}</span>
                     </header>
                     <div class="pipeline-cards">
                         {% for quote in quotes %}

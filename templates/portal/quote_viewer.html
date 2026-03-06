@@ -804,6 +804,71 @@
             font-size: 13px;
         }
 
+        /* ========== ACTIVITY FEED ========== */
+        .activity-feed-list {
+            display: flex;
+            flex-direction: column;
+            gap: 12px;
+        }
+
+        .activity-item {
+            padding: 14px 16px;
+            background: var(--bg-elevated);
+            border-radius: var(--radius);
+            border-left: 3px solid var(--info-color);
+        }
+
+        .activity-item.tone-decision {
+            border-left-color: var(--success-color);
+        }
+
+        .activity-item.tone-comment {
+            border-left-color: var(--primary-color);
+        }
+
+        .activity-item.tone-warning {
+            border-left-color: var(--warning-color);
+        }
+
+        .activity-item.tone-system {
+            border-left-color: var(--secondary-color);
+        }
+
+        .activity-item-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            flex-wrap: wrap;
+            gap: 8px;
+            margin-bottom: 6px;
+        }
+
+        .activity-item-title {
+            font-size: 13px;
+            font-weight: 700;
+            color: var(--text-primary);
+        }
+
+        .activity-item-time {
+            font-size: 11px;
+            color: var(--text-tertiary);
+            font-family: 'SF Mono', Monaco, monospace;
+        }
+
+        .activity-item-detail {
+            font-size: 13px;
+            color: var(--text-secondary);
+            line-height: 1.45;
+        }
+
+        .activity-item-actor {
+            margin-top: 6px;
+            font-size: 11px;
+            color: var(--text-tertiary);
+            text-transform: uppercase;
+            letter-spacing: 0.4px;
+        }
+
         /* ========== COMMENTS SECTION ========== */
         .comments-card {
             background: var(--bg-card);
@@ -1790,6 +1855,39 @@
                 </div>
             </article>
 
+            <!-- Activity Feed -->
+            <section class="card" aria-labelledby="activity-feed-heading">
+                <div class="card-header">
+                    <h2 class="card-title" id="activity-feed-heading">
+                        <svg fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M12 6v6l4 2m6-2a10 10 0 11-20 0 10 10 0 0120 0z"/></svg>
+                        Activity Feed
+                    </h2>
+                </div>
+                <div class="card-body">
+                    <div class="activity-feed-list" id="activityFeedList" role="list" aria-label="Quote activity history">
+                        {% if activity_feed and activity_feed | length > 0 %}
+                            {% for activity in activity_feed %}
+                            <div class="activity-item tone-{{ activity.tone | default(value='update') }}" role="listitem" data-event-type="{{ activity.event_type | default(value='') }}">
+                                <div class="activity-item-header">
+                                    <span class="activity-item-title">{{ activity.title | default(value='Activity') }}</span>
+                                    <span class="activity-item-time">{{ activity.timestamp | default(value='') }}</span>
+                                </div>
+                                <p class="activity-item-detail">{{ activity.detail | default(value='State change recorded in audit trail') }}</p>
+                                <p class="activity-item-actor">Actor: {{ activity.actor | default(value='Portal System') }}</p>
+                            </div>
+                            {% endfor %}
+                        {% else %}
+                            <div class="empty-state">
+                                <svg fill="none" stroke="currentColor" viewBox="0 0 24 24" aria-hidden="true">
+                                    <path stroke-linecap="round" stroke-linejoin="round" stroke-width="1.5" d="M12 8v4l3 3m6-3a9 9 0 11-18 0 9 9 0 0118 0z"/>
+                                </svg>
+                                <p>No activity recorded yet.</p>
+                            </div>
+                        {% endif %}
+                    </div>
+                </div>
+            </section>
+
             <!-- Comments Section -->
             <section class="comments-card" aria-labelledby="comments-heading">
                 <div class="comment-form">
@@ -2256,6 +2354,35 @@
             button.classList.toggle('loading', isLoading);
         }
 
+        function formatActivityTimestamp(date = new Date()) {
+            const pad = (value) => String(value).padStart(2, '0');
+            return `${date.getUTCFullYear()}-${pad(date.getUTCMonth() + 1)}-${pad(date.getUTCDate())} ${pad(date.getUTCHours())}:${pad(date.getUTCMinutes())}:${pad(date.getUTCSeconds())}Z`;
+        }
+
+        function prependActivityEvent({ title, detail, actor, tone = 'update', eventType = 'portal.comment' }) {
+            const feed = document.getElementById('activityFeedList');
+            if (!feed) return;
+
+            const emptyState = feed.querySelector('.empty-state');
+            if (emptyState) {
+                emptyState.remove();
+            }
+
+            const item = document.createElement('div');
+            item.className = `activity-item tone-${tone}`;
+            item.setAttribute('role', 'listitem');
+            item.dataset.eventType = eventType;
+            item.innerHTML = `
+                <div class="activity-item-header">
+                    <span class="activity-item-title">${escapeHtml(title || 'Activity')}</span>
+                    <span class="activity-item-time">${formatActivityTimestamp()}</span>
+                </div>
+                <p class="activity-item-detail">${escapeHtml(detail || 'State change recorded in audit trail')}</p>
+                <p class="activity-item-actor">Actor: ${escapeHtml(actor || 'Portal User')}</p>
+            `;
+            feed.insertBefore(item, feed.firstChild);
+        }
+
         // Submit approval
         async function submitApproval(event) {
             event.preventDefault();
@@ -2381,6 +2508,13 @@
                         <p class="comment-text">${escapeHtml(text)}</p>
                     `;
                     commentList.insertBefore(newComment, commentList.firstChild);
+                    prependActivityEvent({
+                        title: 'Comment added',
+                        detail: text,
+                        actor: 'Portal User',
+                        tone: 'comment',
+                        eventType: 'portal.comment'
+                    });
                     
                     showToast('Comment posted successfully!', 'success');
                 } else {

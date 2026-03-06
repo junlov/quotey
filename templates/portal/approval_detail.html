@@ -84,6 +84,7 @@
         .status-pending { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
         .status-approved { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
         .status-rejected { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+        .status-declined { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
 
         .meta-grid {
             display: grid;
@@ -169,6 +170,162 @@
         .impact-card .impact-label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
         .impact-card .impact-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
         .impact-highlight { color: var(--warn); }
+
+        .discussion-header {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            flex-wrap: wrap;
+            margin-bottom: 10px;
+        }
+
+        .discussion-metrics {
+            display: flex;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .discussion-metric {
+            border: 1px solid var(--border);
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 700;
+            background: var(--surface-alt);
+            color: var(--muted);
+        }
+
+        .discussion-metric-warning {
+            background: #fef3c7;
+            border-color: #fde68a;
+            color: #92400e;
+        }
+
+        .discussion-metric-revision {
+            background: #e0e7ff;
+            border-color: #c7d2fe;
+            color: #3730a3;
+        }
+
+        .revision-trigger {
+            border: 1px solid #bfdbfe;
+            background: #eff6ff;
+            color: #1d4ed8;
+            border-radius: 10px;
+            padding: 8px 12px;
+            font-size: 13px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .revision-trigger:hover { background: #dbeafe; }
+
+        .discussion-threads {
+            display: grid;
+            gap: 10px;
+        }
+
+        .thread {
+            border: 1px solid var(--border);
+            border-radius: 12px;
+            background: var(--surface-alt);
+            padding: 12px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .thread-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            gap: 8px;
+            flex-wrap: wrap;
+        }
+
+        .thread-kind {
+            border-radius: 999px;
+            padding: 3px 8px;
+            font-size: 11px;
+            font-weight: 700;
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            border: 1px solid var(--border);
+            background: white;
+            color: var(--muted);
+        }
+        .thread-kind-question,
+        .thread-kind-line_question {
+            background: #fef3c7;
+            border-color: #fde68a;
+            color: #92400e;
+        }
+        .thread-kind-revision {
+            background: #e0e7ff;
+            border-color: #c7d2fe;
+            color: #3730a3;
+        }
+        .thread-kind-rep_note {
+            background: #dcfce7;
+            border-color: #86efac;
+            color: #166534;
+        }
+
+        .thread-meta {
+            font-size: 12px;
+            color: var(--muted);
+        }
+
+        .thread-body {
+            margin: 0;
+            font-size: 14px;
+            line-height: 1.45;
+            white-space: pre-wrap;
+        }
+
+        .thread-context {
+            margin: 0;
+            font-size: 12px;
+            color: var(--muted);
+            border-left: 3px solid #cbd5e1;
+            padding-left: 8px;
+        }
+
+        .thread-line {
+            display: inline-block;
+            border: 1px solid #bfdbfe;
+            border-radius: 999px;
+            padding: 3px 8px;
+            font-size: 11px;
+            font-weight: 700;
+            color: #1d4ed8;
+            background: #eff6ff;
+        }
+
+        .thread-replies {
+            border-top: 1px dashed #cbd5e1;
+            padding-top: 8px;
+            display: grid;
+            gap: 8px;
+        }
+
+        .reply {
+            border: 1px solid #dbe3ef;
+            border-radius: 8px;
+            background: white;
+            padding: 8px 10px;
+            display: grid;
+            gap: 6px;
+        }
+
+        .discussion-empty {
+            border: 1px dashed var(--border);
+            border-radius: 10px;
+            padding: 14px;
+            margin: 0;
+            color: var(--muted);
+            background: white;
+            font-size: 14px;
+        }
 
         .actions-bar {
             position: fixed;
@@ -480,6 +637,60 @@
             <p style="margin:0; line-height:1.6;">{{ approval.justification }}</p>
         </div>
         {% endif %}
+
+        <!-- Discussion Workspace -->
+        <div class="card">
+            <p class="card-title">Discussion Workspace</p>
+            <div class="discussion-header">
+                <div class="discussion-metrics">
+                    <span class="discussion-metric">{{ discussion.count }} messages</span>
+                    <span class="discussion-metric discussion-metric-warning">{{ discussion.open_question_count }} open questions</span>
+                    <span class="discussion-metric discussion-metric-revision">{{ discussion.revision_request_count }} revision requests</span>
+                </div>
+                {% if approval.status == "pending" %}
+                <button class="revision-trigger" onclick="showRevisionModal()">Request Revision</button>
+                {% endif %}
+            </div>
+
+            {% if discussion.threads | length > 0 %}
+            <div class="discussion-threads" aria-live="polite">
+                {% for thread in discussion.threads %}
+                <article class="thread">
+                    <div class="thread-head">
+                        <span class="thread-kind thread-kind-{{ thread.root.kind }}">{{ thread.root.kind_label }}</span>
+                        <span class="thread-meta">{{ thread.root.author }} • {{ thread.root.age }}</span>
+                    </div>
+                    <p class="thread-body">{{ thread.root.body }}</p>
+                    {% if thread.root.line_context %}
+                    <span class="thread-line">{{ thread.root.line_context }}</span>
+                    {% endif %}
+                    {% if thread.root.context_note %}
+                    <p class="thread-context">{{ thread.root.context_note }}</p>
+                    {% endif %}
+
+                    {% if thread.replies | length > 0 %}
+                    <div class="thread-replies" aria-label="Replies">
+                        {% for reply in thread.replies %}
+                        <div class="reply">
+                            <div class="thread-head">
+                                <span class="thread-kind thread-kind-{{ reply.kind }}">{{ reply.kind_label }}</span>
+                                <span class="thread-meta">{{ reply.author }} • {{ reply.age }}</span>
+                            </div>
+                            <p class="thread-body">{{ reply.body }}</p>
+                            {% if reply.context_note %}
+                            <p class="thread-context">{{ reply.context_note }}</p>
+                            {% endif %}
+                        </div>
+                        {% endfor %}
+                    </div>
+                    {% endif %}
+                </article>
+                {% endfor %}
+            </div>
+            {% else %}
+            <p class="discussion-empty">No discussion captured yet. Use "Need Info" or "Request Revision" to start an auditable thread.</p>
+            {% endif %}
+        </div>
     </main>
 
     {% if approval.status == "pending" %}
@@ -547,6 +758,22 @@
         </div>
     </div>
 
+    <!-- Revision Modal -->
+    <div id="revision-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="revision-modal-title">
+        <div class="modal">
+            <h2 id="revision-modal-title">Request Revision</h2>
+            <div class="context-ref">
+                Re: Quote {{ quote.quote_id }} &bull; {{ lines | length }} line item(s) &bull; Total: {{ quote.total }}
+            </div>
+            <label for="revision-notes" style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">What should be revised?</label>
+            <textarea id="revision-notes" placeholder="Describe the pricing, scope, or policy adjustments needed..." required aria-required="true"></textarea>
+            <div class="modal-actions">
+                <button class="modal-cancel" onclick="closeModals()">Cancel</button>
+                <button class="btn btn-info" onclick="submitRevisionRequest()">Send Revision Request</button>
+            </div>
+        </div>
+    </div>
+
     <!-- Line-specific Info Modal -->
     <div id="line-info-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="line-info-modal-title">
         <div class="modal">
@@ -573,6 +800,38 @@
         const FALLBACK_PASSWORD_KEY = 'quotey.portal.approval_fallback_password';
         let actionsDisabled = false;
         let lastFocusedElement = null;
+
+        async function postJsonWithRetry(url, payload, retries = 1) {
+            let lastError;
+            for (let attempt = 0; attempt <= retries; attempt += 1) {
+                try {
+                    const response = await fetch(url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(payload),
+                    });
+
+                    let data = {};
+                    try {
+                        data = await response.json();
+                    } catch {
+                        data = {};
+                    }
+
+                    const shouldRetry = response.status >= 500 && attempt < retries;
+                    if (shouldRetry) {
+                        continue;
+                    }
+                    return { response, data };
+                } catch (error) {
+                    lastError = error;
+                    if (attempt >= retries) {
+                        throw error;
+                    }
+                }
+            }
+            throw lastError || new Error('Request failed');
+        }
 
         function loadStoredApproverProfile() {
             return {
@@ -784,6 +1043,12 @@
             if (actionsDisabled) return;
             openModal('info-modal');
         }
+        function showRevisionModal() {
+            if (actionsDisabled) return;
+            const notes = document.getElementById('revision-notes');
+            if (notes) notes.value = '';
+            openModal('revision-modal');
+        }
         function showLineInfoModal(lineId, productName, sku) {
             if (actionsDisabled) return;
             document.getElementById('line-info-line-id').value = lineId;
@@ -893,18 +1158,16 @@
                 };
 
             try {
-                const resp = await fetch(endpoint, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify(body)
-                });
-                const data = await resp.json();
+                const { response, data } = await postJsonWithRetry(endpoint, body, 1);
                 if (data.success) {
                     showBanner(action === 'approved' ? 'Quote approved successfully' : 'Quote rejected', 'success');
                     disableAllActions(action);
                 } else {
                     // Server rejected — approval may no longer be pending
-                    if (resp.status === 409 || (data.message && data.message.includes('not pending'))) {
+                    if (
+                        response.status === 409
+                        || (data.message && data.message.includes('not pending'))
+                    ) {
                         showStale();
                         showBanner('This approval has already been resolved.', 'error');
                     } else {
@@ -926,19 +1189,19 @@
                 + '\n---\nRe: Quote ' + {{ quote.quote_id | json_encode | safe }}
                 + ' | ' + {{ lines | length }} + ' line item(s) | Total: ' + {{ quote.total | json_encode | safe }};
             try {
-                const resp = await fetch(`/quote/${quoteToken}/comment`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
+                const { data } = await postJsonWithRetry(
+                    `/quote/${quoteToken}/comment`,
+                    {
                         text: contextLine,
                         author_name: identity.name,
                         author_email: identity.email,
-                    })
-                });
-                const data = await resp.json();
+                    },
+                    1,
+                );
                 if (data.success) {
                     showBanner('Information request sent to rep', 'success');
                     document.getElementById('info-question').value = '';
+                    setTimeout(() => window.location.reload(), 600);
                 } else {
                     showBanner(data.message || 'Could not send the info request. Please try again.', 'error');
                 }
@@ -957,21 +1220,56 @@
             const contextRef = document.getElementById('line-info-context').textContent;
             const body = '[LINE ITEM QUESTION] ' + question + '\n---\n' + contextRef;
             try {
-                const resp = await fetch(`/quote/${quoteToken}/line/${lineId}/comment`, {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({
+                const { data } = await postJsonWithRetry(
+                    `/quote/${quoteToken}/line/${lineId}/comment`,
+                    {
                         text: body,
                         author_name: identity.name,
                         author_email: identity.email,
-                    })
-                });
-                const data = await resp.json();
+                    },
+                    1,
+                );
                 if (data.success) {
                     showBanner('Question about line item sent to rep', 'success');
                     document.getElementById('line-info-question').value = '';
+                    setTimeout(() => window.location.reload(), 600);
                 } else {
                     showBanner(data.message || 'Could not send the question. Please try again.', 'error');
+                }
+            } catch (e) {
+                showBanner('Unable to reach the server. Check your connection and try again.', 'error');
+            }
+        }
+
+        async function submitRevisionRequest() {
+            if (actionsDisabled) return;
+            const notes = document.getElementById('revision-notes')?.value;
+            if (!notes?.trim()) {
+                alert('Please provide revision guidance for the rep.');
+                return;
+            }
+
+            closeModals();
+            const identity = getCommentAuthorIdentity();
+            const message = '[REVISION LOOP] ' + notes.trim()
+                + '\n---\nRequested in approval workspace for quote ' + {{ quote.quote_id | json_encode | safe }};
+
+            try {
+                const { data } = await postJsonWithRetry(
+                    `/quote/${quoteToken}/comment`,
+                    {
+                        text: message,
+                        author_name: identity.name,
+                        author_email: identity.email,
+                    },
+                    1,
+                );
+                if (data.success) {
+                    showBanner('Revision request sent to rep', 'success');
+                    document.getElementById('revision-notes').value = '';
+                    setTimeout(() => window.location.reload(), 600);
+                } else {
+                    showBanner(data.message || 'Could not send the revision request. Please try again.', 'error');
                 }
             } catch (e) {
                 showBanner('Unable to reach the server. Check your connection and try again.', 'error');
