@@ -5,6 +5,7 @@ pub mod concession;
 pub mod constraint_rule_builder;
 pub mod constraints;
 pub mod counteroffer;
+pub mod discount_budget;
 pub mod discount_policy_builder;
 pub mod draft_quote_builder;
 pub mod escalation;

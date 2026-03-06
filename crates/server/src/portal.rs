@@ -7274,6 +7274,38 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn live_approvals_endpoint_excludes_expired_portal_links() {
+        let (pool, quote_id, _) = setup().await;
+        let expired = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        sqlx::query("UPDATE portal_link SET expires_at = ? WHERE quote_id = ?")
+            .bind(&expired)
+            .bind(&quote_id)
+            .execute(&pool)
+            .await
+            .expect("expire portal link");
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO approval_request
+                (id, quote_id, approver_role, reason, justification, status, requested_by, expires_at, created_at, updated_at)
+             VALUES ('APR-LIVE-EXPIRED', ?, 'sales_manager', 'Discount review', '{}', 'pending', 'agent:test', NULL, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed approval");
+
+        let payload = list_live_approvals(state(pool)).await.expect("live approvals payload").0;
+        assert_eq!(
+            payload["count"].as_u64().unwrap_or(0),
+            0,
+            "live snapshot should ignore approvals whose links are expired"
+        );
+    }
+
+    #[tokio::test]
     async fn live_approval_status_endpoint_returns_comment_metrics() {
         let (pool, quote_id, _) = setup().await;
         let now = Utc::now().to_rfc3339();
@@ -7312,6 +7344,41 @@ mod tests {
         assert_eq!(payload["status"].as_str().unwrap_or(""), "pending");
         assert_eq!(payload["comment_count"].as_i64().unwrap_or(0), 1);
         assert!(payload["is_pending"].as_bool().unwrap_or(false));
+    }
+
+    #[tokio::test]
+    async fn live_approval_status_endpoint_returns_not_found_when_link_is_expired() {
+        let (pool, quote_id, _) = setup().await;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO approval_request
+                (id, quote_id, approver_role, reason, justification, status, requested_by, expires_at, created_at, updated_at)
+             VALUES ('APR-LIVE-EXPIRED-DETAIL', ?, 'sales_manager', 'Discount review', '{}', 'pending', 'agent:test', NULL, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed approval");
+
+        let expired = (Utc::now() - chrono::Duration::minutes(10)).to_rfc3339();
+        sqlx::query("UPDATE portal_link SET expires_at = ? WHERE quote_id = ?")
+            .bind(&expired)
+            .bind(&quote_id)
+            .execute(&pool)
+            .await
+            .expect("expire portal link");
+
+        let result = get_live_approval_status(
+            axum::extract::Path("APR-LIVE-EXPIRED-DETAIL".to_string()),
+            state(pool),
+        )
+        .await;
+        assert!(result.is_err());
+        let (status, error) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(error.error.contains("not found"));
     }
 
     #[tokio::test]
