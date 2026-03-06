@@ -17,6 +17,7 @@ pub mod replay;
 pub mod rule_builder;
 pub mod safety;
 pub mod simulator;
+pub mod telemetry;
 
 use crate::domain::quote::Quote;
 use serde::{Deserialize, Serialize};
