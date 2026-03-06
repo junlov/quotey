@@ -14,9 +14,9 @@ use tracing::{debug, info, warn};
 use std::collections::HashMap;
 
 use std::path::PathBuf;
-use std::process::Command;
 use std::time::Duration;
 use tera::{Context, Tera};
+use tokio::process::Command;
 
 use crate::auth::{AuthManager, AuthResult};
 use quotey_core::domain::quote::Quote;
@@ -27,6 +27,13 @@ const DEFAULT_PAGE_LIMIT: u32 = 20;
 const MAX_LINE_ITEMS: usize = 500;
 const MAX_QUANTITY: u32 = 1_000_000;
 const PORTAL_PUSH_BRIDGE_URL_ENV: &str = "QUOTEY_PORTAL_PUSH_BRIDGE_URL";
+
+/// Return a tool error response with a redacted message for internal errors.
+/// Logs the detailed error server-side for debugging.
+fn internal_tool_error(error: &dyn std::fmt::Display) -> String {
+    warn!(error = %error, "MCP tool internal error (redacted from response)");
+    tool_error("INTERNAL_ERROR", "Internal server error", None)
+}
 
 fn tool_error(code: &str, message: &str, details: Option<serde_json::Value>) -> String {
     let safe_message = if code == "INTERNAL_ERROR" { "Internal server error" } else { message };
@@ -49,6 +56,9 @@ fn normalize_id(value: &str, field: &str) -> Result<String, String> {
     let trimmed = value.trim();
     if trimmed.is_empty() {
         return Err(format!("{field} is required"));
+    }
+    if trimmed.len() > MAX_QUOTE_ID_LEN {
+        return Err(format!("{field} exceeds maximum length"));
     }
     Ok(trimmed.to_string())
 }
@@ -268,6 +278,9 @@ fn hash_tool_arguments(arguments: Option<&serde_json::Map<String, serde_json::Va
     checksum_of(&serialized)
 }
 
+/// Maximum length for quote IDs extracted from tool arguments.
+const MAX_QUOTE_ID_LEN: usize = 64;
+
 fn extract_quote_id_from_arguments(
     arguments: Option<&serde_json::Map<String, serde_json::Value>>,
 ) -> Option<String> {
@@ -275,7 +288,7 @@ fn extract_quote_id_from_arguments(
         .and_then(|args| args.get("quote_id"))
         .and_then(|value| value.as_str())
         .map(str::trim)
-        .filter(|value| !value.is_empty())
+        .filter(|value| !value.is_empty() && value.len() <= MAX_QUOTE_ID_LEN)
         .map(str::to_string)
 }
 
@@ -286,6 +299,59 @@ fn parse_error_code_from_text_payload(text: &str) -> Option<String> {
         .and_then(|error| error.get("code"))
         .and_then(|code| code.as_str())
         .map(str::to_string)
+}
+
+fn parse_authorization_header(value: &str) -> Option<String> {
+    let trimmed = value.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    let Some(split_idx) = trimmed.find(char::is_whitespace) else {
+        if trimmed.eq_ignore_ascii_case("bearer")
+            || trimmed.eq_ignore_ascii_case("apikey")
+            || trimmed.eq_ignore_ascii_case("token")
+        {
+            return None;
+        }
+        return Some(trimmed.to_string());
+    };
+
+    let scheme = &trimmed[..split_idx];
+    let presented_value = trimmed[split_idx..].trim();
+    if presented_value.is_empty() {
+        return None;
+    }
+
+    if scheme.eq_ignore_ascii_case("bearer")
+        || scheme.eq_ignore_ascii_case("apikey")
+        || scheme.eq_ignore_ascii_case("token")
+    {
+        Some(presented_value.to_string())
+    } else {
+        None
+    }
+}
+
+fn extract_api_key_from_meta(meta: &rmcp::model::Meta) -> Option<String> {
+    for key in ["api_key", "x-api-key", "x_api_key"] {
+        if let Some(value) = meta.0.get(key).and_then(|v| v.as_str()) {
+            let trimmed = value.trim();
+            if !trimmed.is_empty() {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+
+    for key in ["authorization", "Authorization"] {
+        if let Some(value) = meta.0.get(key).and_then(|v| v.as_str()) {
+            if let Some(parsed) = parse_authorization_header(value) {
+                return Some(parsed);
+            }
+        }
+    }
+
+    None
 }
 
 fn outcome_from_tool_result(
@@ -772,7 +838,11 @@ impl QuoteyMcpServer {
 
     /// Validate the current request against the auth manager.
     ///
-    /// Clients pass their key via the MCP `_meta` field on tool-call requests:
+    /// Clients pass their key via the MCP `_meta` field on tool-call requests.
+    /// Supported keys: `api_key`, `x-api-key`, `x_api_key`, `authorization`.
+    /// `authorization` accepts bare keys and `Bearer <token>` style values.
+    ///
+    /// Example:
     /// ```json
     /// { "method": "tools/call", "params": {
     ///     "name": "catalog_search",
@@ -781,9 +851,8 @@ impl QuoteyMcpServer {
     /// }}
     /// ```
     async fn check_auth(&self, meta: &rmcp::model::Meta) -> Result<AuthResult, rmcp::ErrorData> {
-        let api_key = meta.0.get("api_key").and_then(|v| v.as_str()); // ubs:ignore (MCP metadata key name, not a secret literal)
-
-        let result = self.auth_manager.validate_request(api_key).await;
+        let presented_key = extract_api_key_from_meta(meta); // ubs:ignore (runtime metadata lookup, not a hardcoded secret)
+        let result = self.auth_manager.validate_request(presented_key.as_deref()).await;
 
         match &result {
             AuthResult::Allowed { key_name, remaining_requests } => {
@@ -796,16 +865,29 @@ impl QuoteyMcpServer {
             }
             AuthResult::Denied { reason, retry_after } => {
                 warn!(reason = %reason, "Authentication denied");
-                let mut error = rmcp::ErrorData::invalid_request(
-                    format!("Authentication failed: {}", reason),
-                    None,
+                let mut data = serde_json::Map::new();
+                data.insert("reason".to_string(), serde_json::json!(reason));
+                data.insert(
+                    "error_code".to_string(),
+                    serde_json::json!(if retry_after.is_some() {
+                        "RATE_LIMIT_EXCEEDED"
+                    } else {
+                        "AUTHENTICATION_FAILED"
+                    }),
                 );
                 if let Some(retry) = retry_after {
-                    error.data = Some(serde_json::json!({
-                        "retry_after": retry
-                    }));
+                    data.insert("http_status".to_string(), serde_json::json!(429));
+                    data.insert("retry_after".to_string(), serde_json::json!(retry));
+                    return Err(rmcp::ErrorData::new(
+                        rmcp::model::ErrorCode(429),
+                        "Rate limit exceeded",
+                        Some(serde_json::Value::Object(data)),
+                    ));
                 }
-                Err(error)
+                Err(rmcp::ErrorData::invalid_request(
+                    format!("Authentication failed: {}", reason),
+                    Some(serde_json::Value::Object(data)),
+                ))
             }
         }
     }
@@ -1254,6 +1336,65 @@ pub struct ApprovalPendingResult {
     pub total: u32,
 }
 
+// Anomaly Override Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AnomalyOverrideInput {
+    /// The quote ID the anomaly was detected on
+    pub quote_id: String,
+    /// The anomaly rule kind: discount, margin, quantity, or price
+    pub rule_kind: String,
+    /// The severity of the anomaly: none, info, warning, or critical
+    pub severity: String,
+    /// Written justification explaining why the override is acceptable
+    pub justification: String,
+    /// The rep or user performing the override
+    pub overridden_by: String,
+}
+
+// Negotiation Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NegotiationStartInput {
+    /// The quote ID to negotiate on
+    pub quote_id: String,
+    /// The actor (rep) starting the negotiation
+    pub actor_id: String,
+    /// Idempotency key to prevent duplicate sessions
+    #[serde(default)]
+    pub idempotency_key: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NegotiationEvaluateInput {
+    /// The negotiation session ID
+    pub session_id: String,
+    /// Requested discount percentage
+    #[serde(default)]
+    pub discount_pct: Option<f64>,
+    /// Requested margin percentage
+    #[serde(default)]
+    pub margin_pct: Option<f64>,
+    /// Requested term in months
+    #[serde(default)]
+    pub term_months: Option<f64>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NegotiationStatusInput {
+    /// The negotiation session ID
+    pub session_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct NegotiationEscalateInput {
+    /// The negotiation session ID to escalate
+    pub session_id: String,
+    /// The offer ID being escalated (optional)
+    #[serde(default)]
+    pub offer_id: String,
+    /// Reason for escalation
+    pub reason: String,
+}
+
 // PDF Types
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct QuotePdfInput {
@@ -1386,15 +1527,102 @@ async fn render_quote_pdf_html_to_bytes(
     }));
     context
         .insert("sales_rep", &payload.get("sales_rep").cloned().unwrap_or(serde_json::json!({})));
+
+    let branding = payload.get("branding");
+    let read_string = |key: &str| -> Option<String> {
+        branding
+            .and_then(|value| value.get(key))
+            .or_else(|| payload.get(key))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    };
+    let read_bool = |key: &str| -> Option<bool> {
+        branding
+            .and_then(|value| value.get(key))
+            .or_else(|| payload.get(key))
+            .and_then(serde_json::Value::as_bool)
+    };
+
+    let company_name = read_string("company_name").unwrap_or_else(|| "Quotey".to_string());
+    let company_logo = read_string("company_logo");
+    let company_address = read_string("company_address");
+    let company_email = read_string("company_email");
+    let support_email = read_string("support_email")
+        .or_else(|| read_string("contact_email"))
+        .or(company_email.clone());
+    let sender_name = read_string("sender_name").or_else(|| read_string("contact_name"));
+    let company_phone = read_string("company_phone");
+    let primary_color = read_string("primary_color").unwrap_or_else(|| "#2563eb".to_string());
+    let secondary_color = read_string("secondary_color").unwrap_or_else(|| "#1e40af".to_string());
+    let accent_color = read_string("accent_color").unwrap_or_else(|| "#3b82f6".to_string());
+    let footer_text = read_string("footer_text");
+    let terms_footer = read_string("terms_footer")
+        .or_else(|| read_string("custom_terms_footer"))
+        .or_else(|| footer_text.clone());
+    let white_label = read_bool("white_label").unwrap_or(false);
+
+    let support_contact_name = sender_name.clone().or_else(|| {
+        payload
+            .get("sales_rep")
+            .and_then(|value| value.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    });
+    let support_contact_email = support_email.clone().or_else(|| {
+        payload
+            .get("sales_rep")
+            .and_then(|value| value.get("email"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+    });
+
+    context.insert("company_name", &company_name);
+    context.insert("company_logo", &company_logo);
+    context.insert("company_address", &company_address);
+    context.insert("company_email", &company_email);
+    context.insert("support_email", &support_email);
+    context.insert("sender_name", &sender_name);
+    context.insert("company_phone", &company_phone);
+    context.insert("primary_color", &primary_color);
+    context.insert("secondary_color", &secondary_color);
+    context.insert("accent_color", &accent_color);
+    context.insert("footer_text", &footer_text);
+    context.insert("terms_footer", &terms_footer);
     context.insert(
-        "company_name",
-        &payload.get("company_name").cloned().unwrap_or(serde_json::json!("Quotey")),
+        "support_contact_name",
+        &support_contact_name.clone().unwrap_or_else(|| "your sales representative".to_string()),
     );
     context.insert(
-        "primary_color",
-        &payload.get("primary_color").cloned().unwrap_or(serde_json::json!("#2563eb")),
+        "support_contact_email",
+        &support_contact_email.clone().unwrap_or_else(|| "sales@example.com".to_string()),
     );
-    context.insert("white_label", &false);
+    context.insert("white_label", &white_label);
+    context.insert(
+        "branding",
+        &serde_json::json!({
+            "company_name": company_name.clone(),
+            "logo_url": company_logo.clone(),
+            "company_logo": company_logo.clone(),
+            "company_address": company_address.clone(),
+            "company_email": company_email.clone(),
+            "contact_email": support_email.clone(),
+            "support_email": support_email.clone(),
+            "company_phone": company_phone.clone(),
+            "primary_color": primary_color.clone(),
+            "secondary_color": secondary_color.clone(),
+            "accent_color": accent_color.clone(),
+            "footer_text": footer_text.clone(),
+            "terms_footer": terms_footer.clone(),
+            "sender_name": sender_name.clone(),
+            "white_label": white_label,
+        }),
+    );
 
     let template_name = format!("{}.html.tera", template);
     let html = tera.render(&template_name, &context).map_err(|e| e.to_string())?;
@@ -1402,7 +1630,7 @@ async fn render_quote_pdf_html_to_bytes(
     let temp_dir = std::env::temp_dir();
     let html_path: PathBuf = temp_dir.join(format!("quotey-mcp-{}.html", uuid::Uuid::new_v4()));
     let pdf_path: PathBuf = temp_dir.join(format!("quotey-mcp-{}.pdf", uuid::Uuid::new_v4()));
-    std::fs::write(&html_path, html.as_bytes()).map_err(|e| e.to_string())?;
+    tokio::fs::write(&html_path, html.as_bytes()).await.map_err(|e| e.to_string())?;
 
     let output = Command::new("wkhtmltopdf")
         .arg("--page-size")
@@ -1420,30 +1648,31 @@ async fn render_quote_pdf_html_to_bytes(
         .arg("--enable-local-file-access")
         .arg(&html_path)
         .arg(&pdf_path)
-        .output();
+        .output()
+        .await;
 
-    let cleanup = |html_path: PathBuf, pdf_path: PathBuf| {
-        let _ = std::fs::remove_file(html_path);
-        let _ = std::fs::remove_file(pdf_path);
-    };
+    async fn cleanup(html_path: &PathBuf, pdf_path: &PathBuf) {
+        let _ = tokio::fs::remove_file(html_path).await;
+        let _ = tokio::fs::remove_file(pdf_path).await;
+    }
 
     match output {
         Ok(result) if result.status.success() => {
-            let pdf_bytes = match std::fs::read(&pdf_path) {
+            let pdf_bytes = match tokio::fs::read(&pdf_path).await {
                 Ok(bytes) => bytes,
                 Err(read_err) => {
                     warn!(error = %read_err, "quote_pdf: failed to read generated PDF, returning HTML fallback");
-                    cleanup(html_path, pdf_path);
+                    cleanup(&html_path, &pdf_path).await;
                     return Ok(PdfRenderResult::Html(html));
                 }
             };
-            cleanup(html_path, pdf_path);
+            cleanup(&html_path, &pdf_path).await;
             Ok(PdfRenderResult::Pdf(pdf_bytes))
         }
         Ok(result) => {
             let stderr = String::from_utf8_lossy(&result.stderr);
             warn!(stderr = %stderr, "quote_pdf: wkhtmltopdf returned non-zero status, using HTML fallback");
-            cleanup(html_path, pdf_path);
+            cleanup(&html_path, &pdf_path).await;
             Ok(PdfRenderResult::Html(html))
         }
         Err(err) => {
@@ -1452,7 +1681,7 @@ async fn render_quote_pdf_html_to_bytes(
             } else {
                 warn!(error = %err, "quote_pdf: wkhtmltopdf command failed, using HTML fallback");
             }
-            cleanup(html_path, pdf_path);
+            cleanup(&html_path, &pdf_path).await;
             Ok(PdfRenderResult::Html(html))
         }
     }
@@ -1560,7 +1789,7 @@ impl QuoteyMcpServer {
             }
             Err(e) => {
                 warn!(error = %e, "catalog_search failed");
-                tool_error("INTERNAL_ERROR", &e.to_string(), None)
+                internal_tool_error(&e)
             }
         }
     }
@@ -1617,7 +1846,7 @@ impl QuoteyMcpServer {
             }
             Err(e) => {
                 warn!(error = %e, "catalog_get failed");
-                tool_error("INTERNAL_ERROR", &e.to_string(), None)
+                internal_tool_error(&e)
             }
         }
     }
@@ -1726,7 +1955,7 @@ impl QuoteyMcpServer {
                 }
                 Err(e) => {
                     warn!(error = %e, "quote_create: failed to load product");
-                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                    return internal_tool_error(&e);
                 }
             };
 
@@ -1810,7 +2039,7 @@ impl QuoteyMcpServer {
             }
             Err(e) => {
                 warn!(error = %e, "quote_create failed");
-                tool_error("INTERNAL_ERROR", &e.to_string(), None)
+                internal_tool_error(&e)
             }
         }
     }
@@ -1923,7 +2152,7 @@ impl QuoteyMcpServer {
             Ok(None) => tool_error("NOT_FOUND", &format!("Quote '{}' not found", quote_id), None),
             Err(e) => {
                 warn!(error = %e, "quote_get failed");
-                tool_error("INTERNAL_ERROR", &e.to_string(), None)
+                internal_tool_error(&e)
             }
         }
     }
@@ -1974,7 +2203,7 @@ impl QuoteyMcpServer {
             }
             Err(e) => {
                 warn!(error = %e, "quote_price: failed to load quote");
-                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                return internal_tool_error(&e);
             }
         };
 
@@ -2156,7 +2385,7 @@ impl QuoteyMcpServer {
             }
             Err(e) => {
                 warn!(error = %e, "quote_list failed");
-                tool_error("INTERNAL_ERROR", &e.to_string(), None)
+                internal_tool_error(&e)
             }
         }
     }
@@ -2222,7 +2451,7 @@ impl QuoteyMcpServer {
             }
             Err(e) => {
                 warn!(error = %e, "approval_request: failed to load quote");
-                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                return internal_tool_error(&e);
             }
         };
 
@@ -2253,7 +2482,7 @@ impl QuoteyMcpServer {
                 Ok(existing) => existing,
                 Err(e) => {
                     warn!(error = %e, "approval_request: failed to load existing approvals");
-                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                    return internal_tool_error(&e);
                 }
             };
 
@@ -2295,7 +2524,7 @@ impl QuoteyMcpServer {
         let repo = quotey_db::repositories::SqlApprovalRepository::new(self.db_pool.clone());
         if let Err(e) = repo.save(approval).await {
             warn!(error = %e, "approval_request: failed to save");
-            return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+            return internal_tool_error(&e);
         }
 
         self.dispatch_pending_approval_push_notifications(&quote, &approval_id, &approver_role)
@@ -2349,7 +2578,7 @@ impl QuoteyMcpServer {
             Ok(a) => a,
             Err(e) => {
                 warn!(error = %e, "approval_status: failed to load approvals");
-                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                return internal_tool_error(&e);
             }
         };
 
@@ -2417,7 +2646,7 @@ impl QuoteyMcpServer {
             Ok(p) => p,
             Err(e) => {
                 warn!(error = %e, "approval_pending: failed to list");
-                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                return internal_tool_error(&e);
             }
         };
 
@@ -2510,7 +2739,7 @@ impl QuoteyMcpServer {
             }
             Err(e) => {
                 warn!(error = %e, "quote_pdf: failed to load quote");
-                return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                return internal_tool_error(&e);
             }
         };
 
@@ -2519,7 +2748,7 @@ impl QuoteyMcpServer {
             Ok(rendered) => rendered,
             Err(err) => {
                 warn!(error = %err, "quote_pdf: failed to render PDF html");
-                return tool_error("INTERNAL_ERROR", &err, None);
+                return internal_tool_error(&err);
             }
         };
 
@@ -2527,26 +2756,26 @@ impl QuoteyMcpServer {
         let (_dir, file_path, pdf_generated, file_size_bytes, checksum) = match &render_result {
             PdfRenderResult::Pdf(bytes) => {
                 let (dir, file_path) = payload_to_output_path(&quote_id, &template, true);
-                if let Err(e) = std::fs::create_dir_all(&dir) {
+                if let Err(e) = tokio::fs::create_dir_all(&dir).await {
                     warn!(error = %e, "quote_pdf: failed to create output directory");
-                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                    return internal_tool_error(&e);
                 }
-                if let Err(e) = std::fs::write(&file_path, bytes) {
+                if let Err(e) = tokio::fs::write(&file_path, bytes).await {
                     warn!(error = %e, "quote_pdf: failed to write artifact");
-                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                    return internal_tool_error(&e);
                 }
                 let checksum = checksum_of_bytes(bytes);
                 (dir, file_path, true, bytes.len() as u64, checksum)
             }
             PdfRenderResult::Html(html) => {
                 let (dir, file_path) = payload_to_output_path(&quote_id, &template, false);
-                if let Err(e) = std::fs::create_dir_all(&dir) {
+                if let Err(e) = tokio::fs::create_dir_all(&dir).await {
                     warn!(error = %e, "quote_pdf: failed to create output directory");
-                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                    return internal_tool_error(&e);
                 }
-                if let Err(e) = std::fs::write(&file_path, html) {
+                if let Err(e) = tokio::fs::write(&file_path, html.as_bytes()).await {
                     warn!(error = %e, "quote_pdf: failed to write artifact");
-                    return tool_error("INTERNAL_ERROR", &e.to_string(), None);
+                    return internal_tool_error(&e);
                 }
                 let checksum = checksum_of(html);
                 (dir, file_path, false, html.len() as u64, checksum)
@@ -2567,6 +2796,656 @@ impl QuoteyMcpServer {
             template_used: template.to_string(),
             generated_at,
         };
+
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
+
+    // Anomaly Override Tool
+    #[tool(
+        description = "Override an anomaly flag with justification. Records the override in the database and creates an audit event."
+    )]
+    pub async fn anomaly_override(
+        &self,
+        Parameters(input): Parameters<AnomalyOverrideInput>,
+    ) -> String {
+        debug!(quote_id = %input.quote_id, rule_kind = %input.rule_kind, "anomaly_override called");
+        self.record_mcp_audit_event(
+            "anomaly_override",
+            Some(&input.quote_id),
+            serde_json::json!({
+                "quote_id": &input.quote_id,
+                "rule_kind": &input.rule_kind,
+                "severity": &input.severity,
+                "overridden_by": &input.overridden_by,
+            }),
+        )
+        .await;
+
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        let justification = input.justification.trim().to_string();
+        if justification.is_empty() {
+            return tool_error(
+                "VALIDATION_ERROR",
+                "Justification is required when overriding an anomaly flag",
+                None,
+            );
+        }
+
+        let rule_kind =
+            match quotey_core::cpq::anomaly::AnomalyRuleKind::parse_label(&input.rule_kind) {
+                Some(rk) => rk,
+                None => {
+                    return tool_error(
+                        "VALIDATION_ERROR",
+                        &format!(
+                        "Invalid rule_kind '{}'. Must be one of: discount, margin, quantity, price",
+                        input.rule_kind
+                    ),
+                        None,
+                    );
+                }
+            };
+
+        let severity =
+            match quotey_core::cpq::anomaly::AnomalySeverity::parse_label(&input.severity) {
+                Some(s) => s,
+                None => {
+                    return tool_error(
+                        "VALIDATION_ERROR",
+                        &format!(
+                            "Invalid severity '{}'. Must be one of: none, info, warning, critical",
+                            input.severity
+                        ),
+                        None,
+                    );
+                }
+            };
+
+        let override_id = format!(
+            "AO-{}-{}",
+            chrono::Utc::now().format("%Y%m%d%H%M%S"),
+            &quote_id[quote_id.len().saturating_sub(4)..]
+        );
+
+        let ovr = quotey_core::cpq::anomaly::AnomalyOverride {
+            id: override_id.clone(),
+            quote_id: quote_id.clone(),
+            rule_kind,
+            severity,
+            justification: justification.clone(),
+            overridden_by: input.overridden_by.clone(),
+            created_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        if let Err(e) =
+            quotey_db::repositories::SqlAnomalyOverrideRepository::save(&self.db_pool, &ovr).await
+        {
+            warn!(error = %e, "anomaly_override: failed to save override");
+            return internal_tool_error(&e);
+        }
+
+        let rep_override_count =
+            match quotey_db::repositories::SqlAnomalyOverrideRepository::count_by_rep(
+                &self.db_pool,
+                &input.overridden_by,
+            )
+            .await
+            {
+                Ok(count) => count,
+                Err(error) => {
+                    warn!(error = %error, "anomaly_override: failed to compute rep override count");
+                    return internal_tool_error(&error);
+                }
+            };
+
+        let total_override_count =
+            match quotey_db::repositories::SqlAnomalyOverrideRepository::count_all(&self.db_pool)
+                .await
+            {
+                Ok(count) => count,
+                Err(error) => {
+                    warn!(error = %error, "anomaly_override: failed to compute global override count");
+                    return internal_tool_error(&error);
+                }
+            };
+
+        let rep_override_rate_pct = if total_override_count > 0 {
+            (rep_override_count as f64 / total_override_count as f64) * 100.0
+        } else {
+            0.0
+        };
+
+        let manager_notification_id = format!(
+            "APR-AO-{}-{}",
+            chrono::Utc::now().format("%Y%m%d%H%M%S"),
+            &quote_id[quote_id.len().saturating_sub(4)..]
+        );
+        let now = chrono::Utc::now().to_rfc3339();
+        let manager_reason = format!("Anomaly override review ({})", input.rule_kind);
+        let manager_justification = serde_json::json!({
+            "source": "mcp.anomaly_override",
+            "override_id": &override_id,
+            "rule_kind": &input.rule_kind,
+            "severity": &input.severity,
+            "overridden_by": &input.overridden_by,
+            "justification": &justification,
+        })
+        .to_string();
+
+        if let Err(error) = sqlx::query(
+            "INSERT INTO approval_request
+                (id, quote_id, approver_role, reason, justification, status, requested_by, created_at, updated_at)
+             VALUES (?, ?, 'sales_manager', ?, ?, 'pending', ?, ?, ?)",
+        )
+        .bind(&manager_notification_id)
+        .bind(&quote_id)
+        .bind(&manager_reason)
+        .bind(&manager_justification)
+        .bind(&input.overridden_by)
+        .bind(&now)
+        .bind(&now)
+        .execute(&self.db_pool)
+        .await
+        {
+            warn!(error = %error, "anomaly_override: failed to queue manager notification");
+            return internal_tool_error(&error);
+        }
+
+        self.record_mcp_audit_event(
+            "anomaly_override_recorded",
+            Some(&quote_id),
+            serde_json::json!({
+                "quote_id": &quote_id,
+                "override_id": &override_id,
+                "manager_notification_id": &manager_notification_id,
+                "rule_kind": &input.rule_kind,
+                "severity": &input.severity,
+                "overridden_by": &input.overridden_by,
+                "rep_override_count": rep_override_count,
+                "total_override_count": total_override_count,
+                "rep_override_rate_pct": rep_override_rate_pct,
+            }),
+        )
+        .await;
+
+        let result = serde_json::json!({
+            "override_id": override_id,
+            "quote_id": quote_id,
+            "rule_kind": input.rule_kind,
+            "severity": input.severity,
+            "overridden_by": input.overridden_by,
+            "justification": justification,
+            "status": "recorded",
+            "manager_notification": {
+                "queued": true,
+                "approval_request_id": manager_notification_id,
+                "approver_role": "sales_manager",
+            },
+            "override_metrics": {
+                "rep_override_count": rep_override_count,
+                "total_override_count": total_override_count,
+                "rep_override_rate_pct": rep_override_rate_pct,
+            },
+            "message": format!(
+                "Anomaly override recorded. {} flag on quote {} overridden by {} with justification. Manager notification queued for review.",
+                input.rule_kind, quote_id, input.overridden_by,
+            ),
+        });
+
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
+
+    // Negotiation Tools
+    #[tool(
+        description = "Start a new negotiation session for a quote. Returns the session ID and initial state. Idempotent — same quote+actor+key returns the existing session."
+    )]
+    pub async fn negotiation_start(
+        &self,
+        Parameters(input): Parameters<NegotiationStartInput>,
+    ) -> String {
+        debug!(quote_id = %input.quote_id, actor_id = %input.actor_id, "negotiation_start called");
+        self.record_mcp_audit_event(
+            "negotiation_start",
+            Some(&input.quote_id),
+            serde_json::json!({
+                "quote_id": &input.quote_id,
+                "actor_id": &input.actor_id,
+            }),
+        )
+        .await;
+
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+        let actor_id = match normalize_id(&input.actor_id, "actor_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        let idempotency_key = if input.idempotency_key.trim().is_empty() {
+            format!("{}-{}-default", quote_id, actor_id)
+        } else {
+            input.idempotency_key.trim().to_string()
+        };
+
+        // Check for existing active session
+        match quotey_db::repositories::SqlNegotiationRepository::find_active_session_for_quote(
+            &self.db_pool,
+            &quote_id,
+        )
+        .await
+        {
+            Ok(Some(existing)) => {
+                let result = serde_json::json!({
+                    "session_id": existing.id.0,
+                    "quote_id": existing.quote_id,
+                    "actor_id": existing.actor_id,
+                    "state": existing.state.as_str(),
+                    "created_at": existing.created_at,
+                    "message": "Existing active session returned (idempotent).",
+                });
+                return serde_json::to_string_pretty(&result).unwrap_or_default();
+            }
+            Ok(None) => {}
+            Err(e) => return internal_tool_error(&e),
+        }
+
+        let session_id = format!(
+            "NXT-{}-{}",
+            chrono::Utc::now().format("%Y%m%d%H%M%S"),
+            &quote_id[quote_id.len().saturating_sub(4)..]
+        );
+
+        let session = quotey_core::domain::negotiation::NegotiationSession {
+            id: quotey_core::NegotiationSessionId(session_id.clone()),
+            quote_id: quote_id.clone(),
+            actor_id: actor_id.clone(),
+            state: quotey_core::NegotiationState::Draft,
+            policy_version: "policy-v1".to_string(),
+            pricing_version: "pricing-v1".to_string(),
+            idempotency_key,
+            max_turns: 20,
+            expires_at: None,
+            created_at: chrono::Utc::now().to_rfc3339(),
+            updated_at: chrono::Utc::now().to_rfc3339(),
+        };
+
+        if let Err(e) =
+            quotey_db::repositories::SqlNegotiationRepository::save_session(&self.db_pool, &session)
+                .await
+        {
+            warn!(error = %e, "negotiation_start: failed to save session");
+            return internal_tool_error(&e);
+        }
+
+        let result = serde_json::json!({
+            "session_id": session_id,
+            "quote_id": quote_id,
+            "actor_id": actor_id,
+            "state": "draft",
+            "message": "Negotiation session created. Use negotiation_evaluate to assess concession options.",
+        });
+
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
+
+    #[tool(
+        description = "Evaluate concession options for a negotiation session. Returns the concession envelope (allowed ranges), boundary evaluation, and ranked counteroffer alternatives."
+    )]
+    pub async fn negotiation_evaluate(
+        &self,
+        Parameters(input): Parameters<NegotiationEvaluateInput>,
+    ) -> String {
+        debug!(session_id = %input.session_id, "negotiation_evaluate called");
+        self.record_mcp_audit_event(
+            "negotiation_evaluate",
+            None,
+            serde_json::json!({
+                "session_id": &input.session_id,
+                "discount_pct": input.discount_pct,
+                "margin_pct": input.margin_pct,
+            }),
+        )
+        .await;
+
+        let session_id = match normalize_id(&input.session_id, "session_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        // Fetch session
+        let session = match quotey_db::repositories::SqlNegotiationRepository::find_session_by_id(
+            &self.db_pool,
+            &session_id,
+        )
+        .await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return tool_error("NOT_FOUND", "Negotiation session not found", None);
+            }
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        if session.state.is_terminal() {
+            return tool_error(
+                "INVALID_STATE",
+                &format!(
+                    "Session is in terminal state '{}' and cannot be evaluated",
+                    session.state.as_str()
+                ),
+                None,
+            );
+        }
+
+        // Build concession request
+        let mut values = Vec::new();
+        if let Some(discount) = input.discount_pct {
+            values.push(quotey_core::cpq::concession::ConcessionRequestValue {
+                dimension: "discount_pct".to_string(),
+                value: discount,
+            });
+        }
+        if let Some(margin) = input.margin_pct {
+            values.push(quotey_core::cpq::concession::ConcessionRequestValue {
+                dimension: "margin_pct".to_string(),
+                value: margin,
+            });
+        }
+        if let Some(term) = input.term_months {
+            values.push(quotey_core::cpq::concession::ConcessionRequestValue {
+                dimension: "term_months".to_string(),
+                value: term,
+            });
+        }
+
+        let request = quotey_core::cpq::concession::ConcessionRequest {
+            session_id: session_id.clone(),
+            values,
+        };
+
+        let policy = quotey_core::cpq::concession::ConcessionPolicy::default();
+        let engine = quotey_core::cpq::concession::ConcessionPolicyEngine;
+        let (envelope, boundary) = engine.evaluate(&policy, &request);
+
+        // Generate counteroffer plan
+        let config = quotey_core::cpq::counteroffer::CounterofferConfig::default();
+        let planner = quotey_core::cpq::counteroffer::CounterofferPlanner;
+        let plan = planner.plan(&envelope, &config);
+
+        // Advance session to active if still in draft
+        if session.state == quotey_core::NegotiationState::Draft {
+            if let Err(e) =
+                quotey_db::repositories::SqlNegotiationRepository::advance_session_state(
+                    &self.db_pool,
+                    &session_id,
+                    quotey_core::NegotiationState::Active,
+                )
+                .await
+            {
+                warn!(error = %e, "negotiation_evaluate: failed to advance state");
+            }
+        }
+
+        let ranges: Vec<serde_json::Value> = envelope
+            .ranges
+            .iter()
+            .map(|r| {
+                serde_json::json!({
+                    "dimension": r.dimension,
+                    "floor": r.floor,
+                    "ceiling": r.ceiling,
+                    "current": r.current,
+                })
+            })
+            .collect();
+
+        let alternatives: Vec<serde_json::Value> = plan
+            .alternatives
+            .iter()
+            .map(|a| {
+                serde_json::json!({
+                    "offer_id": a.offer_id,
+                    "rank": a.rank,
+                    "discount_pct": a.discount_pct,
+                    "rationale": a.rationale,
+                })
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "session_id": session_id,
+            "state": if session.state == quotey_core::NegotiationState::Draft { "active" } else { session.state.as_str() },
+            "envelope": {
+                "ranges": ranges,
+                "blocking_reasons": envelope.blocking_reasons,
+            },
+            "boundary": {
+                "within_bounds": boundary.within_bounds,
+                "floor_breached": boundary.floor_breached,
+                "ceiling_breached": boundary.ceiling_breached,
+                "walk_away": boundary.walk_away,
+                "requires_approval": boundary.requires_approval,
+                "stop_reasons": boundary.stop_reasons,
+            },
+            "counteroffer_plan": {
+                "alternatives": alternatives,
+                "tie_break_field": plan.tie_break_field,
+            },
+        });
+
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
+
+    #[tool(description = "Get the current status of a negotiation session, including all turns.")]
+    pub async fn negotiation_status(
+        &self,
+        Parameters(input): Parameters<NegotiationStatusInput>,
+    ) -> String {
+        debug!(session_id = %input.session_id, "negotiation_status called");
+        self.record_mcp_audit_event(
+            "negotiation_status",
+            None,
+            serde_json::json!({ "session_id": &input.session_id }),
+        )
+        .await;
+
+        let session_id = match normalize_id(&input.session_id, "session_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        let session = match quotey_db::repositories::SqlNegotiationRepository::find_session_by_id(
+            &self.db_pool,
+            &session_id,
+        )
+        .await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return tool_error("NOT_FOUND", "Negotiation session not found", None);
+            }
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        let turns = match quotey_db::repositories::SqlNegotiationRepository::find_turns_by_session(
+            &self.db_pool,
+            &session_id,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        let turns_json: Vec<serde_json::Value> = turns
+            .iter()
+            .map(|t| {
+                serde_json::json!({
+                    "turn_number": t.turn_number,
+                    "request_type": t.request_type.as_str(),
+                    "outcome": t.outcome.as_str(),
+                    "created_at": t.created_at,
+                })
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "session_id": session.id.0,
+            "quote_id": session.quote_id,
+            "actor_id": session.actor_id,
+            "state": session.state.as_str(),
+            "policy_version": session.policy_version,
+            "pricing_version": session.pricing_version,
+            "max_turns": session.max_turns,
+            "turn_count": turns.len(),
+            "turns": turns_json,
+            "created_at": session.created_at,
+            "updated_at": session.updated_at,
+        });
+
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
+
+    #[tool(
+        description = "Escalate a negotiation session for approval. Bundles session context, concession deltas, and boundary evaluation into an evidence packet for the approval workflow."
+    )]
+    pub async fn negotiation_escalate(
+        &self,
+        Parameters(input): Parameters<NegotiationEscalateInput>,
+    ) -> String {
+        debug!(session_id = %input.session_id, "negotiation_escalate called");
+        self.record_mcp_audit_event(
+            "negotiation_escalate",
+            None,
+            serde_json::json!({ "session_id": &input.session_id, "reason": &input.reason }),
+        )
+        .await;
+
+        let session_id = match normalize_id(&input.session_id, "session_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        if input.reason.trim().is_empty() {
+            return tool_error("VALIDATION_ERROR", "reason is required", None);
+        }
+
+        // Fetch session
+        let session = match quotey_db::repositories::SqlNegotiationRepository::find_session_by_id(
+            &self.db_pool,
+            &session_id,
+        )
+        .await
+        {
+            Ok(Some(s)) => s,
+            Ok(None) => {
+                return tool_error("NOT_FOUND", "Negotiation session not found", None);
+            }
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        // Session must not be in a terminal state
+        if session.state.is_terminal() {
+            return tool_error(
+                "INVALID_STATE",
+                &format!("Cannot escalate session in '{}' state", session.state.as_str()),
+                None,
+            );
+        }
+
+        // Fetch turns
+        let turns = match quotey_db::repositories::SqlNegotiationRepository::find_turns_by_session(
+            &self.db_pool,
+            &session_id,
+        )
+        .await
+        {
+            Ok(t) => t,
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        // Run concession evaluation to get current envelope and boundary
+        let policy = quotey_core::cpq::concession::ConcessionPolicy::default();
+        let request = quotey_core::cpq::concession::ConcessionRequest {
+            session_id: session_id.clone(),
+            values: Vec::new(),
+        };
+        let engine = quotey_core::cpq::concession::ConcessionPolicyEngine;
+        let (envelope, mut boundary) = engine.evaluate(&policy, &request);
+
+        // Explicit escalation implies approval is required
+        if !boundary.requires_approval && !boundary.walk_away {
+            boundary.requires_approval = true;
+        }
+
+        // Build escalation context pack
+        let mut builder = quotey_core::cpq::escalation::EscalationPackBuilder::new(session.clone())
+            .with_turns(turns)
+            .with_envelope(envelope)
+            .with_boundary(boundary)
+            .with_reason(&input.reason);
+
+        if !input.offer_id.is_empty() {
+            builder = builder.with_offer_id(&input.offer_id);
+        }
+
+        let pack = builder.build();
+
+        // Validate the pack
+        if let Err(validation_err) = quotey_core::cpq::escalation::validate_escalation_pack(&pack) {
+            return tool_error(
+                "ESCALATION_INVALID",
+                &format!("Escalation pack validation failed: {validation_err}"),
+                None,
+            );
+        }
+
+        // Advance session to approval_pending
+        if let Err(e) = quotey_db::repositories::SqlNegotiationRepository::advance_session_state(
+            &self.db_pool,
+            &session_id,
+            quotey_core::NegotiationState::ApprovalPending,
+        )
+        .await
+        {
+            warn!(error = %e, "negotiation_escalate: failed to advance state to approval_pending");
+        }
+
+        let result = serde_json::json!({
+            "session_id": pack.session_id,
+            "quote_id": pack.quote_id,
+            "actor_id": pack.actor_id,
+            "session_state": "approval_pending",
+            "policy_version": pack.policy_version,
+            "pricing_version": pack.pricing_version,
+            "turn_count": pack.turn_count,
+            "trigger_turn_number": pack.trigger_turn_number,
+            "offer_id": pack.offer_id,
+            "concession_deltas": pack.concession_deltas.iter().map(|d| {
+                serde_json::json!({
+                    "dimension": d.dimension,
+                    "floor": d.floor,
+                    "ceiling": d.ceiling,
+                    "current": d.current,
+                    "utilization_pct": format!("{:.1}%", d.utilization_pct),
+                })
+            }).collect::<Vec<_>>(),
+            "boundary": {
+                "within_bounds": pack.boundary_within_bounds,
+                "requires_approval": pack.boundary_requires_approval,
+                "walk_away": pack.boundary_walk_away,
+            },
+            "stop_reasons": pack.stop_reasons,
+            "blocking_reasons": pack.blocking_reasons,
+            "escalation_reason": pack.escalation_reason,
+            "message": "Session escalated to approval_pending. Approval workflow will evaluate the evidence packet.",
+        });
 
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
@@ -2848,6 +3727,68 @@ mod tests {
     fn parse_protocol_version_defaults_to_latest_when_missing_or_blank() {
         assert_eq!(parse_protocol_version(None).unwrap(), ProtocolVersion::LATEST);
         assert_eq!(parse_protocol_version(Some("   ")).unwrap(), ProtocolVersion::LATEST);
+    }
+
+    #[test]
+    fn parse_authorization_header_supports_bearer_and_apikey_formats() {
+        assert_eq!(
+            parse_authorization_header("Bearer secret-token"),
+            Some("secret-token".to_string())
+        );
+        assert_eq!(
+            parse_authorization_header("ApiKey   secret-token"),
+            Some("secret-token".to_string())
+        );
+        assert_eq!(
+            parse_authorization_header("Token secret-token"),
+            Some("secret-token".to_string())
+        );
+        assert_eq!(parse_authorization_header("plain-secret"), Some("plain-secret".to_string()));
+        assert_eq!(parse_authorization_header("Basic Zm9vOmJhcg=="), None);
+        assert_eq!(parse_authorization_header("Bearer   "), None);
+        assert_eq!(parse_authorization_header("   "), None);
+    }
+
+    #[test]
+    fn extract_api_key_from_meta_supports_aliases_and_priority() {
+        let mut meta = rmcp::model::Meta::new();
+        meta.0.insert("authorization".to_string(), serde_json::json!("Bearer auth-token"));
+        assert_eq!(extract_api_key_from_meta(&meta), Some("auth-token".to_string()));
+
+        meta.0.insert("x-api-key".to_string(), serde_json::json!("header-token"));
+        assert_eq!(extract_api_key_from_meta(&meta), Some("header-token".to_string()));
+
+        meta.0.insert("api_key".to_string(), serde_json::json!("meta-token"));
+        assert_eq!(extract_api_key_from_meta(&meta), Some("meta-token".to_string()));
+    }
+
+    #[tokio::test]
+    async fn check_auth_rate_limit_returns_429_code_and_retry_after() {
+        let pool = test_db().await;
+        let auth = crate::auth::AuthManager::from_config(&crate::auth::AuthConfig {
+            enabled: true,
+            rate_limit_window_secs: 60,
+            api_keys: vec![crate::auth::ApiKeyConfig {
+                key: "limited-key".to_string(),
+                name: "limited".to_string(),
+                requests_per_minute: 1,
+            }],
+        });
+        let srv = QuoteyMcpServer::with_auth(pool, auth);
+
+        let mut meta = rmcp::model::Meta::new();
+        meta.0.insert("api_key".to_string(), serde_json::json!("limited-key"));
+
+        assert!(srv.check_auth(&meta).await.is_ok());
+
+        let err = srv.check_auth(&meta).await.expect_err("should be rate limited");
+        assert_eq!(err.code, rmcp::model::ErrorCode(429));
+        let retry_after = err
+            .data
+            .as_ref()
+            .and_then(|value| value.get("retry_after"))
+            .and_then(|value| value.as_u64());
+        assert!(retry_after.is_some());
     }
 
     #[test]
@@ -3907,6 +4848,131 @@ mod tests {
         assert!(!template_is_allowed(""));
     }
 
+    #[tokio::test]
+    async fn anomaly_override_persists_and_returns_success() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-2026-AO01").await;
+
+        let server = QuoteyMcpServer::new(pool.clone());
+        let result = server
+            .anomaly_override(Parameters(AnomalyOverrideInput {
+                quote_id: "Q-2026-AO01".to_string(),
+                rule_kind: "discount".to_string(),
+                severity: "warning".to_string(),
+                justification: "Competitive deal - customer has a lower offer from a rival vendor"
+                    .to_string(),
+                overridden_by: "rep@example.com".to_string(),
+            }))
+            .await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(parsed["status"], "recorded");
+        assert_eq!(parsed["quote_id"], "Q-2026-AO01");
+        assert_eq!(parsed["rule_kind"], "discount");
+        assert_eq!(parsed["manager_notification"]["queued"], true);
+        assert_eq!(parsed["override_metrics"]["rep_override_count"], 1);
+        assert_eq!(parsed["override_metrics"]["total_override_count"], 1);
+        assert_eq!(parsed["override_metrics"]["rep_override_rate_pct"], 100.0);
+
+        // Verify it was persisted
+        let overrides = quotey_db::repositories::SqlAnomalyOverrideRepository::find_by_quote_id(
+            &pool,
+            "Q-2026-AO01",
+        )
+        .await
+        .expect("find overrides");
+        assert_eq!(overrides.len(), 1);
+        assert_eq!(overrides[0].overridden_by, "rep@example.com");
+        assert!(overrides[0].justification.contains("Competitive deal"));
+
+        let manager_queue_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM approval_request WHERE quote_id = ? AND approver_role = 'sales_manager'",
+        )
+        .bind("Q-2026-AO01")
+        .fetch_one(&pool)
+        .await
+        .expect("manager queue count");
+        assert_eq!(manager_queue_count, 1);
+    }
+
+    #[tokio::test]
+    async fn anomaly_override_tracks_rep_override_rate() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-2026-AO11").await;
+        seed_quote(&pool, "Q-2026-AO12").await;
+
+        let server = QuoteyMcpServer::new(pool.clone());
+        let first = server
+            .anomaly_override(Parameters(AnomalyOverrideInput {
+                quote_id: "Q-2026-AO11".to_string(),
+                rule_kind: "discount".to_string(),
+                severity: "warning".to_string(),
+                justification: "first override".to_string(),
+                overridden_by: "rep@example.com".to_string(),
+            }))
+            .await;
+        let first_json: serde_json::Value = serde_json::from_str(&first).expect("valid json");
+        assert_eq!(first_json["override_metrics"]["rep_override_count"], 1);
+        assert_eq!(first_json["override_metrics"]["total_override_count"], 1);
+        assert_eq!(first_json["override_metrics"]["rep_override_rate_pct"], 100.0);
+
+        let second = server
+            .anomaly_override(Parameters(AnomalyOverrideInput {
+                quote_id: "Q-2026-AO12".to_string(),
+                rule_kind: "margin".to_string(),
+                severity: "critical".to_string(),
+                justification: "second override".to_string(),
+                overridden_by: "other-rep@example.com".to_string(),
+            }))
+            .await;
+        let second_json: serde_json::Value = serde_json::from_str(&second).expect("valid json");
+        assert_eq!(second_json["override_metrics"]["rep_override_count"], 1);
+        assert_eq!(second_json["override_metrics"]["total_override_count"], 2);
+        assert_eq!(second_json["override_metrics"]["rep_override_rate_pct"], 50.0);
+    }
+
+    #[tokio::test]
+    async fn anomaly_override_rejects_empty_justification() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-2026-AO02").await;
+
+        let server = QuoteyMcpServer::new(pool.clone());
+        let result = server
+            .anomaly_override(Parameters(AnomalyOverrideInput {
+                quote_id: "Q-2026-AO02".to_string(),
+                rule_kind: "margin".to_string(),
+                severity: "critical".to_string(),
+                justification: "   ".to_string(),
+                overridden_by: "rep@example.com".to_string(),
+            }))
+            .await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(parsed["error"]["code"], "VALIDATION_ERROR");
+        assert!(parsed["error"]["message"].as_str().unwrap().contains("Justification is required"));
+    }
+
+    #[tokio::test]
+    async fn anomaly_override_rejects_invalid_rule_kind() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-2026-AO03").await;
+
+        let server = QuoteyMcpServer::new(pool.clone());
+        let result = server
+            .anomaly_override(Parameters(AnomalyOverrideInput {
+                quote_id: "Q-2026-AO03".to_string(),
+                rule_kind: "bogus_rule".to_string(),
+                severity: "warning".to_string(),
+                justification: "Some reason".to_string(),
+                overridden_by: "rep@example.com".to_string(),
+            }))
+            .await;
+
+        let parsed: serde_json::Value = serde_json::from_str(&result).expect("valid json");
+        assert_eq!(parsed["error"]["code"], "VALIDATION_ERROR");
+        assert!(parsed["error"]["message"].as_str().unwrap().contains("Invalid rule_kind"));
+    }
+
     #[test]
     fn tool_error_produces_valid_json() {
         let output = tool_error("TEST_CODE", "test message", None);
@@ -3919,5 +4985,290 @@ mod tests {
             tool_error("DETAIL_CODE", "has details", Some(serde_json::json!({"key": "val"})));
         let v2: serde_json::Value = serde_json::from_str(&with_details).unwrap();
         assert_eq!(v2["error"]["details"]["key"].as_str().unwrap(), "val");
+    }
+
+    // ========================================================================
+    // Negotiation tool tests
+    // ========================================================================
+
+    #[tokio::test]
+    async fn negotiation_start_creates_session() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-NXT", "SKU-NXT", "NXT Product", "100.00").await;
+        let srv = server(pool.clone());
+
+        // Create a quote first
+        let create_out = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "ACC-NXT".to_string(),
+                deal_id: None,
+                currency: "USD".to_string(),
+                term_months: None,
+                start_date: None,
+                notes: None,
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-NXT".to_string(),
+                    quantity: 5,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                idempotency_key: Some("nxt-test".to_string()),
+            }))
+            .await;
+        let created = parse_output(&create_out);
+        let quote_id = created["quote_id"].as_str().unwrap().to_string();
+
+        // Start negotiation
+        let result = srv
+            .negotiation_start(Parameters(NegotiationStartInput {
+                quote_id: quote_id.clone(),
+                actor_id: "rep-alice".to_string(),
+                idempotency_key: "key-1".to_string(),
+            }))
+            .await;
+        let parsed = parse_output(&result);
+
+        assert!(parsed["session_id"].is_string());
+        assert_eq!(parsed["quote_id"].as_str().unwrap(), quote_id);
+        assert_eq!(parsed["state"].as_str().unwrap(), "draft");
+    }
+
+    #[tokio::test]
+    async fn negotiation_start_returns_existing_session() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-NXT2", "SKU-NXT2", "NXT Product 2", "200.00").await;
+        let srv = server(pool.clone());
+
+        let create_out = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "ACC-NXT2".to_string(),
+                deal_id: None,
+                currency: "USD".to_string(),
+                term_months: None,
+                start_date: None,
+                notes: None,
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-NXT2".to_string(),
+                    quantity: 1,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                idempotency_key: Some("nxt-idem".to_string()),
+            }))
+            .await;
+        let created = parse_output(&create_out);
+        let quote_id = created["quote_id"].as_str().unwrap().to_string();
+
+        // First start
+        let r1 = srv
+            .negotiation_start(Parameters(NegotiationStartInput {
+                quote_id: quote_id.clone(),
+                actor_id: "rep-bob".to_string(),
+                idempotency_key: String::new(),
+            }))
+            .await;
+        let p1 = parse_output(&r1);
+        let sid1 = p1["session_id"].as_str().unwrap().to_string();
+
+        // Second start should return same session
+        let r2 = srv
+            .negotiation_start(Parameters(NegotiationStartInput {
+                quote_id,
+                actor_id: "rep-bob".to_string(),
+                idempotency_key: String::new(),
+            }))
+            .await;
+        let p2 = parse_output(&r2);
+
+        assert_eq!(p2["session_id"].as_str().unwrap(), sid1);
+        assert!(p2["message"].as_str().unwrap().contains("idempotent"));
+    }
+
+    #[tokio::test]
+    async fn negotiation_evaluate_returns_envelope_and_plan() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-NE", "SKU-NE", "Eval Product", "100.00").await;
+        let srv = server(pool.clone());
+
+        let create_out = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "ACC-NE".to_string(),
+                deal_id: None,
+                currency: "USD".to_string(),
+                term_months: None,
+                start_date: None,
+                notes: None,
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-NE".to_string(),
+                    quantity: 1,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                idempotency_key: Some("nxt-eval".to_string()),
+            }))
+            .await;
+        let created = parse_output(&create_out);
+        let quote_id = created["quote_id"].as_str().unwrap().to_string();
+
+        let start_out = srv
+            .negotiation_start(Parameters(NegotiationStartInput {
+                quote_id,
+                actor_id: "rep-eval".to_string(),
+                idempotency_key: "eval-key".to_string(),
+            }))
+            .await;
+        let started = parse_output(&start_out);
+        let session_id = started["session_id"].as_str().unwrap().to_string();
+
+        // Evaluate with a discount request
+        let eval_out = srv
+            .negotiation_evaluate(Parameters(NegotiationEvaluateInput {
+                session_id: session_id.clone(),
+                discount_pct: Some(15.0),
+                margin_pct: None,
+                term_months: None,
+            }))
+            .await;
+        let parsed = parse_output(&eval_out);
+
+        assert_eq!(parsed["session_id"].as_str().unwrap(), session_id);
+        assert_eq!(parsed["state"].as_str().unwrap(), "active");
+        assert!(parsed["envelope"]["ranges"].is_array());
+        assert!(parsed["boundary"]["within_bounds"].is_boolean());
+        assert!(parsed["counteroffer_plan"]["alternatives"].is_array());
+    }
+
+    #[tokio::test]
+    async fn negotiation_status_returns_session_details() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-NS", "SKU-NS", "Status Product", "50.00").await;
+        let srv = server(pool.clone());
+
+        let create_out = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "ACC-NS".to_string(),
+                deal_id: None,
+                currency: "USD".to_string(),
+                term_months: None,
+                start_date: None,
+                notes: None,
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-NS".to_string(),
+                    quantity: 2,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                idempotency_key: Some("nxt-status".to_string()),
+            }))
+            .await;
+        let created = parse_output(&create_out);
+        let quote_id = created["quote_id"].as_str().unwrap().to_string();
+
+        let start_out = srv
+            .negotiation_start(Parameters(NegotiationStartInput {
+                quote_id,
+                actor_id: "rep-status".to_string(),
+                idempotency_key: "status-key".to_string(),
+            }))
+            .await;
+        let started = parse_output(&start_out);
+        let session_id = started["session_id"].as_str().unwrap().to_string();
+
+        let status_out = srv
+            .negotiation_status(Parameters(NegotiationStatusInput {
+                session_id: session_id.clone(),
+            }))
+            .await;
+        let parsed = parse_output(&status_out);
+
+        assert_eq!(parsed["session_id"].as_str().unwrap(), session_id);
+        assert_eq!(parsed["state"].as_str().unwrap(), "draft");
+        assert_eq!(parsed["turn_count"].as_u64().unwrap(), 0);
+        assert!(parsed["turns"].is_array());
+    }
+
+    #[tokio::test]
+    async fn negotiation_status_not_found() {
+        let pool = test_db().await;
+        let srv = server(pool);
+        let result = srv
+            .negotiation_status(Parameters(NegotiationStatusInput {
+                session_id: "NXT-MISSING".to_string(),
+            }))
+            .await;
+        assert_error_envelope(&result, "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn negotiation_escalate_creates_approval_pack() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-ESC", "SKU-ESC", "Escalation Product", "100.00").await;
+        let srv = server(pool.clone());
+
+        // Create a quote first
+        let create_out = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "ACC-ESC".to_string(),
+                deal_id: None,
+                currency: "USD".to_string(),
+                term_months: None,
+                start_date: None,
+                notes: None,
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-ESC".to_string(),
+                    quantity: 5,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                idempotency_key: Some("esc-quote".to_string()),
+            }))
+            .await;
+        let created = parse_output(&create_out);
+        let quote_id = created["quote_id"].as_str().unwrap().to_string();
+
+        // Start negotiation session
+        let start_result = srv
+            .negotiation_start(Parameters(NegotiationStartInput {
+                quote_id,
+                actor_id: "rep-alice".to_string(),
+                idempotency_key: "esc-test".to_string(),
+            }))
+            .await;
+        let start_json = parse_output(&start_result);
+        let session_id = start_json["session_id"].as_str().unwrap().to_string();
+
+        // Escalate it
+        let result = srv
+            .negotiation_escalate(Parameters(NegotiationEscalateInput {
+                session_id: session_id.clone(),
+                offer_id: "offer-step_down-1".to_string(),
+                reason: "discount near soft ceiling requires manager approval".to_string(),
+            }))
+            .await;
+
+        let json = parse_output(&result);
+        assert_eq!(json["session_id"].as_str().unwrap(), session_id);
+        assert_eq!(json["session_state"].as_str().unwrap(), "approval_pending");
+        assert!(json["escalation_reason"].as_str().unwrap().contains("manager approval"));
+        assert!(json["concession_deltas"].as_array().is_some());
+    }
+
+    #[tokio::test]
+    async fn negotiation_escalate_rejects_missing_reason() {
+        let pool = test_db().await;
+        let srv = server(pool);
+        let result = srv
+            .negotiation_escalate(Parameters(NegotiationEscalateInput {
+                session_id: "NXT-MISSING".to_string(),
+                offer_id: String::new(),
+                reason: "  ".to_string(),
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
     }
 }
