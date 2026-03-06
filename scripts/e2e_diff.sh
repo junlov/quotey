@@ -10,6 +10,8 @@
 #   ./scripts/e2e_diff.sh --runs                   # List available runs
 #   ./scripts/e2e_diff.sh --report                 # Generate markdown report for last 2 runs
 #   ./scripts/e2e_diff.sh --report RUN_A RUN_B     # Generate markdown report for specific runs
+#   ./scripts/e2e_diff.sh --json                   # Print JSON summary to stdout
+#   ./scripts/e2e_diff.sh --strict                 # Exit non-zero on regressions
 #
 # Environment:
 #   QUOTEY_E2E_ARTIFACT_DIR   Override artifact directory (default: target/e2e-artifacts)
@@ -36,6 +38,8 @@ MODE="diff"
 RUN_A=""
 RUN_B=""
 REPORT=false
+JSON=false
+STRICT=false
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,6 +47,10 @@ while [[ $# -gt 0 ]]; do
       MODE="list"; shift ;;
     --report)
       REPORT=true; shift ;;
+    --json)
+      JSON=true; shift ;;
+    --strict)
+      STRICT=true; shift ;;
     --help|-h)
       sed -n '2,/^$/s/^# \?//p' "$0"
       exit 0 ;;
@@ -95,7 +103,7 @@ if [[ "$MODE" == "list" ]]; then
   printf '  %-24s %-8s %7s %7s %7s\n' "Run ID" "Status" "Passed" "Failed" "Suites"
   printf '  %-24s %-8s %7s %7s %7s\n' "------" "------" "------" "------" "------"
 
-  for run_dir in $(find "$ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -type d -name 'run-*' | sort); do
+  while IFS= read -r run_dir; do
     summary="$run_dir/SUMMARY.json"
     run_name="$(basename "$run_dir")"
     if [[ -f "$summary" ]] && command -v jq >/dev/null 2>&1; then
@@ -112,7 +120,7 @@ if [[ "$MODE" == "list" ]]; then
     else
       printf '  %-24s %-8s\n' "$run_name" "no-summary"
     fi
-  done
+  done < <(find "$ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -type d -name 'run-*' | sort)
   echo ""
   exit 0
 fi
@@ -186,14 +194,14 @@ declare -a REMOVED_TESTS=()
 
 # Find tests in A but not in B (removed)
 while IFS=' ' read -r test_name result; do
-  if ! grep -q "^${test_name} " "$TESTS_B"; then
+  if ! awk -v t="$test_name" '$1 == t {found=1; exit} END {exit(found ? 0 : 1)}' "$TESTS_B"; then
     REMOVED_TESTS+=("$test_name ($result)")
   fi
 done < "$TESTS_A"
 
 # Find tests in B but not in A (new), and status flips
 while IFS=' ' read -r test_name result_b; do
-  result_a="$(grep "^${test_name} " "$TESTS_A" | awk '{print $NF}' || true)"
+  result_a="$(awk -v t="$test_name" '$1 == t {print $NF; exit}' "$TESTS_A")"
   if [[ -z "$result_a" ]]; then
     NEW_TESTS+=("$test_name ($result_b)")
   elif [[ "$result_a" != "$result_b" ]]; then
@@ -226,6 +234,12 @@ for suite_dir_b in "$DIR_B"/*/; do
     fi
   fi
 done
+
+DECISION_DELTA_COUNT=$(( ${#FLIPPED_TO_FAIL[@]} + ${#FLIPPED_TO_PASS[@]} ))
+ASSERTION_DRIFT_COUNT=$(( ${#NEW_TESTS[@]} + ${#REMOVED_TESTS[@]} ))
+TIMING_REGRESSION_COUNT=${#TIMING_REGRESSIONS[@]}
+TIMING_IMPROVEMENT_COUNT=${#TIMING_IMPROVEMENTS[@]}
+STRICT_FAILURE_COUNT=$(( ${#FLIPPED_TO_FAIL[@]} + ${#REMOVED_TESTS[@]} + ${#TIMING_REGRESSIONS[@]} ))
 
 # ── Output ───────────────────────────────────────────────────────────────
 
@@ -310,6 +324,7 @@ output_diff() {
 
 output_report() {
   local report_file="$DIR_B/DIFF_REPORT.md"
+  local json_file="$DIR_B/DIFF_SUMMARY.json"
   local delta_total=$((TOTAL_B - TOTAL_A))
   local delta_passed=$((PASSED_B - PASSED_A))
   local delta_failed=$((FAILED_B - FAILED_A))
@@ -405,12 +420,90 @@ EOF
   fi
 
   printf 'Report written to: %s\n' "$report_file"
+
+  cat > "$json_file" <<EOF
+{
+  "generated_at_utc": "$(date -u +"%Y-%m-%dT%H:%M:%SZ")",
+  "threshold_seconds": $TIMING_THRESHOLD,
+  "baseline": {
+    "run": "$NAME_A",
+    "status": "$STATUS_A",
+    "total_tests": $TOTAL_A,
+    "passed": $PASSED_A,
+    "failed": $FAILED_A
+  },
+  "current": {
+    "run": "$NAME_B",
+    "status": "$STATUS_B",
+    "total_tests": $TOTAL_B,
+    "passed": $PASSED_B,
+    "failed": $FAILED_B
+  },
+  "delta": {
+    "total_tests": $delta_total,
+    "passed": $delta_passed,
+    "failed": $delta_failed
+  },
+  "counts": {
+    "decision_deltas": $DECISION_DELTA_COUNT,
+    "flipped_to_fail": ${#FLIPPED_TO_FAIL[@]},
+    "flipped_to_pass": ${#FLIPPED_TO_PASS[@]},
+    "assertion_drift": $ASSERTION_DRIFT_COUNT,
+    "new_tests": ${#NEW_TESTS[@]},
+    "removed_tests": ${#REMOVED_TESTS[@]},
+    "timing_regressions": $TIMING_REGRESSION_COUNT,
+    "timing_improvements": $TIMING_IMPROVEMENT_COUNT
+  },
+  "strict_failure_count": $STRICT_FAILURE_COUNT
+}
+EOF
+  printf 'JSON summary written to: %s\n' "$json_file"
+}
+
+output_json() {
+  local delta_total=$((TOTAL_B - TOTAL_A))
+  local delta_passed=$((PASSED_B - PASSED_A))
+  local delta_failed=$((FAILED_B - FAILED_A))
+  cat <<EOF
+{
+  "baseline_run": "$NAME_A",
+  "current_run": "$NAME_B",
+  "status_before": "$STATUS_A",
+  "status_after": "$STATUS_B",
+  "total_before": $TOTAL_A,
+  "total_after": $TOTAL_B,
+  "delta_total": $delta_total,
+  "delta_passed": $delta_passed,
+  "delta_failed": $delta_failed,
+  "flipped_to_fail": ${#FLIPPED_TO_FAIL[@]},
+  "flipped_to_pass": ${#FLIPPED_TO_PASS[@]},
+  "new_tests": ${#NEW_TESTS[@]},
+  "removed_tests": ${#REMOVED_TESTS[@]},
+  "timing_regressions": $TIMING_REGRESSION_COUNT,
+  "timing_improvements": $TIMING_IMPROVEMENT_COUNT,
+  "strict_failure_count": $STRICT_FAILURE_COUNT
+}
+EOF
 }
 
 # ── Execute ──────────────────────────────────────────────────────────────
 
-output_diff
+if [[ "$JSON" == true ]] && [[ "$REPORT" != true ]]; then
+  # Keep --json machine-readable by default.
+  output_json
+else
+  output_diff
 
-if [[ "$REPORT" == true ]]; then
-  output_report
+  if [[ "$JSON" == true ]]; then
+    output_json
+  fi
+
+  if [[ "$REPORT" == true ]]; then
+    output_report
+  fi
+fi
+
+if [[ "$STRICT" == true ]] && [[ "$STRICT_FAILURE_COUNT" -gt 0 ]]; then
+  printf '\n%bStrict mode: %d regression signal(s) detected; exiting non-zero.%b\n' "$RED" "$STRICT_FAILURE_COUNT" "$NC"
+  exit 2
 fi

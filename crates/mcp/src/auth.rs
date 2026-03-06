@@ -35,17 +35,32 @@ impl RateLimitEntry {
         Self { requests: Vec::new() }
     }
 
-    /// Clean old requests outside the window and add new request
-    fn record_request(&mut self, window: Duration) -> usize {
+    /// Clean old requests outside the window and check/add new request
+    /// Returns Ok(count) if request is allowed, Err(retry_after_secs) if rate limited
+    fn record_request(&mut self, window: Duration, limit: usize) -> Result<usize, u64> {
         let now = Instant::now();
         let window_start = now - window;
 
         // Remove requests outside the window
         self.requests.retain(|&t| t > window_start);
 
+        // Check limit BEFORE adding (prevents off-by-one error)
+        if self.requests.len() >= limit {
+            // Calculate retry after time
+            let retry_after = self
+                .requests
+                .first()
+                .map(|oldest| {
+                    let elapsed = oldest.elapsed();
+                    window.saturating_sub(elapsed).as_secs().max(1)
+                })
+                .unwrap_or(window.as_secs().max(1));
+            return Err(retry_after);
+        }
+
         // Add new request
         self.requests.push(now);
-        self.requests.len()
+        Ok(self.requests.len())
     }
 
     /// Get current request count in window
@@ -167,30 +182,21 @@ impl AuthManager {
         let mut limits = self.rate_limits.write().await;
         let limit_entry = limits.entry(key.to_string()).or_insert_with(RateLimitEntry::new);
 
-        let request_count = limit_entry.record_request(self.rate_limit_window);
         let limit = entry.requests_per_minute as usize;
-
-        if request_count > limit {
-            // Rate limit exceeded
-            let retry_after = limit_entry
-                .requests
-                .first()
-                .map(|oldest| {
-                    let elapsed = oldest.elapsed();
-                    self.rate_limit_window.saturating_sub(elapsed).as_secs().max(1) as u32
-                })
-                .unwrap_or(self.rate_limit_window.as_secs().max(1) as u32);
-            warn!(
-                key_name = %entry.name,
-                request_count = request_count,
-                limit = limit,
-                "Rate limit exceeded"
-            );
-            return AuthResult::Denied {
-                reason: "Rate limit exceeded".to_string(),
-                retry_after: Some(retry_after),
-            };
-        }
+        let request_count = match limit_entry.record_request(self.rate_limit_window, limit) {
+            Ok(count) => count,
+            Err(retry_after) => {
+                warn!(
+                    key_name = %entry.name,
+                    limit = limit,
+                    "Rate limit exceeded"
+                );
+                return AuthResult::Denied {
+                    reason: "Rate limit exceeded".to_string(),
+                    retry_after: Some(retry_after as u32),
+                };
+            }
+        };
 
         let remaining = (limit - request_count) as u32;
         debug!(key_name = %entry.name, remaining = remaining, "Request allowed");
@@ -340,19 +346,24 @@ fn default_requests_per_minute() -> u32 {
     60
 }
 
-/// Generate a new secure API key
+/// Generate a new cryptographically secure API key
 pub fn generate_api_key() -> String {
-    use rand::Rng;
+    use rand::rngs::OsRng;
+    use rand::RngCore;
+
     const CHARSET: &[u8] = b"ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789";
     const KEY_LEN: usize = 32;
 
-    let mut rng = rand::thread_rng();
-    (0..KEY_LEN)
-        .map(|_| {
-            let idx = rng.gen_range(0..CHARSET.len());
-            CHARSET[idx] as char
-        })
-        .collect()
+    let mut key = String::with_capacity(KEY_LEN);
+    let mut bytes = vec![0u8; KEY_LEN];
+
+    // Use OsRng for cryptographically secure randomness
+    OsRng.fill_bytes(&mut bytes);
+
+    for b in bytes {
+        key.push(CHARSET[b as usize % CHARSET.len()] as char);
+    }
+    key
 }
 
 #[cfg(test)]

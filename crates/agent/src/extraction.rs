@@ -1,9 +1,18 @@
 use anyhow::{anyhow, Context, Result};
 use quotey_core::{ExtractedRequirements, RequirementSourceType};
 use serde::Deserialize;
+use std::time::Duration;
+use tokio::time::timeout;
 
 use crate::llm::LlmClient;
 use crate::prompts::build_requirement_extraction_prompt;
+
+/// Maximum size of LLM response to parse (10MB) - prevents DoS from malicious responses
+const MAX_EXTRACTION_RESPONSE_SIZE: usize = 10 * 1024 * 1024;
+/// Maximum time to wait for LLM extraction (60 seconds)
+const EXTRACTION_TIMEOUT: Duration = Duration::from_secs(60);
+/// Maximum iterations for markdown fence parsing (prevents infinite loops)
+const MAX_FENCE_ITERATIONS: usize = 1000;
 
 pub async fn parse_requirements(
     client: &dyn LlmClient,
@@ -11,8 +20,19 @@ pub async fn parse_requirements(
     source_text: &str,
 ) -> Result<ExtractedRequirements> {
     let prompt = build_requirement_extraction_prompt(source_type, source_text);
-    let response =
-        client.complete(&prompt).await.context("requirement extraction completion failed")?;
+    let response = timeout(EXTRACTION_TIMEOUT, client.complete(&prompt))
+        .await
+        .context("LLM extraction timed out after 60 seconds")?
+        .context("requirement extraction completion failed")?;
+
+    // Check response size to prevent DoS
+    if response.len() > MAX_EXTRACTION_RESPONSE_SIZE {
+        return Err(anyhow!(
+            "extraction response too large: {} bytes (max {})",
+            response.len(),
+            MAX_EXTRACTION_RESPONSE_SIZE
+        ));
+    }
 
     let mut extracted: ExtractedRequirements = parse_extracted_requirements(&response)
         .context("requirement extraction returned invalid JSON")?;
@@ -77,8 +97,15 @@ fn parse_first_json_value(candidate: &str) -> Result<ExtractedRequirements, serd
 fn extract_markdown_code_fence_payloads(response: &str) -> Vec<&str> {
     let mut payloads = Vec::new();
     let mut remainder = response;
+    let mut iterations = 0;
 
     while let Some(start_idx) = remainder.find("```") {
+        // Prevent infinite loops from pathological input
+        iterations += 1;
+        if iterations > MAX_FENCE_ITERATIONS {
+            break;
+        }
+
         let after_start = &remainder[start_idx + 3..];
         let Some(end_idx) = after_start.find("```") else {
             break;

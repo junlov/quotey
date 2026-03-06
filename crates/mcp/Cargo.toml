@@ -33,10 +33,12 @@ tracing-subscriber = { workspace = true }
 async-trait = { workspace = true }
 chrono = { workspace = true }
 rand = "0.8"
+blake3 = "1.5"
 rust_decimal = { workspace = true }
 tera = { workspace = true }
 sqlx = { workspace = true }
 uuid = { workspace = true }
+reqwest = { workspace = true }
 
 [dev-dependencies]
 tokio-test = "0.4"

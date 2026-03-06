@@ -11,11 +11,11 @@ use rmcp::{
 };
 use tracing::{debug, info, warn};
 
-use std::collections::hash_map::DefaultHasher;
 use std::collections::HashMap;
-use std::hash::{Hash, Hasher};
+
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 use tera::{Context, Tera};
 
 use crate::auth::{AuthManager, AuthResult};
@@ -26,6 +26,7 @@ const MAX_PAGE_LIMIT: u32 = 100;
 const DEFAULT_PAGE_LIMIT: u32 = 20;
 const MAX_LINE_ITEMS: usize = 500;
 const MAX_QUANTITY: u32 = 1_000_000;
+const PORTAL_PUSH_BRIDGE_URL_ENV: &str = "QUOTEY_PORTAL_PUSH_BRIDGE_URL";
 
 fn tool_error(code: &str, message: &str, details: Option<serde_json::Value>) -> String {
     let safe_message = if code == "INTERNAL_ERROR" { "Internal server error" } else { message };
@@ -167,20 +168,27 @@ fn decimal_to_f64(value: &rust_decimal::Decimal) -> f64 {
 
 fn build_quote_id(account_id: &str, input: &QuoteCreateInput) -> String {
     if let Some(key) = input.idempotency_key.as_deref().filter(|v| !v.trim().is_empty()) {
-        let mut hasher = DefaultHasher::new();
-        account_id.hash(&mut hasher);
-        key.hash(&mut hasher);
-        input.currency.hash(&mut hasher);
-        input.term_months.hash(&mut hasher);
-        input.deal_id.hash(&mut hasher);
-        for item in &input.line_items {
-            item.product_id.hash(&mut hasher);
-            item.quantity.hash(&mut hasher);
-            item.discount_pct.to_bits().hash(&mut hasher);
+        // Use Blake3 for cryptographically secure, stable hashing
+        let mut hasher = blake3::Hasher::new();
+        hasher.update(account_id.as_bytes());
+        hasher.update(key.as_bytes());
+        hasher.update(input.currency.as_bytes());
+        if let Some(term) = input.term_months {
+            hasher.update(&term.to_le_bytes());
         }
-        format!("Q-{:016x}", hasher.finish())
+        if let Some(deal_id) = &input.deal_id {
+            hasher.update(deal_id.as_bytes());
+        }
+        for item in &input.line_items {
+            hasher.update(item.product_id.as_bytes());
+            hasher.update(&item.quantity.to_le_bytes());
+            hasher.update(&item.discount_pct.to_le_bytes());
+        }
+        // Use first 16 chars of hex-encoded hash for readable ID
+        let hash = hasher.finalize();
+        format!("Q-{:.16}", hash.to_hex())
     } else {
-        format!("Q-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("0000"))
+        format!("Q-{:.8}", uuid::Uuid::new_v4().to_string())
     }
 }
 
@@ -193,16 +201,55 @@ fn template_is_allowed(template: &str) -> bool {
 }
 
 fn checksum_of(value: &str) -> String {
-    let mut hasher = DefaultHasher::new();
-    value.hash(&mut hasher);
-    format!("mock-checksum:{:016x}", hasher.finish())
+    let hash = blake3::hash(value.as_bytes());
+    format!("checksum:{:.32}", hash.to_hex())
 }
 
 fn checksum_of_bytes(value: &[u8]) -> String {
-    use std::hash::Hasher as _;
-    let mut hasher = DefaultHasher::new();
-    hasher.write(value);
-    format!("mock-checksum:{:016x}", hasher.finish())
+    let hash = blake3::hash(value);
+    format!("checksum:{:.32}", hash.to_hex())
+}
+
+#[derive(Debug, Clone)]
+struct PortalPushSubscription {
+    endpoint: String,
+    p256dh: String,
+    auth: String,
+}
+
+#[derive(Debug, Clone, Serialize)]
+struct PortalPushNotificationPayload {
+    title: String,
+    body: String,
+    url: String,
+    quote_id: String,
+    approval_id: String,
+    amount: String,
+    discount_pct: f64,
+    approver_role: String,
+    customer: String,
+}
+
+fn resolve_portal_push_bridge_url() -> Option<String> {
+    std::env::var(PORTAL_PUSH_BRIDGE_URL_ENV)
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty())
+}
+
+fn compute_quote_totals_for_push(quote: &Quote) -> (f64, f64) {
+    let mut subtotal = 0.0_f64;
+    let mut discount_total = 0.0_f64;
+    for line in &quote.lines {
+        let unit = decimal_to_f64(&line.unit_price);
+        let line_subtotal = unit * line.quantity as f64;
+        let line_discount = line_subtotal * line.discount_pct / 100.0;
+        subtotal += line_subtotal;
+        discount_total += line_discount;
+    }
+    let total = (subtotal - discount_total).max(0.0);
+    let discount_pct = if subtotal > 0.0 { (discount_total / subtotal) * 100.0 } else { 0.0 };
+    (total, discount_pct)
 }
 
 fn sanitize_filename(value: &str) -> String {
@@ -537,6 +584,189 @@ impl QuoteyMcpServer {
         .await
         {
             warn!(error = %error, tool_name = %tool_name, "failed to persist MCP invocation audit_event");
+        }
+    }
+
+    async fn fetch_active_portal_push_subscriptions(
+        &self,
+    ) -> Result<Vec<PortalPushSubscription>, sqlx::Error> {
+        use sqlx::Row as _;
+
+        let rows = sqlx::query(
+            "SELECT endpoint, p256dh, auth
+             FROM portal_push_subscription
+             WHERE revoked = 0",
+        )
+        .fetch_all(self.db())
+        .await?;
+
+        let mut subscriptions = Vec::with_capacity(rows.len());
+        for row in rows {
+            let endpoint = row.try_get::<String, _>("endpoint").unwrap_or_default();
+            let p256dh = row.try_get::<String, _>("p256dh").unwrap_or_default();
+            let auth = row.try_get::<String, _>("auth").unwrap_or_default();
+            if endpoint.trim().is_empty() || p256dh.trim().is_empty() || auth.trim().is_empty() {
+                continue;
+            }
+            subscriptions.push(PortalPushSubscription { endpoint, p256dh, auth });
+        }
+        Ok(subscriptions)
+    }
+
+    async fn send_portal_push_via_bridge(
+        &self,
+        bridge_url: &str,
+        subscription: &PortalPushSubscription,
+        payload: &PortalPushNotificationPayload,
+    ) -> Result<u16, String> {
+        let client = reqwest::Client::builder()
+            .timeout(Duration::from_secs(8))
+            .build()
+            .map_err(|error| format!("bridge client build failed: {error}"))?;
+
+        let response = client
+            .post(bridge_url)
+            .json(&serde_json::json!({
+                "endpoint": &subscription.endpoint,
+                "keys": {
+                    "p256dh": &subscription.p256dh,
+                    "auth": &subscription.auth
+                },
+                "notification": payload
+            }))
+            .send()
+            .await
+            .map_err(|error| format!("bridge request failed: {error}"))?;
+
+        let status = response.status();
+        if status.is_success() {
+            Ok(status.as_u16())
+        } else {
+            let body = response.text().await.unwrap_or_default();
+            let compact = if body.len() > 240 { format!("{}...", &body[..240]) } else { body };
+            Err(format!("bridge returned {status}: {compact}"))
+        }
+    }
+
+    async fn record_portal_push_audit_event(
+        &self,
+        event_type: &str,
+        quote_id: Option<&str>,
+        payload: serde_json::Value,
+    ) {
+        let payload_json = match serde_json::to_string(&payload) {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(error = %error, event_type = %event_type, "failed to serialize portal push audit payload");
+                "{}".to_string()
+            }
+        };
+        let metadata_json = serde_json::json!({
+            "source": "quotey-mcp",
+            "channel": "portal-pwa",
+            "event_type": event_type
+        })
+        .to_string();
+        let sanitized_quote_id = self.sanitize_quote_id_for_audit(quote_id).await;
+
+        if let Err(error) = sqlx::query(
+            r#"
+            INSERT INTO audit_event (
+                id, timestamp, actor, actor_type, quote_id,
+                event_type, event_category, payload_json, metadata_json
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+            "#,
+        )
+        .bind(format!("mcp-push-{}", uuid::Uuid::new_v4()))
+        .bind(chrono::Utc::now().to_rfc3339())
+        .bind("agent:mcp")
+        .bind("agent")
+        .bind(sanitized_quote_id)
+        .bind(event_type)
+        .bind("portal")
+        .bind(payload_json)
+        .bind(Some(metadata_json))
+        .execute(self.db())
+        .await
+        {
+            warn!(error = %error, event_type = %event_type, "failed to persist portal push audit_event");
+        }
+    }
+
+    async fn dispatch_pending_approval_push_notifications(
+        &self,
+        quote: &Quote,
+        approval_id: &str,
+        approver_role: &str,
+    ) {
+        let subscriptions = match self.fetch_active_portal_push_subscriptions().await {
+            Ok(rows) => rows,
+            Err(error) => {
+                warn!(error = %error, quote_id = %quote.id.0, "failed to fetch active portal push subscriptions");
+                return;
+            }
+        };
+
+        if subscriptions.is_empty() {
+            return;
+        }
+
+        let bridge_url = resolve_portal_push_bridge_url();
+        let (total, discount_pct) = compute_quote_totals_for_push(quote);
+        let customer = quote.account_id.clone().unwrap_or_else(|| "Unknown Customer".to_string());
+        let payload = PortalPushNotificationPayload {
+            title: "Approval Request".to_string(),
+            body: format!(
+                "{} • {} {:.2} • {:.1}% discount",
+                customer, quote.currency, total, discount_pct
+            ),
+            url: format!("/approvals/{approval_id}"),
+            quote_id: quote.id.0.clone(),
+            approval_id: approval_id.to_string(),
+            amount: format!("{} {:.2}", quote.currency, total),
+            discount_pct,
+            approver_role: approver_role.to_string(),
+            customer: customer.clone(),
+        };
+
+        for subscription in subscriptions {
+            let endpoint_hash = checksum_of(&subscription.endpoint);
+            let (event_type, outcome, detail) = match bridge_url.as_deref() {
+                Some(url) => {
+                    match self.send_portal_push_via_bridge(url, &subscription, &payload).await {
+                        Ok(status_code) => (
+                            "portal.pwa.push_sent",
+                            "sent",
+                            Some(format!("bridge_status:{status_code}")),
+                        ),
+                        Err(error) => ("portal.pwa.push_failed", "failed", Some(error)),
+                    }
+                }
+                None => (
+                    "portal.pwa.push_skipped",
+                    "skipped",
+                    Some(format!("{PORTAL_PUSH_BRIDGE_URL_ENV} is not configured")),
+                ),
+            };
+
+            self.record_portal_push_audit_event(
+                event_type,
+                Some(&quote.id.0),
+                serde_json::json!({
+                    "approval_id": approval_id,
+                    "quote_id": quote.id.0,
+                    "customer": customer,
+                    "amount": payload.amount,
+                    "discount_pct": payload.discount_pct,
+                    "deep_link": payload.url,
+                    "approver_role": approver_role,
+                    "endpoint_hash": endpoint_hash,
+                    "outcome": outcome,
+                    "detail": detail,
+                }),
+            )
+            .await;
         }
     }
 
@@ -2068,6 +2298,9 @@ impl QuoteyMcpServer {
             return tool_error("INTERNAL_ERROR", &e.to_string(), None);
         }
 
+        self.dispatch_pending_approval_push_notifications(&quote, &approval_id, &approver_role)
+            .await;
+
         let result = ApprovalRequestResult {
             approval_id,
             quote_id,
@@ -2382,6 +2615,24 @@ mod tests {
         .execute(pool)
         .await
         .expect("seed quote");
+    }
+
+    async fn seed_portal_push_subscription(pool: &quotey_db::DbPool, endpoint: &str) {
+        let now = chrono::Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO portal_push_subscription
+                (id, endpoint, p256dh, auth, user_agent, device_label, revoked, created_at, updated_at)
+             VALUES (?, ?, ?, ?, NULL, NULL, 0, ?, ?)",
+        )
+        .bind(format!("PUSH-{}", uuid::Uuid::new_v4().to_string().split('-').next().unwrap_or("test")))
+        .bind(endpoint)
+        .bind("test-p256dh")
+        .bind("test-auth")
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("seed portal push subscription");
     }
 
     fn server(pool: quotey_db::DbPool) -> QuoteyMcpServer {
@@ -3193,6 +3444,122 @@ mod tests {
         assert!(v["created_at"].is_string());
         assert!(v["expires_at"].is_string());
         assert!(v["message"].is_string());
+    }
+
+    #[tokio::test]
+    async fn approval_request_with_subscriptions_records_push_audit_event() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-APUSH", "SKU-APUSH", "Push Widget", "250.00").await;
+        seed_portal_push_subscription(&pool, "https://push.example/subscription/1").await;
+        let srv = server(pool.clone());
+
+        let create_out = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "ACC-PUSH".to_string(),
+                deal_id: None,
+                currency: "USD".to_string(),
+                term_months: None,
+                start_date: None,
+                notes: None,
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-APUSH".to_string(),
+                    quantity: 2,
+                    discount_pct: 10.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                idempotency_key: Some("approval-push-audit".to_string()),
+            }))
+            .await;
+        let created = parse_output(&create_out);
+        let quote_id = created["quote_id"].as_str().unwrap().to_string();
+
+        let output = srv
+            .approval_request(Parameters(ApprovalRequestInput {
+                quote_id: quote_id.clone(),
+                justification: "Needs manager approval".to_string(),
+                approver_role: Some("sales_manager".to_string()),
+            }))
+            .await;
+        let approval = parse_output(&output);
+        let approval_id = approval["approval_id"].as_str().unwrap().to_string();
+
+        let row = sqlx::query(
+            "SELECT event_type, payload_json
+             FROM audit_event
+             WHERE quote_id = ?
+               AND event_type LIKE 'portal.pwa.push_%'
+             ORDER BY timestamp DESC
+             LIMIT 1",
+        )
+        .bind(&quote_id)
+        .fetch_optional(&pool)
+        .await
+        .expect("fetch push audit event")
+        .expect("push audit event should be created");
+
+        let event_type: String = row.get("event_type");
+        assert!(
+            event_type.starts_with("portal.pwa.push_"),
+            "expected portal push event_type, got {event_type}"
+        );
+
+        let payload_json: String = row.get("payload_json");
+        let payload: serde_json::Value =
+            serde_json::from_str(&payload_json).expect("push payload should be valid json");
+        let expected_link = format!("/approvals/{approval_id}");
+        assert_eq!(payload["approval_id"].as_str(), Some(approval_id.as_str()));
+        assert_eq!(payload["deep_link"].as_str(), Some(expected_link.as_str()));
+        assert_eq!(payload["quote_id"].as_str(), Some(quote_id.as_str()));
+        assert!(payload["amount"].as_str().unwrap_or_default().contains("USD"));
+    }
+
+    #[tokio::test]
+    async fn approval_request_without_subscriptions_skips_push_audit_event() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-ANOPUSH", "SKU-ANOPUSH", "No Push Widget", "100.00").await;
+        let srv = server(pool.clone());
+
+        let create_out = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "ACC-NOPUSH".to_string(),
+                deal_id: None,
+                currency: "USD".to_string(),
+                term_months: None,
+                start_date: None,
+                notes: None,
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-ANOPUSH".to_string(),
+                    quantity: 1,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                idempotency_key: Some("approval-no-push-audit".to_string()),
+            }))
+            .await;
+        let created = parse_output(&create_out);
+        let quote_id = created["quote_id"].as_str().unwrap().to_string();
+
+        let _ = srv
+            .approval_request(Parameters(ApprovalRequestInput {
+                quote_id: quote_id.clone(),
+                justification: "No subscriptions should skip push".to_string(),
+                approver_role: None,
+            }))
+            .await;
+
+        let push_event_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM audit_event
+             WHERE quote_id = ?
+               AND event_type LIKE 'portal.pwa.push_%'",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count push events");
+        assert_eq!(push_event_count, 0, "push events should not be created when no subscriptions");
     }
 
     #[tokio::test]

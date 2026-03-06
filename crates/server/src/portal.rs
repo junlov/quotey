@@ -1357,7 +1357,7 @@ async fn approval_detail_page(
 
     // Fetch quote lines with product names
     let line_rows = sqlx::query(
-        r#"SELECT ql.quantity, ql.unit_price, ql.subtotal, ql.discount_pct,
+        r#"SELECT ql.id AS line_id, ql.quantity, ql.unit_price, ql.subtotal, ql.discount_pct,
                   p.name AS product_name, p.sku AS product_sku
            FROM quote_line ql
            LEFT JOIN product p ON p.id = ql.product_id
@@ -1390,6 +1390,7 @@ async fn approval_detail_page(
             discount_total += discount_amount;
 
             serde_json::json!({
+                "id": r.try_get::<String, _>("line_id").unwrap_or_default(),
                 "product_name": r.try_get::<String, _>("product_name").unwrap_or_default(),
                 "sku": r.try_get::<String, _>("product_sku").unwrap_or_default(),
                 "quantity": qty,

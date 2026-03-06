@@ -11,12 +11,16 @@
 #   ./scripts/e2e_runner.sh --list                # List available suites
 #   ./scripts/e2e_runner.sh --cleanup             # Remove old artifacts
 #   ./scripts/e2e_runner.sh --cleanup --keep 5    # Keep last N runs
+#   ./scripts/e2e_runner.sh --cleanup --dry-run   # Preview cleanup without deleting
 #   ./scripts/e2e_runner.sh --summary             # Show summary of last run
+#   ./scripts/e2e_runner.sh --compare-last        # Generate replay-diff vs previous run
+#   ./scripts/e2e_runner.sh --compare-last --strict-diff  # Fail run if diff finds regressions
 #
 # Environment:
 #   QUOTEY_E2E_ARTIFACT_DIR   Override artifact directory (default: target/e2e-artifacts)
 #   QUOTEY_E2E_KEEP_RUNS      Number of runs to retain (default: 10)
 #   QUOTEY_E2E_VERBOSE        Show cargo test output live (default: 0)
+#   QUOTEY_E2E_LOCK_TIMEOUT   Seconds to wait for runner lock (default: 30)
 #   CARGO_TARGET_DIR           Override cargo target dir
 
 set -euo pipefail
@@ -28,6 +32,7 @@ export CARGO_TARGET_DIR="${CARGO_TARGET_DIR:-$ROOT_DIR/target}"
 ARTIFACT_DIR="${QUOTEY_E2E_ARTIFACT_DIR:-$ROOT_DIR/target/e2e-artifacts}"
 KEEP_RUNS="${QUOTEY_E2E_KEEP_RUNS:-10}"
 VERBOSE="${QUOTEY_E2E_VERBOSE:-0}"
+LOCK_TIMEOUT="${QUOTEY_E2E_LOCK_TIMEOUT:-30}"
 
 # Colors
 RED='\033[0;31m'
@@ -43,9 +48,9 @@ declare -A SUITE_PKG=(
   [critical]="quotey-db"
   [regression]="quotey-server"
 )
-declare -A SUITE_TEST=(
-  [e2e]="--test e2e_scenarios"
-  [critical]="--test critical_path_coverage"
+declare -A SUITE_TEST_BIN=(
+  [e2e]="e2e_scenarios"
+  [critical]="critical_path_coverage"
   [regression]=""
 )
 # Filters applied after -- for specific suites
@@ -66,6 +71,9 @@ ALL_SUITES=(e2e critical regression)
 MODE="run"
 SELECTED_SUITES=()
 FILTER=""
+DRY_RUN=0
+COMPARE_LAST=0
+STRICT_DIFF=0
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -89,6 +97,12 @@ while [[ $# -gt 0 ]]; do
       KEEP_RUNS="$1"; shift ;;
     --verbose|-v)
       VERBOSE=1; shift ;;
+    --dry-run)
+      DRY_RUN=1; shift ;;
+    --compare-last)
+      COMPARE_LAST=1; shift ;;
+    --strict-diff)
+      STRICT_DIFF=1; shift ;;
     --help|-h)
       sed -n '2,/^$/s/^# \?//p' "$0"
       exit 0 ;;
@@ -102,6 +116,11 @@ if [[ "${#SELECTED_SUITES[@]}" -eq 0 ]]; then
   SELECTED_SUITES=("${ALL_SUITES[@]}")
 fi
 
+if [[ "$STRICT_DIFF" == "1" ]] && [[ "$COMPARE_LAST" != "1" ]]; then
+  printf '%bError:%b --strict-diff requires --compare-last\n' "$RED" "$NC" >&2
+  exit 1
+fi
+
 # ── Helpers ──────────────────────────────────────────────────────────────
 
 timestamp() {
@@ -112,12 +131,35 @@ human_ts() {
   date -u +"%Y-%m-%d %H:%M:%S UTC"
 }
 
+json_escape() {
+  local value="$1"
+  value="${value//\\/\\\\}"
+  value="${value//\"/\\\"}"
+  value="${value//$'\n'/\\n}"
+  value="${value//$'\r'/\\r}"
+  value="${value//$'\t'/\\t}"
+  printf '%s' "$value"
+}
+
 duration_fmt() {
   local secs="$1"
   if [[ "$secs" -ge 60 ]]; then
     printf '%dm%02ds' $((secs / 60)) $((secs % 60))
   else
     printf '%ds' "$secs"
+  fi
+}
+
+require_positive_int() {
+  local label="$1"
+  local value="$2"
+  if [[ ! "$value" =~ ^[0-9]+$ ]]; then
+    printf '%bError:%b %s must be a positive integer, got: %s\n' "$RED" "$NC" "$label" "$value" >&2
+    exit 1
+  fi
+  if [[ "$value" -lt 1 ]]; then
+    printf '%bError:%b %s must be >= 1, got: %s\n' "$RED" "$NC" "$label" "$value" >&2
+    exit 1
   fi
 }
 
@@ -138,13 +180,24 @@ parse_test_result() {
   echo "${passed:-0} ${failed:-0} ${ignored:-0}"
 }
 
+acquire_lock() {
+  mkdir -p "$ARTIFACT_DIR"
+  local lock_file="$ARTIFACT_DIR/.runner.lock"
+  exec 9>"$lock_file"
+  if ! flock -w "$LOCK_TIMEOUT" 9; then
+    printf '%bError:%b could not acquire E2E runner lock within %ss (%s)\n' \
+      "$RED" "$NC" "$LOCK_TIMEOUT" "$lock_file" >&2
+    exit 1
+  fi
+}
+
 # ── Mode: list ───────────────────────────────────────────────────────────
 
 if [[ "$MODE" == "list" ]]; then
   printf '\n%bAvailable E2E suites:%b\n\n' "$CYAN" "$NC"
   for suite in "${ALL_SUITES[@]}"; do
     printf '  %-12s  %s\n' "$suite" "${SUITE_DESC[$suite]}"
-    printf '                Package: %s  Test: %s\n\n' "${SUITE_PKG[$suite]}" "${SUITE_TEST[$suite]}"
+    printf '                Package: %s  Test: %s\n\n' "${SUITE_PKG[$suite]}" "${SUITE_TEST_BIN[$suite]:-(all)}"
   done
   exit 0
 fi
@@ -152,6 +205,9 @@ fi
 # ── Mode: cleanup ────────────────────────────────────────────────────────
 
 if [[ "$MODE" == "cleanup" ]]; then
+  acquire_lock
+  require_positive_int "KEEP_RUNS" "$KEEP_RUNS"
+
   if [[ ! -d "$ARTIFACT_DIR" ]]; then
     echo "No artifact directory found at $ARTIFACT_DIR"
     exit 0
@@ -171,11 +227,19 @@ if [[ "$MODE" == "cleanup" ]]; then
 
   for ((i = 0; i < to_remove; i++)); do
     run_dir="${RUNS[$i]}"
-    printf '  Removing: %s\n' "$(basename "$run_dir")"
-    rm -rf "$run_dir"
+    if [[ "$DRY_RUN" == "1" ]]; then
+      printf '  [dry-run] Would remove: %s\n' "$(basename "$run_dir")"
+    else
+      printf '  Removing: %s\n' "$(basename "$run_dir")"
+      rm -rf "$run_dir"
+    fi
   done
 
-  printf '%bCleanup complete.%b\n' "$GREEN" "$NC"
+  if [[ "$DRY_RUN" == "1" ]]; then
+    printf '%bDry-run cleanup complete.%b\n' "$GREEN" "$NC"
+  else
+    printf '%bCleanup complete.%b\n' "$GREEN" "$NC"
+  fi
   exit 0
 fi
 
@@ -209,9 +273,13 @@ fi
 
 # ── Mode: run ────────────────────────────────────────────────────────────
 
+acquire_lock
+require_positive_int "KEEP_RUNS" "$KEEP_RUNS"
+
 RUN_TS="$(timestamp)"
 RUN_DIR="$ARTIFACT_DIR/run-$RUN_TS"
 mkdir -p "$RUN_DIR"
+RUN_STARTED_AT="$(human_ts)"
 
 printf '\n%b== E2E Runner ==%b\n' "$CYAN" "$NC"
 printf 'Run ID:     %s\n' "$RUN_TS"
@@ -243,9 +311,9 @@ for suite in "${SELECTED_SUITES[@]}"; do
   result_file="$suite_dir/result.json"
 
   pkg="${SUITE_PKG[$suite]}"
-  test_args="${SUITE_TEST[$suite]}"
+  test_bin="${SUITE_TEST_BIN[$suite]}"
 
-  # Build cargo command
+  # Build cargo command array
   builtin_filter="${SUITE_BUILTIN_FILTER[$suite]:-}"
   # Combine builtin filter and user filter
   all_filters=""
@@ -261,21 +329,38 @@ for suite in "${SELECTED_SUITES[@]}"; do
     fi
   fi
 
-  if [[ -n "$all_filters" ]]; then
-    cmd="cargo test -p $pkg $test_args -- $all_filters --nocapture 2>&1"
-  else
-    cmd="cargo test -p $pkg $test_args -- --nocapture 2>&1"
+  cmd=(cargo test -p "$pkg")
+  if [[ -n "$test_bin" ]]; then
+    cmd+=(--test "$test_bin")
   fi
 
-  printf '%b[%s]%b Running: %s\n' "$YELLOW" "$suite" "$NC" "$cmd"
+  cmd+=(--)
+  if [[ -n "$all_filters" ]]; then
+    cmd+=("$all_filters")
+  fi
+  cmd+=(--nocapture)
+
+  {
+    printf '#!/usr/bin/env bash\n'
+    printf 'set -euo pipefail\n'
+    printf 'cd %q\n' "$ROOT_DIR"
+    printf 'exec '
+    printf '%q ' "${cmd[@]}"
+    printf '\n'
+  } > "$suite_dir/replay.sh"
+  chmod +x "$suite_dir/replay.sh"
+
+  printf '%b[%s]%b Running:' "$YELLOW" "$suite" "$NC"
+  printf ' %q' "${cmd[@]}"
+  printf '\n'
 
   start_epoch="$(date +%s)"
 
   suite_exit=0
   if [[ "$VERBOSE" == "1" ]]; then
-    eval "$cmd" | tee "$log_file" || suite_exit=$?
+    "${cmd[@]}" | tee "$log_file" || suite_exit=$?
   else
-    eval "$cmd" > "$log_file" 2>&1 || suite_exit=$?
+    "${cmd[@]}" > "$log_file" 2>&1 || suite_exit=$?
   fi
 
   end_epoch="$(date +%s)"
@@ -323,11 +408,13 @@ if [[ "$OVERALL_EXIT" -eq 0 ]]; then
 else
   overall_status="FAIL"
 fi
+RUN_FINISHED_AT="$(human_ts)"
 
 cat > "$RUN_DIR/SUMMARY.json" <<ENDJSON
 {
   "run_id": "$RUN_TS",
-  "started_at": "$(human_ts)",
+  "started_at": "$RUN_STARTED_AT",
+  "finished_at": "$RUN_FINISHED_AT",
   "overall_status": "$overall_status",
   "total_tests": $total_tests,
   "total_passed": $OVERALL_PASSED,
@@ -346,6 +433,35 @@ $(
   ]
 }
 ENDJSON
+
+{
+  suites_json=""
+  for suite in "${SELECTED_SUITES[@]}"; do
+    if [[ -n "$suites_json" ]]; then
+      suites_json+=", "
+    fi
+    suites_json+="\"$suite\""
+  done
+
+  cat > "$RUN_DIR/RUN_METADATA.json" <<ENDJSON
+{
+  "run_id": "$RUN_TS",
+  "started_at": "$RUN_STARTED_AT",
+  "finished_at": "$RUN_FINISHED_AT",
+  "root_dir": "$(json_escape "$ROOT_DIR")",
+  "artifact_dir": "$(json_escape "$ARTIFACT_DIR")",
+  "keep_runs": $KEEP_RUNS,
+  "verbose": $VERBOSE,
+  "filter": "$(json_escape "$FILTER")",
+  "suites": [$suites_json],
+  "git": {
+    "branch": "$(json_escape "$(git rev-parse --abbrev-ref HEAD 2>/dev/null || echo unknown)")",
+    "commit": "$(json_escape "$(git rev-parse HEAD 2>/dev/null || echo unknown)")"
+  },
+  "host": "$(json_escape "$(hostname 2>/dev/null || echo unknown)")"
+}
+ENDJSON
+}
 
 # ── Print summary ────────────────────────────────────────────────────────
 
@@ -373,6 +489,54 @@ fi
 printf ' %7s %7s %7s\n' "$OVERALL_PASSED" "$OVERALL_FAILED" "$OVERALL_IGNORED"
 
 printf '\nArtifacts: %s\n' "$RUN_DIR"
+ln -sfn "$(basename "$RUN_DIR")" "$ARTIFACT_DIR/latest"
+
+# ── Optional replay-diff against previous run ────────────────────────────
+
+summary_status_override=""
+if [[ "$COMPARE_LAST" == "1" ]]; then
+  mapfile -t ALL_RUNS_FOR_DIFF < <(find "$ARTIFACT_DIR" -maxdepth 1 -mindepth 1 -type d -name 'run-*' | sort)
+  if [[ "${#ALL_RUNS_FOR_DIFF[@]}" -ge 2 ]]; then
+    prev_run="${ALL_RUNS_FOR_DIFF[-2]}"
+    printf '\n%b== Replay Diff (previous vs current) ==%b\n' "$CYAN" "$NC"
+    printf 'Baseline: %s\n' "$(basename "$prev_run")"
+    printf 'Current:  %s\n' "$(basename "$RUN_DIR")"
+
+    diff_cmd=(./scripts/e2e_diff.sh --report "$prev_run" "$RUN_DIR")
+    if [[ "$STRICT_DIFF" == "1" ]]; then
+      diff_cmd+=(--strict)
+    fi
+
+    diff_exit=0
+    "${diff_cmd[@]}" | tee "$RUN_DIR/DIFF_OUTPUT.txt" || diff_exit=$?
+
+    if [[ "$diff_exit" -ne 0 ]]; then
+      if [[ "$STRICT_DIFF" == "1" ]]; then
+        OVERALL_EXIT=1
+        summary_status_override="FAIL"
+        printf '%bReplay diff strict check failed (exit=%d); marking run as failed.%b\n' \
+          "$RED" "$diff_exit" "$NC"
+      else
+        printf '%bReplay diff command exited non-zero (exit=%d), continuing.%b\n' \
+          "$YELLOW" "$diff_exit" "$NC"
+      fi
+    else
+      printf '%bReplay diff complete.%b\n' "$GREEN" "$NC"
+      if [[ -f "$RUN_DIR/DIFF_REPORT.md" ]]; then
+        printf 'Replay report: %s\n' "$RUN_DIR/DIFF_REPORT.md"
+      fi
+      if [[ -f "$RUN_DIR/DIFF_SUMMARY.json" ]]; then
+        printf 'Replay summary: %s\n' "$RUN_DIR/DIFF_SUMMARY.json"
+      fi
+    fi
+  else
+    printf '\n%bReplay diff skipped:%b need at least 2 runs\n' "$YELLOW" "$NC"
+  fi
+fi
+
+if [[ "$summary_status_override" == "FAIL" ]]; then
+  sed -i 's/"overall_status": "PASS"/"overall_status": "FAIL"/' "$RUN_DIR/SUMMARY.json"
+fi
 
 # ── Auto-cleanup old runs ────────────────────────────────────────────────
 

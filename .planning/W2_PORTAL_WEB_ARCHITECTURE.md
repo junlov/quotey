@@ -180,3 +180,9 @@ This addendum defines the mobile approval PWA architecture aligned to the existi
 2. `templates/portal/settings.html` defines the PWA settings shell for push + cache policy.
 3. `templates/portal/manifest.webmanifest` uses `/approvals` as `start_url` and adds shortcuts for approvals/settings.
 4. `templates/portal/sw.js` now uses network-first handling for `/approvals*` with cache fallback, and network-only handling for `/quote/*` and `/api/*` to avoid caching token-bearing responses or API payloads.
+
+### Implementation Note (2026-03-06, quotey-008-4)
+1. `crates/mcp/src/server.rs` now dispatches portal push notifications when a new pending approval is created via `approval_request`.
+2. Payload includes customer, amount, discount percent, and deep link (`/approvals/{approval_id}`), matching the mobile PWA approval flow.
+3. Delivery uses a bridge URL (`QUOTEY_PORTAL_PUSH_BRIDGE_URL`) when configured; without it, dispatch is skipped safely without failing approval creation.
+4. Dispatch outcomes are audit-logged in `audit_event` as `portal.pwa.push_sent`, `portal.pwa.push_failed`, or `portal.pwa.push_skipped`.

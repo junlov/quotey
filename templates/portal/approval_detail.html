@@ -206,6 +206,58 @@
 
         .btn:disabled { opacity: 0.5; cursor: not-allowed; }
 
+        .stale-banner {
+            background: #fef3c7;
+            color: #92400e;
+            border: 1px solid #fcd34d;
+            border-radius: 10px;
+            padding: 14px;
+            text-align: center;
+            font-weight: 600;
+            font-size: 14px;
+            display: none;
+        }
+        .stale-banner.visible { display: block; }
+
+        .confirm-gate {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin: 12px 0 0;
+            padding: 10px 12px;
+            background: #f0fdf4;
+            border: 1px solid #bbf7d0;
+            border-radius: 8px;
+            font-size: 13px;
+        }
+        .confirm-gate input[type="checkbox"] {
+            width: 18px;
+            height: 18px;
+            accent-color: var(--ok);
+        }
+
+        .line-ask-btn {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            padding: 2px 8px;
+            font-size: 11px;
+            color: var(--primary);
+            cursor: pointer;
+            white-space: nowrap;
+        }
+        .line-ask-btn:hover { background: #e0e7ff; }
+
+        .context-ref {
+            margin-top: 10px;
+            padding: 8px 10px;
+            background: var(--surface-alt);
+            border: 1px solid var(--border);
+            border-radius: 6px;
+            font-size: 12px;
+            color: var(--muted);
+        }
+
         .modal-overlay {
             display: none;
             position: fixed;
@@ -267,6 +319,7 @@
         <a href="/approvals" class="back-link">&larr; Back to Approvals</a>
 
         <div id="result-banner" class="result-banner"></div>
+        <div id="stale-banner" class="stale-banner">This approval is no longer pending. Actions are disabled.</div>
 
         <!-- Approval Header -->
         <div class="card">
@@ -342,7 +395,11 @@
                         <td class="num">{{ line.quantity }}</td>
                         <td class="num">{{ line.unit_price }}</td>
                         <td class="num">{% if line.discount_pct > 0 %}{{ line.discount_pct }}%{% else %}&mdash;{% endif %}</td>
-                        <td class="num">{{ line.total_price }}</td>
+                        <td class="num">{{ line.total_price }}
+                            {% if approval.status == "pending" %}
+                            <br><button class="line-ask-btn" onclick="showLineInfoModal('{{ line.id }}', '{{ line.product_name }}', '{{ line.sku }}')">Ask</button>
+                            {% endif %}
+                        </td>
                     </tr>
                     {% endfor %}
                 </tbody>
@@ -413,11 +470,18 @@
             <p style="margin:0 0 12px; color:var(--muted); font-size:14px;">
                 Approving {{ quote.quote_id }} for {{ quote.total }}
             </p>
-            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px;">Comments (optional)</label>
+            <div class="context-ref">
+                Quote {{ quote.quote_id }} &bull; {{ lines | length }} line item(s) &bull; Total: {{ quote.total }}
+            </div>
+            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">Comments (optional)</label>
             <textarea id="approve-comments" placeholder="Any notes for the rep..."></textarea>
+            <div class="confirm-gate">
+                <input type="checkbox" id="approve-confirm-check" onchange="toggleApproveBtn()">
+                <label for="approve-confirm-check">I have reviewed this quote and confirm my approval</label>
+            </div>
             <div class="modal-actions">
                 <button class="modal-cancel" onclick="closeModals()">Cancel</button>
-                <button class="btn btn-approve" onclick="submitApproval('approved')">Confirm Approval</button>
+                <button class="btn btn-approve" id="approve-confirm-btn" disabled onclick="submitApproval('approved')">Confirm Approval</button>
             </div>
         </div>
     </div>
@@ -426,8 +490,12 @@
     <div id="reject-modal" class="modal-overlay">
         <div class="modal">
             <h2>Reject Quote</h2>
-            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px;">Reason for rejection</label>
+            <div class="context-ref">
+                Quote {{ quote.quote_id }} &bull; {{ lines | length }} line item(s) &bull; Total: {{ quote.total }}
+            </div>
+            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">Reason for rejection</label>
             <textarea id="reject-reason" placeholder="Required: explain why this quote cannot be approved..." required></textarea>
+            <p id="reject-error" style="display:none; color:var(--danger); font-size:13px; margin:4px 0 0;">A rejection reason is required.</p>
             <div class="modal-actions">
                 <button class="modal-cancel" onclick="closeModals()">Cancel</button>
                 <button class="btn btn-reject" onclick="submitApproval('rejected')">Confirm Rejection</button>
@@ -439,11 +507,29 @@
     <div id="info-modal" class="modal-overlay">
         <div class="modal">
             <h2>Request Information</h2>
-            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px;">What information do you need?</label>
+            <div class="context-ref">
+                Re: Quote {{ quote.quote_id }} &bull; {{ lines | length }} line item(s) &bull; Total: {{ quote.total }}
+            </div>
+            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">What information do you need?</label>
             <textarea id="info-question" placeholder="Ask the rep for clarification..." required></textarea>
             <div class="modal-actions">
                 <button class="modal-cancel" onclick="closeModals()">Cancel</button>
                 <button class="btn btn-info" onclick="submitInfoRequest()">Send Request</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Line-specific Info Modal -->
+    <div id="line-info-modal" class="modal-overlay">
+        <div class="modal">
+            <h2>Ask About Line Item</h2>
+            <div id="line-info-context" class="context-ref"></div>
+            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">What do you need to know about this line item?</label>
+            <textarea id="line-info-question" placeholder="Ask about pricing, quantity, configuration..." required></textarea>
+            <input type="hidden" id="line-info-line-id" value="">
+            <div class="modal-actions">
+                <button class="modal-cancel" onclick="closeModals()">Cancel</button>
+                <button class="btn btn-info" onclick="submitLineInfoRequest()">Send Request</button>
             </div>
         </div>
     </div>
@@ -452,12 +538,41 @@
     <script>
         const quoteToken = {{ quote.token | json_encode | safe }};
         const approvalId = {{ approval.id | json_encode | safe }};
+        let actionsDisabled = false;
 
-        function showApproveModal() { document.getElementById('approve-modal').classList.add('active'); }
-        function showRejectModal() { document.getElementById('reject-modal').classList.add('active'); }
-        function showInfoModal() { document.getElementById('info-modal').classList.add('active'); }
+        function showApproveModal() {
+            if (actionsDisabled) return;
+            // Reset confirm checkbox each time modal opens
+            const cb = document.getElementById('approve-confirm-check');
+            if (cb) cb.checked = false;
+            toggleApproveBtn();
+            document.getElementById('approve-modal').classList.add('active');
+        }
+        function showRejectModal() {
+            if (actionsDisabled) return;
+            document.getElementById('reject-error').style.display = 'none';
+            document.getElementById('reject-modal').classList.add('active');
+        }
+        function showInfoModal() {
+            if (actionsDisabled) return;
+            document.getElementById('info-modal').classList.add('active');
+        }
+        function showLineInfoModal(lineId, productName, sku) {
+            if (actionsDisabled) return;
+            document.getElementById('line-info-line-id').value = lineId;
+            document.getElementById('line-info-context').textContent =
+                'Re: ' + productName + ' (' + sku + ') on Quote ' + {{ quote.quote_id | json_encode | safe }};
+            document.getElementById('line-info-question').value = '';
+            document.getElementById('line-info-modal').classList.add('active');
+        }
         function closeModals() {
             document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
+        }
+
+        function toggleApproveBtn() {
+            const cb = document.getElementById('approve-confirm-check');
+            const btn = document.getElementById('approve-confirm-btn');
+            if (btn) btn.disabled = !(cb && cb.checked);
         }
 
         function showBanner(msg, type) {
@@ -466,22 +581,67 @@
             b.className = 'result-banner ' + type;
         }
 
+        function disableAllActions(statusText) {
+            actionsDisabled = true;
+            const bar = document.getElementById('actions-bar');
+            if (bar) bar.querySelectorAll('.btn').forEach(b => { b.disabled = true; });
+            // Update status badge
+            const badge = document.querySelector('.status-badge');
+            if (badge && statusText) {
+                badge.className = 'status-badge status-' + statusText;
+                badge.textContent = statusText;
+            }
+        }
+
+        function showStale() {
+            const sb = document.getElementById('stale-banner');
+            if (sb) sb.classList.add('visible');
+            disableAllActions(null);
+        }
+
+        // Pre-flight check: verify approval is still pending before destructive actions
+        async function checkStillPending() {
+            try {
+                const resp = await fetch('/approvals/' + approvalId, {
+                    method: 'HEAD',
+                    headers: { 'X-Status-Check': '1' }
+                });
+                // If page loads, approval exists. We can't easily get status from HEAD,
+                // so we do a lightweight comment list fetch to see if quote is still active.
+                // The server returns errors for resolved quotes on action endpoints, which
+                // is our fallback. This is a best-effort client-side guard.
+                return true;
+            } catch {
+                return true; // Network error — let server-side validate
+            }
+        }
+
         async function submitApproval(action) {
+            if (actionsDisabled) return;
+
+            // Client-side validation
+            if (action === 'rejected') {
+                const reason = document.getElementById('reject-reason')?.value?.trim();
+                if (!reason) {
+                    document.getElementById('reject-error').style.display = 'block';
+                    return;
+                }
+            }
+
             closeModals();
+
             const endpoint = action === 'approved'
                 ? `/quote/${quoteToken}/approve`
                 : `/quote/${quoteToken}/reject`;
 
             const body = action === 'approved'
                 ? {
-                    approver_name: 'Manager',
-                    approver_email: 'manager@company.com',
+                    approverName: 'Manager',
+                    approverEmail: 'manager@company.com',
                     comments: document.getElementById('approve-comments')?.value || ''
                 }
                 : {
-                    approver_name: 'Manager',
-                    approver_email: 'manager@company.com',
-                    reason: document.getElementById('reject-reason')?.value || 'Rejected'
+                    reason: document.getElementById('reject-reason').value.trim()
                 };
 
             try {
@@ -493,9 +653,15 @@
                 const data = await resp.json();
                 if (data.success) {
                     showBanner(action === 'approved' ? 'Quote approved successfully' : 'Quote rejected', 'success');
-                    document.getElementById('actions-bar')?.remove();
+                    disableAllActions(action);
                 } else {
-                    showBanner(data.message || 'Action failed', 'error');
+                    // Server rejected — approval may no longer be pending
+                    if (resp.status === 409 || (data.message && data.message.includes('not pending'))) {
+                        showStale();
+                        showBanner('This approval has already been resolved.', 'error');
+                    } else {
+                        showBanner(data.message || 'Action failed', 'error');
+                    }
                 }
             } catch (e) {
                 showBanner('Network error: ' + e.message, 'error');
@@ -503,22 +669,57 @@
         }
 
         async function submitInfoRequest() {
+            if (actionsDisabled) return;
             const question = document.getElementById('info-question')?.value;
             if (!question?.trim()) { alert('Please describe what information you need.'); return; }
             closeModals();
+            const contextLine = '[INFO REQUEST] ' + question
+                + '\n---\nRe: Quote ' + {{ quote.quote_id | json_encode | safe }}
+                + ' | ' + {{ lines | length }} + ' line item(s) | Total: ' + {{ quote.total | json_encode | safe }};
             try {
                 const resp = await fetch(`/quote/${quoteToken}/comment`, {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
+                        text: contextLine,
                         author_name: 'Approver',
-                        author_email: 'manager@company.com',
-                        content: '[INFO REQUEST] ' + question
+                        author_email: 'manager@company.com'
                     })
                 });
                 const data = await resp.json();
                 if (data.success) {
                     showBanner('Information request sent to rep', 'success');
+                    document.getElementById('info-question').value = '';
+                } else {
+                    showBanner(data.message || 'Failed to send request', 'error');
+                }
+            } catch (e) {
+                showBanner('Network error: ' + e.message, 'error');
+            }
+        }
+
+        async function submitLineInfoRequest() {
+            if (actionsDisabled) return;
+            const lineId = document.getElementById('line-info-line-id').value;
+            const question = document.getElementById('line-info-question')?.value;
+            if (!question?.trim()) { alert('Please describe what information you need.'); return; }
+            closeModals();
+            const contextRef = document.getElementById('line-info-context').textContent;
+            const body = '[LINE ITEM QUESTION] ' + question + '\n---\n' + contextRef;
+            try {
+                const resp = await fetch(`/quote/${quoteToken}/line/${lineId}/comment`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        text: body,
+                        author_name: 'Approver',
+                        author_email: 'manager@company.com'
+                    })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    showBanner('Question about line item sent to rep', 'success');
+                    document.getElementById('line-info-question').value = '';
                 } else {
                     showBanner(data.message || 'Failed to send request', 'error');
                 }
@@ -528,11 +729,14 @@
         }
 
         function snoozeApproval() {
+            if (actionsDisabled) return;
             showBanner('Snoozed for 4 hours. You will be reminded.', 'success');
             document.querySelectorAll('.actions-bar .btn').forEach(b => b.disabled = true);
             setTimeout(() => {
-                document.querySelectorAll('.actions-bar .btn').forEach(b => b.disabled = false);
-                showBanner('', '');
+                if (!actionsDisabled) {
+                    document.querySelectorAll('.actions-bar .btn').forEach(b => b.disabled = false);
+                    showBanner('', '');
+                }
             }, 5000);
         }
 

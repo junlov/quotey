@@ -15,12 +15,17 @@ pub async fn connect_with_settings(
 ) -> Result<DbPool, sqlx::Error> {
     SqlitePoolOptions::new()
         .max_connections(max_connections.max(1))
+        .min_connections(1)
         .acquire_timeout(Duration::from_secs(timeout_secs.max(1)))
+        .idle_timeout(Duration::from_secs(300)) // Close idle connections after 5 minutes
+        .max_lifetime(Duration::from_secs(1800)) // Recycle connections after 30 minutes
+        .test_before_acquire(true) // Verify connections before use
         .after_connect(|conn, _meta| {
             Box::pin(async move {
                 sqlx::query("PRAGMA foreign_keys = ON").execute(&mut *conn).await?;
                 sqlx::query("PRAGMA journal_mode = WAL").execute(&mut *conn).await?;
                 sqlx::query("PRAGMA busy_timeout = 5000").execute(&mut *conn).await?;
+                sqlx::query("PRAGMA synchronous = NORMAL").execute(&mut *conn).await?;
                 Ok(())
             })
         })
