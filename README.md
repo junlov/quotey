@@ -267,6 +267,7 @@ Portal approval actions support explicit auth method metadata (`biometric` or `p
 - Set `QUOTEY_PORTAL_APPROVAL_FALLBACK_PASSWORD` to enforce server-side verification when `authMethod=password`.
 - Use `/settings` in the portal to register Face ID / Touch ID on-device and manage fallback credentials.
 - Portal approval/rejection audit events now persist canonical auth context metadata (`auth_channel`, `auth_method`, `auth_strength`, `auth_principal`) in `audit_event.metadata_json`.
+- Portal/web responses now include baseline hardening headers (`Content-Security-Policy`, `X-Content-Type-Options`, `X-Frame-Options`, `Referrer-Policy`, `Permissions-Policy`) via router middleware.
 - Auth failures include canonical `code` values:
   `missing_credential` (required field missing), `invalid_credential` (wrong fallback password),
   `unsupported_method` (unsupported `authMethod`).

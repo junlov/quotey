@@ -30,6 +30,7 @@ tracing-subscriber.workspace = true
 
 [dev-dependencies]
 rust_decimal.workspace = true
+tower = { version = "0.5", features = ["util"] }
 
 [[bin]]
 name = "quotey-server"

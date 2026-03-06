@@ -28,9 +28,10 @@
 
 use crate::pdf::PdfGenerator;
 use axum::{
-    extract::{Path, Query, State},
-    http::{header, HeaderMap, StatusCode},
-    response::{Html, IntoResponse},
+    extract::{Path, Query, Request, State},
+    http::{header, HeaderMap, HeaderName, HeaderValue, StatusCode},
+    middleware::{self, Next},
+    response::{Html, IntoResponse, Response},
     routing::{get, post},
     Json, Router,
 };
@@ -151,6 +152,37 @@ impl PortalRepNotificationConfig {
 
         Self { slack_bot_token, fallback_channel }
     }
+}
+
+// Baseline hardening headers for SEC-301. CSP remains compatible with the
+// current portal templates (which still use inline script/style blocks).
+const PORTAL_CONTENT_SECURITY_POLICY: &str = "default-src 'self'; base-uri 'self'; form-action 'self'; frame-ancestors 'none'; object-src 'none'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data: https:; font-src 'self' data:; connect-src 'self'; manifest-src 'self'; worker-src 'self'";
+const PORTAL_PERMISSIONS_POLICY: &str = "accelerometer=(), ambient-light-sensor=(), autoplay=(), camera=(), geolocation=(), gyroscope=(), magnetometer=(), microphone=(), payment=(), usb=()";
+
+fn apply_portal_security_headers(headers: &mut HeaderMap) {
+    headers.insert(
+        HeaderName::from_static("content-security-policy"),
+        HeaderValue::from_static(PORTAL_CONTENT_SECURITY_POLICY),
+    );
+    headers.insert(
+        HeaderName::from_static("x-content-type-options"),
+        HeaderValue::from_static("nosniff"),
+    );
+    headers.insert(HeaderName::from_static("x-frame-options"), HeaderValue::from_static("DENY"));
+    headers.insert(
+        HeaderName::from_static("referrer-policy"),
+        HeaderValue::from_static("strict-origin-when-cross-origin"),
+    );
+    headers.insert(
+        HeaderName::from_static("permissions-policy"),
+        HeaderValue::from_static(PORTAL_PERMISSIONS_POLICY),
+    );
+}
+
+async fn portal_security_headers_middleware(request: Request, next: Next) -> Response {
+    let mut response = next.run(request).await;
+    apply_portal_security_headers(response.headers_mut());
+    response
 }
 
 // ---------------------------------------------------------------------------
@@ -583,6 +615,7 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/api/v1/portal/analytics/digest-schedule", get(get_digest_schedule))
         .route("/api/v1/portal/analytics/digest-schedule", post(upsert_digest_schedule))
         .route("/api/v1/portal/analytics/digest-dispatch/run", post(run_digest_dispatch))
+        .layer(middleware::from_fn(portal_security_headers_middleware))
         .with_state(PortalState {
             db_pool,
             templates,
@@ -4151,10 +4184,12 @@ fn uuid_v4() -> String {
 
 #[cfg(test)]
 mod tests {
-    use axum::http::{HeaderMap, HeaderValue};
+    use axum::body::Body;
+    use axum::http::{HeaderMap, HeaderValue, Request};
     use axum::{extract::State, Json};
     use chrono::Utc;
     use quotey_db::{connect_with_settings, migrations};
+    use tower::util::ServiceExt;
 
     use super::*;
 
@@ -4231,6 +4266,73 @@ mod tests {
         let mut headers = HeaderMap::new();
         headers.insert("x-forwarded-for", HeaderValue::from_str(ip).expect("valid header"));
         headers
+    }
+
+    fn assert_portal_security_headers(headers: &HeaderMap) {
+        assert_eq!(
+            headers.get("content-security-policy").and_then(|value| value.to_str().ok()),
+            Some(PORTAL_CONTENT_SECURITY_POLICY)
+        );
+        assert_eq!(
+            headers.get("x-content-type-options").and_then(|value| value.to_str().ok()),
+            Some("nosniff")
+        );
+        assert_eq!(
+            headers.get("x-frame-options").and_then(|value| value.to_str().ok()),
+            Some("DENY")
+        );
+        assert_eq!(
+            headers.get("referrer-policy").and_then(|value| value.to_str().ok()),
+            Some("strict-origin-when-cross-origin")
+        );
+        assert_eq!(
+            headers.get("permissions-policy").and_then(|value| value.to_str().ok()),
+            Some(PORTAL_PERMISSIONS_POLICY)
+        );
+    }
+
+    #[tokio::test]
+    async fn router_applies_security_headers_to_html_json_and_manifest_routes() {
+        let (pool, _, token) = setup().await;
+        let app = router(pool);
+
+        let quote_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/quote/{token}"))
+                    .body(Body::empty())
+                    .expect("quote request"),
+            )
+            .await
+            .expect("quote response");
+        assert_eq!(quote_response.status(), StatusCode::OK);
+        assert_portal_security_headers(quote_response.headers());
+
+        let comments_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri(format!("/quote/{token}/comments"))
+                    .body(Body::empty())
+                    .expect("comments request"),
+            )
+            .await
+            .expect("comments response");
+        assert_eq!(comments_response.status(), StatusCode::OK);
+        assert_portal_security_headers(comments_response.headers());
+
+        let manifest_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/manifest.webmanifest")
+                    .body(Body::empty())
+                    .expect("manifest request"),
+            )
+            .await
+            .expect("manifest response");
+        assert_eq!(manifest_response.status(), StatusCode::OK);
+        assert_portal_security_headers(manifest_response.headers());
     }
 
     #[tokio::test]
