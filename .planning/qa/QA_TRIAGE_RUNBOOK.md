@@ -38,6 +38,27 @@ Override only when necessary:
 - `QUOTEY_TMPDIR_OVERRIDE`
 - `QUOTEY_CARGO_TARGET_DIR_OVERRIDE`
 
+## 2.1 QA Dashboard Artifact Location
+
+Each `scripts/quality-gates.sh` execution now publishes run-scoped artifacts under:
+
+- `.planning/qa/reports/run-<RUN_ID>/QUALITY_GATE_SUMMARY.json`
+- `.planning/qa/reports/run-<RUN_ID>/QUALITY_GATE_SUMMARY.md`
+
+Latest-run pointer:
+
+- `.planning/qa/reports/LATEST_RUN_ID`
+
+Note: `.planning/qa/reports/` stores runtime artifacts and is intentionally git-ignored except for the directory-level `.gitignore` file.
+
+Quick inspection commands:
+
+```bash
+cat .planning/qa/reports/LATEST_RUN_ID
+latest="$(cat .planning/qa/reports/LATEST_RUN_ID)"
+cat ".planning/qa/reports/${latest}/QUALITY_GATE_SUMMARY.md"
+```
+
 ## 3. Fast Failure Intake
 
 1. Capture failing gate name from the first `FAIL` line in gate output.
