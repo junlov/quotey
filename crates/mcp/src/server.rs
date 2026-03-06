@@ -1680,6 +1680,33 @@ pub struct IntegrationTestInput {
     pub integration_id: String,
 }
 
+// Audit Query Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct AuditQueryInput {
+    /// Filter by quote ID
+    #[serde(default)]
+    pub quote_id: Option<String>,
+    /// Filter by entity type (quote, approval, negotiation, etc.)
+    #[serde(default)]
+    pub entity_type: Option<String>,
+    /// Filter by entity ID
+    #[serde(default)]
+    pub entity_id: Option<String>,
+    /// Filter by action (created, updated, approved, etc.)
+    #[serde(default)]
+    pub action: Option<String>,
+    /// Filter by event type string
+    #[serde(default)]
+    pub event_type: Option<String>,
+    /// Maximum results to return
+    #[serde(default = "default_audit_limit")]
+    pub limit: u32,
+}
+
+fn default_audit_limit() -> u32 {
+    50
+}
+
 fn default_limit() -> u32 {
     DEFAULT_PAGE_LIMIT
 }
@@ -4724,6 +4751,79 @@ impl QuoteyMcpServer {
         }))
         .unwrap_or_default()
     }
+
+    // -----------------------------------------------------------------------
+    // Audit query tools
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        name = "audit_query",
+        description = "Query audit events with structured filters. Filter by quote_id, entity_type + entity_id, action, or event_type. Returns enriched events with actor model, entity dimensions, and before/after snapshots."
+    )]
+    pub async fn audit_query(&self, Parameters(input): Parameters<AuditQueryInput>) -> String {
+        use quotey_db::repositories::SqlAuditEventRepository;
+
+        let repo = SqlAuditEventRepository::new(self.db_pool.clone());
+        let limit = input.limit.min(MAX_PAGE_LIMIT) as usize;
+
+        let events = if let Some(ref quote_id) = input.quote_id {
+            let qid = quotey_core::domain::quote::QuoteId(quote_id.trim().to_string());
+            match repo.find_by_quote_id(&qid).await {
+                Ok(evts) => evts,
+                Err(e) => return internal_tool_error(&e),
+            }
+        } else if let (Some(ref etype), Some(ref eid)) = (&input.entity_type, &input.entity_id) {
+            match repo.find_by_entity(etype.trim(), eid.trim()).await {
+                Ok(evts) => evts,
+                Err(e) => return internal_tool_error(&e),
+            }
+        } else if let Some(ref action) = input.action {
+            match repo.find_by_action(action.trim()).await {
+                Ok(evts) => evts,
+                Err(e) => return internal_tool_error(&e),
+            }
+        } else if let Some(ref event_type) = input.event_type {
+            match repo.find_by_type(event_type.trim()).await {
+                Ok(evts) => evts,
+                Err(e) => return internal_tool_error(&e),
+            }
+        } else {
+            return tool_error(
+                "VALIDATION_ERROR",
+                "At least one filter required: quote_id, entity_type+entity_id, action, or event_type",
+                None,
+            );
+        };
+
+        let items: Vec<serde_json::Value> = events
+            .iter()
+            .take(limit)
+            .map(|e| {
+                serde_json::json!({
+                    "event_id": e.event_id,
+                    "event_type": e.event_type,
+                    "category": format!("{:?}", e.category),
+                    "actor": e.actor,
+                    "actor_type": e.actor_type.as_str(),
+                    "outcome": format!("{:?}", e.outcome),
+                    "quote_id": e.quote_id.as_ref().map(|q| &q.0),
+                    "entity_type": e.entity_type.as_ref().map(|et| et.as_str()),
+                    "entity_id": e.entity_id,
+                    "action": e.action.as_ref().map(|a| a.as_str()),
+                    "has_before": e.before_json.is_some(),
+                    "has_after": e.after_json.is_some(),
+                    "occurred_at": e.occurred_at.to_rfc3339(),
+                })
+            })
+            .collect();
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "count": items.len(),
+            "total": events.len(),
+            "events": items,
+        }))
+        .unwrap_or_default()
+    }
 }
 
 /// Record a system-generated auto-comment on a quote for audit trail purposes.
@@ -7692,9 +7792,7 @@ mod tests {
 
         // Test connectivity
         let result = srv
-            .integration_test(Parameters(IntegrationTestInput {
-                integration_id: id.clone(),
-            }))
+            .integration_test(Parameters(IntegrationTestInput { integration_id: id.clone() }))
             .await;
         let v: serde_json::Value = serde_json::from_str(&result).unwrap();
         assert_eq!(v["test_ok"], true);
@@ -7759,5 +7857,138 @@ mod tests {
             }))
             .await;
         assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    // -----------------------------------------------------------------------
+    // Audit query tests
+    // -----------------------------------------------------------------------
+
+    async fn seed_enriched_audit_event(pool: &quotey_db::DbPool, quote_id: &str) {
+        use quotey_core::audit::{
+            ActorType, AuditAction, AuditCategory, AuditEvent, AuditOutcome, EntityType,
+        };
+        let repo = quotey_db::repositories::SqlAuditEventRepository::new(pool.clone());
+
+        let event = AuditEvent::new(
+            Some(quotey_core::domain::quote::QuoteId(quote_id.to_string())),
+            None,
+            "corr-test",
+            "quote.status_changed",
+            AuditCategory::Flow,
+            "test-agent",
+            AuditOutcome::Success,
+        )
+        .with_actor_type(ActorType::User)
+        .with_entity(EntityType::Quote, quote_id)
+        .with_action(AuditAction::Transitioned)
+        .with_before(r#"{"status":"draft"}"#)
+        .with_after(r#"{"status":"validated"}"#);
+
+        repo.save(&event).await.expect("seed audit event");
+    }
+
+    #[tokio::test]
+    async fn audit_query_by_quote_id() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-AUDIT-001").await;
+        seed_enriched_audit_event(&pool, "Q-AUDIT-001").await;
+        let srv = server(pool);
+
+        let result = srv
+            .audit_query(Parameters(AuditQueryInput {
+                quote_id: Some("Q-AUDIT-001".to_string()),
+                entity_type: None,
+                entity_id: None,
+                action: None,
+                event_type: None,
+                limit: 50,
+            }))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["count"], 1);
+        assert_eq!(v["events"][0]["actor_type"], "user");
+        assert_eq!(v["events"][0]["entity_type"], "quote");
+        assert_eq!(v["events"][0]["action"], "transitioned");
+        assert_eq!(v["events"][0]["has_before"], true);
+        assert_eq!(v["events"][0]["has_after"], true);
+    }
+
+    #[tokio::test]
+    async fn audit_query_by_entity() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-AUDIT-002").await;
+        seed_enriched_audit_event(&pool, "Q-AUDIT-002").await;
+        let srv = server(pool);
+
+        let result = srv
+            .audit_query(Parameters(AuditQueryInput {
+                quote_id: None,
+                entity_type: Some("quote".to_string()),
+                entity_id: Some("Q-AUDIT-002".to_string()),
+                action: None,
+                event_type: None,
+                limit: 50,
+            }))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["count"], 1);
+    }
+
+    #[tokio::test]
+    async fn audit_query_by_action() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-AUDIT-003").await;
+        seed_enriched_audit_event(&pool, "Q-AUDIT-003").await;
+        let srv = server(pool);
+
+        let result = srv
+            .audit_query(Parameters(AuditQueryInput {
+                quote_id: None,
+                entity_type: None,
+                entity_id: None,
+                action: Some("transitioned".to_string()),
+                event_type: None,
+                limit: 50,
+            }))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert!(v["count"].as_i64().unwrap() >= 1);
+    }
+
+    #[tokio::test]
+    async fn audit_query_requires_filter() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .audit_query(Parameters(AuditQueryInput {
+                quote_id: None,
+                entity_type: None,
+                entity_id: None,
+                action: None,
+                event_type: None,
+                limit: 50,
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn audit_query_empty_results() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .audit_query(Parameters(AuditQueryInput {
+                quote_id: Some("Q-NONEXISTENT".to_string()),
+                entity_type: None,
+                entity_id: None,
+                action: None,
+                event_type: None,
+                limit: 50,
+            }))
+            .await;
+        let v: serde_json::Value = serde_json::from_str(&result).unwrap();
+        assert_eq!(v["count"], 0);
     }
 }

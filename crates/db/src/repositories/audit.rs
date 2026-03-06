@@ -1,4 +1,6 @@
-use quotey_core::audit::{AuditCategory, AuditEvent, AuditOutcome};
+use quotey_core::audit::{
+    ActorType, AuditAction, AuditCategory, AuditEvent, AuditOutcome, EntityType,
+};
 use quotey_core::domain::quote::QuoteId;
 use std::collections::BTreeMap;
 
@@ -30,19 +32,26 @@ impl SqlAuditEventRepository {
             serde_json::to_string(&event.metadata).unwrap_or_else(|_| "{}".to_string());
 
         sqlx::query(
-            "INSERT INTO audit_event (id, timestamp, actor, actor_type, quote_id, event_type, event_category, payload_json, metadata_json) \
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) \
+            "INSERT INTO audit_event \
+             (id, timestamp, actor, actor_type, quote_id, event_type, event_category, \
+              payload_json, metadata_json, entity_type, entity_id, action, before_json, after_json) \
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?) \
              ON CONFLICT(id) DO NOTHING",
         )
         .bind(&event.event_id)
         .bind(event.occurred_at.to_rfc3339())
         .bind(&event.actor)
-        .bind("agent")
+        .bind(event.actor_type.as_str())
         .bind(quote_id)
         .bind(&event.event_type)
         .bind(&category)
         .bind(payload.to_string())
         .bind(&metadata_json)
+        .bind(event.entity_type.as_ref().map(|e| e.as_str()))
+        .bind(&event.entity_id)
+        .bind(event.action.as_ref().map(|a| a.as_str()))
+        .bind(&event.before_json)
+        .bind(&event.after_json)
         .execute(&self.pool)
         .await?;
 
@@ -55,7 +64,8 @@ impl SqlAuditEventRepository {
         quote_id: &QuoteId,
     ) -> Result<Vec<AuditEvent>, RepositoryError> {
         let rows = sqlx::query_as::<_, AuditEventRow>(
-            "SELECT id, timestamp, actor, quote_id, event_type, event_category, payload_json, metadata_json \
+            "SELECT id, timestamp, actor, actor_type, quote_id, event_type, event_category, \
+             payload_json, metadata_json, entity_type, entity_id, action, before_json, after_json \
              FROM audit_event WHERE quote_id = ? ORDER BY timestamp",
         )
         .bind(&quote_id.0)
@@ -68,10 +78,44 @@ impl SqlAuditEventRepository {
     /// Find audit events by type.
     pub async fn find_by_type(&self, event_type: &str) -> Result<Vec<AuditEvent>, RepositoryError> {
         let rows = sqlx::query_as::<_, AuditEventRow>(
-            "SELECT id, timestamp, actor, quote_id, event_type, event_category, payload_json, metadata_json \
+            "SELECT id, timestamp, actor, actor_type, quote_id, event_type, event_category, \
+             payload_json, metadata_json, entity_type, entity_id, action, before_json, after_json \
              FROM audit_event WHERE event_type = ? ORDER BY timestamp",
         )
         .bind(event_type)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|r| r.try_into_event()).collect()
+    }
+
+    /// Find audit events by entity type and entity ID.
+    pub async fn find_by_entity(
+        &self,
+        entity_type: &str,
+        entity_id: &str,
+    ) -> Result<Vec<AuditEvent>, RepositoryError> {
+        let rows = sqlx::query_as::<_, AuditEventRow>(
+            "SELECT id, timestamp, actor, actor_type, quote_id, event_type, event_category, \
+             payload_json, metadata_json, entity_type, entity_id, action, before_json, after_json \
+             FROM audit_event WHERE entity_type = ? AND entity_id = ? ORDER BY timestamp",
+        )
+        .bind(entity_type)
+        .bind(entity_id)
+        .fetch_all(&self.pool)
+        .await?;
+
+        rows.into_iter().map(|r| r.try_into_event()).collect()
+    }
+
+    /// Find audit events by action.
+    pub async fn find_by_action(&self, action: &str) -> Result<Vec<AuditEvent>, RepositoryError> {
+        let rows = sqlx::query_as::<_, AuditEventRow>(
+            "SELECT id, timestamp, actor, actor_type, quote_id, event_type, event_category, \
+             payload_json, metadata_json, entity_type, entity_id, action, before_json, after_json \
+             FROM audit_event WHERE action = ? ORDER BY timestamp",
+        )
+        .bind(action)
         .fetch_all(&self.pool)
         .await?;
 
@@ -97,11 +141,17 @@ struct AuditEventRow {
     id: String,
     timestamp: String,
     actor: String,
+    actor_type: String,
     quote_id: Option<String>,
     event_type: String,
     event_category: String,
     payload_json: String,
     metadata_json: Option<String>,
+    entity_type: Option<String>,
+    entity_id: Option<String>,
+    action: Option<String>,
+    before_json: Option<String>,
+    after_json: Option<String>,
 }
 
 impl AuditEventRow {
@@ -118,10 +168,13 @@ impl AuditEventRow {
             "Policy" => AuditCategory::Policy,
             "Persistence" => AuditCategory::Persistence,
             "System" => AuditCategory::System,
+            "Funnel" => AuditCategory::Funnel,
             other => {
                 return Err(RepositoryError::Decode(format!("unknown audit category: {other}")))
             }
         };
+
+        let actor_type = ActorType::parse_label(&self.actor_type).unwrap_or(ActorType::Agent);
 
         let payload: serde_json::Value = serde_json::from_str(&self.payload_json)
             .map_err(|e| RepositoryError::Decode(format!("invalid payload JSON: {e}")))?;
@@ -137,6 +190,9 @@ impl AuditEventRow {
             _ => AuditOutcome::Success,
         };
 
+        let entity_type = self.entity_type.as_deref().and_then(EntityType::parse_label);
+        let action = self.action.as_deref().and_then(AuditAction::parse_label);
+
         let metadata: BTreeMap<String, String> = self
             .metadata_json
             .as_deref()
@@ -151,7 +207,13 @@ impl AuditEventRow {
             event_type: self.event_type,
             category,
             actor: self.actor,
+            actor_type,
             outcome,
+            entity_type,
+            entity_id: self.entity_id,
+            action,
+            before_json: self.before_json,
+            after_json: self.after_json,
             metadata,
             occurred_at,
         })

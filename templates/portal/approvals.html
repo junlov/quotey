@@ -92,6 +92,74 @@
             text-decoration: none;
         }
 
+        .live-state {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border-radius: 999px;
+            padding: 5px 10px;
+            font-size: 12px;
+            font-weight: 700;
+            border: 1px solid #bfdbfe;
+            background: #eff6ff;
+            color: #1e40af;
+        }
+
+        .live-state-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            background: #1e40af;
+        }
+
+        .live-state-degraded {
+            border-color: #fde68a;
+            background: #fef3c7;
+            color: #92400e;
+        }
+        .live-state-degraded .live-state-dot {
+            background: #92400e;
+        }
+
+        .live-state-offline {
+            border-color: #fecaca;
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        .live-state-offline .live-state-dot {
+            background: #991b1b;
+        }
+
+        .update-banner {
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            border: 1px solid #bfdbfe;
+            border-radius: 12px;
+            background: #eff6ff;
+            color: #1d4ed8;
+            padding: 10px 12px;
+            font-size: 13px;
+            font-weight: 700;
+        }
+
+        .update-banner.visible {
+            display: flex;
+        }
+
+        .update-btn {
+            border: 1px solid #2563eb;
+            background: #2563eb;
+            color: white;
+            border-radius: 8px;
+            padding: 6px 10px;
+            font-size: 12px;
+            font-weight: 700;
+            cursor: pointer;
+        }
+        .update-btn:hover { background: #1d4ed8; }
+
         .summary-grid {
             display: grid;
             grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
@@ -356,7 +424,17 @@
             <h1>Pending Approvals</h1>
             <div class="hero-row">
                 <span class="badge">{{ count }} pending</span>
-                <a class="link" href="/settings">Notification Settings</a>
+                <div style="display:flex; gap:8px; align-items:center; flex-wrap:wrap;">
+                    <span id="queue-live-state" class="live-state" aria-live="polite">
+                        <span class="live-state-dot" aria-hidden="true"></span>
+                        <span id="queue-live-text">Live updates active</span>
+                    </span>
+                    <a class="link" href="/settings">Notification Settings</a>
+                </div>
+            </div>
+            <div id="queue-update-banner" class="update-banner" role="status" aria-live="polite">
+                <span>New approval activity detected. Refresh to view latest changes.</span>
+                <button class="update-btn" type="button" onclick="window.location.reload()">Refresh</button>
             </div>
             <div class="summary-grid" aria-label="Approval queue segmentation summary">
                 <section class="summary-card">
@@ -428,5 +506,89 @@
         {% endif %}
     </main>
     <script src="/portal/shell.js"></script>
+    <script>
+        let queueSnapshotSignature = null;
+        let queuePollFailures = 0;
+        let queuePollTimer = null;
+
+        function setQueueLiveState(state, message) {
+            const badge = document.getElementById('queue-live-state');
+            const text = document.getElementById('queue-live-text');
+            if (!badge || !text) return;
+
+            badge.classList.remove('live-state-degraded', 'live-state-offline');
+            if (state === 'degraded') {
+                badge.classList.add('live-state-degraded');
+            } else if (state === 'offline') {
+                badge.classList.add('live-state-offline');
+            }
+            text.textContent = message;
+        }
+
+        function buildQueueSignature(payload) {
+            const approvals = Array.isArray(payload?.approvals) ? payload.approvals : [];
+            const pieces = approvals.map((item) => [
+                item.approval_id || '',
+                item.status || '',
+                item.updated_at || '',
+                item.latest_comment_at || '',
+            ].join('|'));
+            return `${payload?.count || 0}::${pieces.join('::')}`;
+        }
+
+        function showQueueUpdateBanner() {
+            const banner = document.getElementById('queue-update-banner');
+            if (banner) banner.classList.add('visible');
+        }
+
+        async function pollQueueLiveState() {
+            try {
+                const response = await fetch('/api/v1/portal/approvals/live', {
+                    method: 'GET',
+                    headers: { 'X-Portal-Live': 'queue' },
+                });
+                if (!response.ok) {
+                    throw new Error(`Live poll failed (${response.status})`);
+                }
+                const payload = await response.json();
+                const signature = buildQueueSignature(payload);
+                if (queueSnapshotSignature && signature !== queueSnapshotSignature) {
+                    showQueueUpdateBanner();
+                }
+                queueSnapshotSignature = signature;
+                queuePollFailures = 0;
+                setQueueLiveState('live', 'Live updates active');
+            } catch (_error) {
+                queuePollFailures += 1;
+                if (!navigator.onLine || queuePollFailures >= 3) {
+                    setQueueLiveState('offline', 'Live updates offline');
+                } else {
+                    setQueueLiveState('degraded', 'Live updates degraded');
+                }
+            }
+        }
+
+        function startQueuePolling() {
+            if (queuePollTimer !== null) {
+                clearInterval(queuePollTimer);
+            }
+            pollQueueLiveState();
+            queuePollTimer = window.setInterval(() => {
+                if (document.hidden) return;
+                pollQueueLiveState();
+            }, 15000);
+        }
+
+        window.addEventListener('online', () => {
+            queuePollFailures = 0;
+            setQueueLiveState('live', 'Reconnected. Syncing updates...');
+            pollQueueLiveState();
+        });
+        window.addEventListener('offline', () => {
+            setQueueLiveState('offline', 'Live updates offline');
+        });
+
+        startQueuePolling();
+    </script>
 </body>
 </html>

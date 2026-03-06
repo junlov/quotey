@@ -18,6 +18,8 @@
 //! - `POST /quote/{token}/comment`              — add an overall customer comment
 //! - `GET  /quote/{token}/comments`             — list all comments for a quote
 //! - `POST /quote/{token}/line/{line_id}/comment` — add a per-line-item comment
+//! - `GET  /api/v1/portal/approvals/live`       — live queue snapshot for polling UX
+//! - `GET  /api/v1/portal/approvals/{id}/live`  — per-approval live status snapshot
 //! - `POST /quote/{token}/assumptions`          — update quote assumptions and recalculate
 //! - `POST /api/v1/portal/links`                — generate a shareable link
 //! - `POST /api/v1/portal/links/regenerate`     — regenerate link (revokes older active links)
@@ -398,6 +400,15 @@ pub struct CommentResponse {
 }
 
 #[derive(Debug, Serialize)]
+pub struct LiveApprovalItem {
+    pub approval_id: String,
+    pub quote_id: String,
+    pub status: String,
+    pub updated_at: String,
+    pub latest_comment_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
 pub struct PortalResponse {
     pub success: bool,
     pub message: String,
@@ -613,6 +624,8 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/api/v1/portal/links/regenerate", post(regenerate_link))
         .route("/api/v1/portal/links/revoke", post(revoke_link))
         .route("/api/v1/portal/links/{quote_id}", get(list_links))
+        .route("/api/v1/portal/approvals/live", get(list_live_approvals))
+        .route("/api/v1/portal/approvals/{id}/live", get(get_live_approval_status))
         .route("/api/v1/portal/push/subscribe", post(subscribe_push))
         .route("/api/v1/portal/push/unsubscribe", post(unsubscribe_push))
         .route("/api/v1/portal/export/quotes", get(export_quotes_csv))
@@ -3184,6 +3197,95 @@ async fn list_comments(
     })))
 }
 
+async fn list_live_approvals(
+    State(state): State<PortalState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<PortalError>)> {
+    let rows = sqlx::query(
+        r#"SELECT
+                ar.id AS approval_id,
+                ar.quote_id AS quote_id,
+                LOWER(COALESCE(ar.status, 'pending')) AS status,
+                COALESCE(ar.updated_at, ar.created_at, datetime('now')) AS updated_at,
+                (
+                    SELECT MAX(pc.created_at)
+                    FROM portal_comment pc
+                    WHERE pc.quote_id = ar.quote_id
+                ) AS latest_comment_at
+           FROM approval_request ar
+           WHERE LOWER(COALESCE(ar.status, 'pending')) = 'pending'
+           ORDER BY ar.created_at DESC
+           LIMIT 150"#,
+    )
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    let items: Vec<LiveApprovalItem> = rows
+        .into_iter()
+        .map(|row| LiveApprovalItem {
+            approval_id: row.try_get::<String, _>("approval_id").unwrap_or_default(),
+            quote_id: row.try_get::<String, _>("quote_id").unwrap_or_default(),
+            status: row.try_get::<String, _>("status").unwrap_or_else(|_| "pending".to_string()),
+            updated_at: row.try_get::<String, _>("updated_at").unwrap_or_default(),
+            latest_comment_at: row
+                .try_get::<Option<String>, _>("latest_comment_at")
+                .unwrap_or(None),
+        })
+        .collect();
+
+    Ok(Json(serde_json::json!({
+        "generated_at": Utc::now().to_rfc3339(),
+        "count": items.len(),
+        "approvals": items,
+    })))
+}
+
+async fn get_live_approval_status(
+    Path(approval_id): Path<String>,
+    State(state): State<PortalState>,
+) -> Result<Json<serde_json::Value>, (StatusCode, Json<PortalError>)> {
+    let approval_row = sqlx::query(
+        "SELECT id, quote_id, LOWER(COALESCE(status, 'pending')) AS status,
+                COALESCE(updated_at, created_at, datetime('now')) AS updated_at
+         FROM approval_request
+         WHERE id = ?",
+    )
+    .bind(&approval_id)
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    let approval_row = approval_row
+        .ok_or_else(|| (StatusCode::NOT_FOUND, Json(PortalError::not_found("approval request"))))?;
+
+    let quote_id = approval_row.try_get::<String, _>("quote_id").unwrap_or_default();
+    let status =
+        approval_row.try_get::<String, _>("status").unwrap_or_else(|_| "pending".to_string());
+    let updated_at = approval_row.try_get::<String, _>("updated_at").unwrap_or_default();
+
+    let comment_metrics =
+        sqlx::query("SELECT COUNT(*) AS total, MAX(created_at) AS latest_at FROM portal_comment WHERE quote_id = ?")
+            .bind(&quote_id)
+            .fetch_one(&state.db_pool)
+            .await
+            .map_err(db_error)?;
+
+    let comment_count = comment_metrics.try_get::<i64, _>("total").unwrap_or(0);
+    let latest_comment_at =
+        comment_metrics.try_get::<Option<String>, _>("latest_at").unwrap_or(None);
+
+    Ok(Json(serde_json::json!({
+        "approval_id": approval_row.try_get::<String, _>("id").unwrap_or_default(),
+        "quote_id": quote_id,
+        "status": status,
+        "is_pending": status == "pending",
+        "updated_at": updated_at,
+        "comment_count": comment_count,
+        "latest_comment_at": latest_comment_at,
+        "generated_at": Utc::now().to_rfc3339(),
+    })))
+}
+
 async fn add_line_comment(
     Path((token, line_id)): Path<(String, String)>,
     State(state): State<PortalState>,
@@ -4998,6 +5100,19 @@ mod tests {
             .expect("comments response");
         assert_eq!(comments_response.status(), StatusCode::OK);
         assert_portal_security_headers(comments_response.headers());
+
+        let live_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/api/v1/portal/approvals/live")
+                    .body(Body::empty())
+                    .expect("approvals live request"),
+            )
+            .await
+            .expect("approvals live response");
+        assert_eq!(live_response.status(), StatusCode::OK);
+        assert_portal_security_headers(live_response.headers());
 
         let manifest_response = app
             .clone()
@@ -7088,6 +7203,87 @@ mod tests {
         let (status, body) = result.unwrap_err();
         assert_eq!(status, StatusCode::NOT_FOUND);
         assert!(body.0.contains("Approval Not Found"));
+    }
+
+    #[tokio::test]
+    async fn live_approvals_endpoint_returns_pending_snapshot() {
+        let (pool, quote_id, _) = setup().await;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO approval_request
+                (id, quote_id, approver_role, reason, justification, status, requested_by, expires_at, created_at, updated_at)
+             VALUES ('APR-LIVE-001', ?, 'sales_manager', 'Discount review', '{}', 'pending', 'agent:test', NULL, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed approval");
+
+        sqlx::query(
+            "INSERT INTO portal_comment
+                (id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at)
+             VALUES ('PC-LIVE-1', ?, NULL, NULL, 'Approver', 'approver@example.com', '[INFO REQUEST] Need margin context', ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed comment");
+
+        let payload = list_live_approvals(state(pool)).await.expect("live approvals payload").0;
+        assert_eq!(
+            payload["count"].as_u64().unwrap_or(0),
+            1,
+            "live snapshot should include pending approval"
+        );
+        assert_eq!(payload["approvals"][0]["approval_id"].as_str().unwrap_or(""), "APR-LIVE-001");
+        assert!(
+            payload["approvals"][0]["latest_comment_at"].as_str().is_some(),
+            "snapshot should include latest comment timestamp"
+        );
+    }
+
+    #[tokio::test]
+    async fn live_approval_status_endpoint_returns_comment_metrics() {
+        let (pool, quote_id, _) = setup().await;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO approval_request
+                (id, quote_id, approver_role, reason, justification, status, requested_by, expires_at, created_at, updated_at)
+             VALUES ('APR-LIVE-DETAIL', ?, 'sales_manager', 'Discount review', '{}', 'pending', 'agent:test', NULL, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed approval");
+
+        sqlx::query(
+            "INSERT INTO portal_comment
+                (id, quote_id, quote_line_id, parent_id, author_name, author_email, body, created_at)
+             VALUES ('PC-LIVE-DETAIL-1', ?, NULL, NULL, 'Approver', 'approver@example.com', '[INFO REQUEST] Need term details', ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed comment");
+
+        let payload = get_live_approval_status(
+            axum::extract::Path("APR-LIVE-DETAIL".to_string()),
+            state(pool),
+        )
+        .await
+        .expect("live approval status payload")
+        .0;
+
+        assert_eq!(payload["approval_id"].as_str().unwrap_or(""), "APR-LIVE-DETAIL");
+        assert_eq!(payload["status"].as_str().unwrap_or(""), "pending");
+        assert_eq!(payload["comment_count"].as_i64().unwrap_or(0), 1);
+        assert!(payload["is_pending"].as_bool().unwrap_or(false));
     }
 
     #[tokio::test]

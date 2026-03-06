@@ -146,6 +146,18 @@ impl ToolCategory for IntegrationTools {
     }
 }
 
+/// Audit tools category
+pub struct AuditTools;
+
+impl ToolCategory for AuditTools {
+    fn category_name() -> &'static str {
+        "audit"
+    }
+    fn tool_names() -> &'static [&'static str] {
+        &["audit_query"]
+    }
+}
+
 /// All tool names (does not include negotiation, sales_rep, anomaly tools registered via #[tool_router])
 pub const ALL_TOOL_NAMES: &[&str] = &[
     // Catalog
@@ -184,6 +196,8 @@ pub const ALL_TOOL_NAMES: &[&str] = &[
     "integration_list",
     "integration_register",
     "integration_test",
+    // Audit
+    "audit_query",
 ];
 
 /// Total number of tools in the registry
@@ -205,6 +219,7 @@ mod tests {
         assert_eq!(CostTools::tool_names().len(), 2);
         assert_eq!(OrgTools::tool_names().len(), 2);
         assert_eq!(IntegrationTools::tool_names().len(), 3);
-        assert_eq!(TOTAL_TOOLS, 26);
+        assert_eq!(AuditTools::tool_names().len(), 1);
+        assert_eq!(TOTAL_TOOLS, 27);
     }
 }

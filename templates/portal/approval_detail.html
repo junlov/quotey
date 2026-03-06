@@ -171,6 +171,71 @@
         .impact-card .impact-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
         .impact-highlight { color: var(--warn); }
 
+        .live-state {
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+            border-radius: 999px;
+            padding: 4px 10px;
+            font-size: 12px;
+            font-weight: 700;
+            border: 1px solid #bfdbfe;
+            background: #eff6ff;
+            color: #1e40af;
+        }
+
+        .live-state-dot {
+            width: 8px;
+            height: 8px;
+            border-radius: 999px;
+            background: #1e40af;
+        }
+
+        .live-state-degraded {
+            border-color: #fde68a;
+            background: #fef3c7;
+            color: #92400e;
+        }
+        .live-state-degraded .live-state-dot {
+            background: #92400e;
+        }
+
+        .live-state-offline {
+            border-color: #fecaca;
+            background: #fee2e2;
+            color: #991b1b;
+        }
+        .live-state-offline .live-state-dot {
+            background: #991b1b;
+        }
+
+        .update-banner {
+            display: none;
+            align-items: center;
+            justify-content: space-between;
+            gap: 10px;
+            border: 1px solid #bfdbfe;
+            border-radius: 10px;
+            padding: 10px 12px;
+            background: #eff6ff;
+            color: #1d4ed8;
+            font-size: 13px;
+            font-weight: 700;
+        }
+        .update-banner.visible { display: flex; }
+
+        .update-btn {
+            border: 1px solid #2563eb;
+            border-radius: 8px;
+            background: #2563eb;
+            color: white;
+            font-size: 12px;
+            font-weight: 700;
+            padding: 6px 10px;
+            cursor: pointer;
+        }
+        .update-btn:hover { background: #1d4ed8; }
+
         .discussion-header {
             display: flex;
             align-items: center;
@@ -504,6 +569,10 @@
         <a href="/approvals" class="back-link" aria-label="Return to approvals list">&larr; Back to Approvals</a>
 
         <div id="result-banner" class="result-banner" role="status" aria-live="polite" aria-atomic="true"></div>
+        <div id="live-update-banner" class="update-banner" role="status" aria-live="polite">
+            <span>New activity detected for this approval. Refresh to review the latest context.</span>
+            <button type="button" class="update-btn" onclick="window.location.reload()">Refresh</button>
+        </div>
         <div id="stale-banner" class="stale-banner" role="alert" aria-live="assertive" aria-atomic="true">This approval is no longer pending. Actions are disabled.</div>
 
         <!-- Approval Header -->
@@ -512,6 +581,10 @@
             <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
                 <h1>{{ approval.id }}</h1>
                 <span class="status-badge status-{{ approval.status }}">{{ approval.status }}</span>
+                <span id="approval-live-state" class="live-state" aria-live="polite">
+                    <span class="live-state-dot" aria-hidden="true"></span>
+                    <span id="approval-live-text">Live updates active</span>
+                </span>
             </div>
             <div class="meta-grid">
                 <div class="meta-item">
@@ -800,6 +873,9 @@
         const FALLBACK_PASSWORD_KEY = 'quotey.portal.approval_fallback_password';
         let actionsDisabled = false;
         let lastFocusedElement = null;
+        let livePollFailures = 0;
+        let livePollTimer = null;
+        let approvalLiveSignature = null;
 
         async function postJsonWithRetry(url, payload, retries = 1) {
             let lastError;
@@ -831,6 +907,75 @@
                 }
             }
             throw lastError || new Error('Request failed');
+        }
+
+        function setApprovalLiveState(state, message) {
+            const badge = document.getElementById('approval-live-state');
+            const text = document.getElementById('approval-live-text');
+            if (!badge || !text) return;
+
+            badge.classList.remove('live-state-degraded', 'live-state-offline');
+            if (state === 'degraded') {
+                badge.classList.add('live-state-degraded');
+            } else if (state === 'offline') {
+                badge.classList.add('live-state-offline');
+            }
+            text.textContent = message;
+        }
+
+        function showLiveUpdateBanner() {
+            const banner = document.getElementById('live-update-banner');
+            if (banner) banner.classList.add('visible');
+        }
+
+        function approvalSignatureFromLive(payload) {
+            return [
+                payload?.status || '',
+                payload?.updated_at || '',
+                payload?.comment_count || 0,
+                payload?.latest_comment_at || '',
+            ].join('|');
+        }
+
+        async function pollApprovalLiveState() {
+            try {
+                const response = await fetch(
+                    `/api/v1/portal/approvals/${encodeURIComponent(approvalId)}/live`,
+                    {
+                        method: 'GET',
+                        headers: { 'X-Portal-Live': 'approval-detail' },
+                    },
+                );
+
+                if (response.status === 404) {
+                    showStale();
+                    setApprovalLiveState('offline', 'Approval no longer available');
+                    return;
+                }
+                if (!response.ok) {
+                    throw new Error(`Live poll failed (${response.status})`);
+                }
+
+                const payload = await response.json();
+                const signature = approvalSignatureFromLive(payload);
+                if (approvalLiveSignature && signature !== approvalLiveSignature) {
+                    showLiveUpdateBanner();
+                    if (!payload.is_pending) {
+                        showStale();
+                        showBanner('Approval status changed in another session.', 'error');
+                    }
+                }
+                approvalLiveSignature = signature;
+                livePollFailures = 0;
+                setApprovalLiveState('live', 'Live updates active');
+            } catch (_error) {
+                livePollFailures += 1;
+                if (!navigator.onLine || livePollFailures >= 3) {
+                    setApprovalLiveState('offline', 'Live updates offline');
+                } else {
+                    setApprovalLiveState('degraded', 'Live updates degraded');
+                }
+            }
         }
 
         function loadStoredApproverProfile() {
@@ -1294,6 +1439,28 @@
         document.querySelectorAll('.modal-overlay').forEach(overlay => {
             overlay.addEventListener('click', e => { if (e.target === overlay) closeModals(); });
         });
+
+        function startLivePolling() {
+            if (livePollTimer !== null) {
+                clearInterval(livePollTimer);
+            }
+            pollApprovalLiveState();
+            livePollTimer = window.setInterval(() => {
+                if (document.hidden) return;
+                pollApprovalLiveState();
+            }, 15000);
+        }
+
+        window.addEventListener('online', () => {
+            livePollFailures = 0;
+            setApprovalLiveState('live', 'Reconnected. Syncing updates...');
+            pollApprovalLiveState();
+        });
+        window.addEventListener('offline', () => {
+            setApprovalLiveState('offline', 'Live updates offline');
+        });
+
+        startLivePolling();
     </script>
 </body>
 </html>

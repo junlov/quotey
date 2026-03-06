@@ -7,6 +7,154 @@ use uuid::Uuid;
 
 use crate::domain::quote::QuoteId;
 
+// ---------------------------------------------------------------------------
+// Actor type — who performed the action
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum ActorType {
+    Agent,
+    User,
+    System,
+    Service,
+    Webhook,
+}
+
+impl ActorType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Agent => "agent",
+            Self::User => "user",
+            Self::System => "system",
+            Self::Service => "service",
+            Self::Webhook => "webhook",
+        }
+    }
+
+    pub fn parse_label(s: &str) -> Option<Self> {
+        match s {
+            "agent" => Some(Self::Agent),
+            "user" => Some(Self::User),
+            "system" => Some(Self::System),
+            "service" => Some(Self::Service),
+            "webhook" => Some(Self::Webhook),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Entity type — what entity was affected
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum EntityType {
+    Quote,
+    QuoteLine,
+    Approval,
+    Negotiation,
+    Product,
+    SalesRep,
+    Integration,
+    OrgSetting,
+    PortalLink,
+    Comment,
+}
+
+impl EntityType {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Quote => "quote",
+            Self::QuoteLine => "quote_line",
+            Self::Approval => "approval",
+            Self::Negotiation => "negotiation",
+            Self::Product => "product",
+            Self::SalesRep => "sales_rep",
+            Self::Integration => "integration",
+            Self::OrgSetting => "org_setting",
+            Self::PortalLink => "portal_link",
+            Self::Comment => "comment",
+        }
+    }
+
+    pub fn parse_label(s: &str) -> Option<Self> {
+        match s {
+            "quote" => Some(Self::Quote),
+            "quote_line" => Some(Self::QuoteLine),
+            "approval" => Some(Self::Approval),
+            "negotiation" => Some(Self::Negotiation),
+            "product" => Some(Self::Product),
+            "sales_rep" => Some(Self::SalesRep),
+            "integration" => Some(Self::Integration),
+            "org_setting" => Some(Self::OrgSetting),
+            "portal_link" => Some(Self::PortalLink),
+            "comment" => Some(Self::Comment),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audit action — what was done
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub enum AuditAction {
+    Created,
+    Updated,
+    Deleted,
+    Transitioned,
+    Approved,
+    Rejected,
+    Escalated,
+    Priced,
+    Locked,
+    Unlocked,
+    Exported,
+    Queried,
+}
+
+impl AuditAction {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Created => "created",
+            Self::Updated => "updated",
+            Self::Deleted => "deleted",
+            Self::Transitioned => "transitioned",
+            Self::Approved => "approved",
+            Self::Rejected => "rejected",
+            Self::Escalated => "escalated",
+            Self::Priced => "priced",
+            Self::Locked => "locked",
+            Self::Unlocked => "unlocked",
+            Self::Exported => "exported",
+            Self::Queried => "queried",
+        }
+    }
+
+    pub fn parse_label(s: &str) -> Option<Self> {
+        match s {
+            "created" => Some(Self::Created),
+            "updated" => Some(Self::Updated),
+            "deleted" => Some(Self::Deleted),
+            "transitioned" => Some(Self::Transitioned),
+            "approved" => Some(Self::Approved),
+            "rejected" => Some(Self::Rejected),
+            "escalated" => Some(Self::Escalated),
+            "priced" => Some(Self::Priced),
+            "locked" => Some(Self::Locked),
+            "unlocked" => Some(Self::Unlocked),
+            "exported" => Some(Self::Exported),
+            "queried" => Some(Self::Queried),
+            _ => None,
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Audit category
+// ---------------------------------------------------------------------------
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub enum AuditCategory {
     Ingress,
@@ -53,7 +201,13 @@ pub struct AuditEvent {
     pub event_type: String,
     pub category: AuditCategory,
     pub actor: String,
+    pub actor_type: ActorType,
     pub outcome: AuditOutcome,
+    pub entity_type: Option<EntityType>,
+    pub entity_id: Option<String>,
+    pub action: Option<AuditAction>,
+    pub before_json: Option<String>,
+    pub after_json: Option<String>,
     pub metadata: BTreeMap<String, String>,
     pub occurred_at: DateTime<Utc>,
 }
@@ -76,7 +230,13 @@ impl AuditEvent {
             event_type: event_type.into(),
             category,
             actor: actor.into(),
+            actor_type: ActorType::Agent,
             outcome,
+            entity_type: None,
+            entity_id: None,
+            action: None,
+            before_json: None,
+            after_json: None,
             metadata: BTreeMap::new(),
             occurred_at: Utc::now(),
         }
@@ -84,6 +244,32 @@ impl AuditEvent {
 
     pub fn with_metadata(mut self, key: impl Into<String>, value: impl Into<String>) -> Self {
         self.metadata.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn with_actor_type(mut self, actor_type: ActorType) -> Self {
+        self.actor_type = actor_type;
+        self
+    }
+
+    pub fn with_entity(mut self, entity_type: EntityType, entity_id: impl Into<String>) -> Self {
+        self.entity_type = Some(entity_type);
+        self.entity_id = Some(entity_id.into());
+        self
+    }
+
+    pub fn with_action(mut self, action: AuditAction) -> Self {
+        self.action = Some(action);
+        self
+    }
+
+    pub fn with_before(mut self, before_json: impl Into<String>) -> Self {
+        self.before_json = Some(before_json.into());
+        self
+    }
+
+    pub fn with_after(mut self, after_json: impl Into<String>) -> Self {
+        self.after_json = Some(after_json.into());
         self
     }
 }
@@ -318,5 +504,111 @@ mod tests {
             .map(|e| e.metadata.get("funnel_ordinal").unwrap().parse::<u8>().unwrap())
             .collect();
         assert_eq!(ordinals, vec![1, 2, 3, 4, 5]);
+    }
+
+    // -----------------------------------------------------------------------
+    // PC-4.1 enrichment tests
+    // -----------------------------------------------------------------------
+
+    #[test]
+    fn actor_type_round_trips() {
+        use super::ActorType;
+        for at in [
+            ActorType::Agent,
+            ActorType::User,
+            ActorType::System,
+            ActorType::Service,
+            ActorType::Webhook,
+        ] {
+            assert_eq!(ActorType::parse_label(at.as_str()), Some(at));
+        }
+        assert_eq!(ActorType::parse_label("unknown"), None);
+    }
+
+    #[test]
+    fn entity_type_round_trips() {
+        use super::EntityType;
+        for et in [
+            EntityType::Quote,
+            EntityType::QuoteLine,
+            EntityType::Approval,
+            EntityType::Negotiation,
+            EntityType::Product,
+            EntityType::SalesRep,
+            EntityType::Integration,
+            EntityType::OrgSetting,
+            EntityType::PortalLink,
+            EntityType::Comment,
+        ] {
+            assert_eq!(EntityType::parse_label(et.as_str()), Some(et));
+        }
+        assert_eq!(EntityType::parse_label("unknown"), None);
+    }
+
+    #[test]
+    fn audit_action_round_trips() {
+        use super::AuditAction;
+        for a in [
+            AuditAction::Created,
+            AuditAction::Updated,
+            AuditAction::Deleted,
+            AuditAction::Transitioned,
+            AuditAction::Approved,
+            AuditAction::Rejected,
+            AuditAction::Escalated,
+            AuditAction::Priced,
+            AuditAction::Locked,
+            AuditAction::Unlocked,
+            AuditAction::Exported,
+            AuditAction::Queried,
+        ] {
+            assert_eq!(AuditAction::parse_label(a.as_str()), Some(a));
+        }
+        assert_eq!(AuditAction::parse_label("unknown"), None);
+    }
+
+    #[test]
+    fn enriched_event_carries_entity_and_action() {
+        use super::{ActorType, AuditAction, EntityType};
+
+        let event = AuditEvent::new(
+            Some(QuoteId("Q-2026-0300".to_owned())),
+            None,
+            "corr-enrich",
+            "quote.status_changed",
+            AuditCategory::Flow,
+            "user@example.com",
+            AuditOutcome::Success,
+        )
+        .with_actor_type(ActorType::User)
+        .with_entity(EntityType::Quote, "Q-2026-0300")
+        .with_action(AuditAction::Transitioned)
+        .with_before(r#"{"status":"draft"}"#)
+        .with_after(r#"{"status":"validated"}"#);
+
+        assert_eq!(event.actor_type, ActorType::User);
+        assert_eq!(event.entity_type, Some(EntityType::Quote));
+        assert_eq!(event.entity_id.as_deref(), Some("Q-2026-0300"));
+        assert_eq!(event.action, Some(AuditAction::Transitioned));
+        assert_eq!(event.before_json.as_deref(), Some(r#"{"status":"draft"}"#));
+        assert_eq!(event.after_json.as_deref(), Some(r#"{"status":"validated"}"#));
+    }
+
+    #[test]
+    fn default_actor_type_is_agent() {
+        let event = AuditEvent::new(
+            None,
+            None,
+            "c",
+            "test",
+            AuditCategory::System,
+            "sys",
+            AuditOutcome::Success,
+        );
+        assert_eq!(event.actor_type, super::ActorType::Agent);
+        assert!(event.entity_type.is_none());
+        assert!(event.action.is_none());
+        assert!(event.before_json.is_none());
+        assert!(event.after_json.is_none());
     }
 }
