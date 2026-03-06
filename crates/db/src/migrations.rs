@@ -257,6 +257,11 @@ mod tests {
         "idx_quote_comment_author",
         // 0037 — org settings
         "org_settings",
+        // 0038 — ai cost tracking
+        "ai_cost_event",
+        "idx_ai_cost_event_quote_id",
+        "idx_ai_cost_event_tool_name",
+        "idx_ai_cost_event_created_at",
     ];
 
     async fn managed_object_count(pool: &sqlx::SqlitePool, object_name: &str) -> TestResult<i64> {

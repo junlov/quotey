@@ -14,6 +14,7 @@ use quotey_core::domain::quote_lock::{LockConflict, LockInfo};
 use quotey_core::domain::sales_rep::{SalesRep, SalesRepId};
 use quotey_core::suggestions::{ProductAcceptanceRate, SuggestionFeedback};
 
+pub mod ai_cost;
 pub mod analytics;
 pub mod anomaly_override;
 pub mod approval;
@@ -36,6 +37,7 @@ pub mod sales_rep;
 pub mod simulation;
 pub mod suggestion_feedback;
 
+pub use ai_cost::{AiCostRepository, SqlAiCostRepository};
 pub use analytics::{AnalyticsQueryError, SqlAnalyticsQueryBuilder};
 pub use anomaly_override::SqlAnomalyOverrideRepository;
 pub use approval::SqlApprovalRepository;

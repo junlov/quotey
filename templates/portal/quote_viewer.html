@@ -6,6 +6,7 @@
     <meta name="description" content="Quote {{ quote.quote_id }} for {{ customer.name }}">
     <meta name="theme-color" content="#2563eb">
     <link rel="manifest" href="/portal/manifest.webmanifest">
+    <link rel="stylesheet" href="/portal/shell.css">
     <title>Quote {{ quote.quote_id }} - {{ customer.name }}</title>
     <style>
         :root {
@@ -1399,6 +1400,7 @@
     </style>
 </head>
 <body>
+    <div id="pc-shell-root"></div>
     <!-- Header -->
     <header class="portal-header">
         <div class="header-content">
@@ -2133,6 +2135,7 @@
         </div>
     </div>
 
+    <script src="/portal/shell.js"></script>
     <script>
         // Toast notification system
         function showToast(message, type = 'info', duration = 5000) {

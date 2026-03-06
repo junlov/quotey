@@ -23,8 +23,8 @@ use axum::{
 use chrono::{DateTime, Duration, Utc};
 use quotey_core::config::CrmConfig;
 use quotey_core::{
-    DeterministicExecutionEngine, ExecutionEngineConfig, ExecutionError, ExecutionTaskState,
-    OperationKey, QuoteId, RetryPolicy,
+    DeterministicExecutionEngine, ExecutionEngineConfig, ExecutionError, ExecutionTaskId,
+    ExecutionTaskState, OperationKey, QuoteId, RetryPolicy,
 };
 use quotey_db::repositories::{
     ExecutionQueueRepository, IdempotencyRepository, RepositoryError, SqlExecutionQueueRepository,
@@ -750,6 +750,65 @@ struct SyncEventsQuery {
     limit: Option<i64>,
 }
 
+#[derive(Debug, Deserialize)]
+struct CrmOutboxTasksQuery {
+    #[serde(default)]
+    state: Option<String>,
+    #[serde(default)]
+    provider: Option<String>,
+    #[serde(default)]
+    quote_id: Option<String>,
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct CrmOutboxTaskResponse {
+    task_id: String,
+    quote_id: String,
+    operation_kind: String,
+    state: String,
+    retry_count: i32,
+    max_retries: i32,
+    available_at: String,
+    claimed_by: Option<String>,
+    claimed_at: Option<String>,
+    last_error: Option<String>,
+    updated_at: String,
+    idempotency_key: String,
+    correlation_id: Option<String>,
+    event_id: Option<String>,
+    provider: Option<String>,
+    event_type: Option<String>,
+    event_status: Option<String>,
+    event_attempts: Option<i32>,
+    replayable: bool,
+}
+
+#[derive(Debug, Deserialize)]
+struct CrmOutboxRecoverQuery {
+    #[serde(default)]
+    limit: Option<i64>,
+}
+
+#[derive(Debug, Serialize)]
+struct CrmOutboxRecoveryResult {
+    task_id: String,
+    event_id: Option<String>,
+    resulting_state: String,
+    retry_count: u32,
+    last_error: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct CrmOutboxRecoveryResponse {
+    scanned: usize,
+    recovered: usize,
+    failed_terminal: usize,
+    skipped_missing_idempotency: usize,
+    results: Vec<CrmOutboxRecoveryResult>,
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 struct WebhookPayload {
     #[serde(default)]
@@ -1014,6 +1073,11 @@ struct SyncRetryPath {
     event_id: String,
 }
 
+#[derive(Debug, Deserialize)]
+struct OutboxTaskPath {
+    task_id: String,
+}
+
 #[derive(Debug, Serialize)]
 struct CrmStatus {
     provider: String,
@@ -1066,6 +1130,9 @@ pub fn router(db_pool: DbPool, config: CrmConfig) -> Router {
         .route("/api/v1/crm/sync/batch", post(batch_retry_quotey_sync_events))
         .route("/api/v1/crm/sync/inbound/batch", post(batch_retry_inbound_sync_events))
         .route("/api/v1/crm/sync/{quote_id}", post(sync_quote_to_crm))
+        .route("/api/v1/crm/outbox/tasks", get(list_crm_outbox_tasks))
+        .route("/api/v1/crm/outbox/tasks/{task_id}/replay", post(replay_outbox_task))
+        .route("/api/v1/crm/outbox/recover-stale", post(recover_stale_outbox_tasks))
         .route("/api/v1/crm/mappings/catalog", get(list_mapping_catalog))
         .route("/api/v1/crm/mappings", get(list_mappings).post(upsert_mappings))
         .route("/api/v1/crm/events", get(list_sync_events))
@@ -2004,6 +2071,346 @@ async fn list_sync_events(
     }
 
     Ok(Json(events))
+}
+
+fn parse_outbox_state_filter(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+
+    if matches!(trimmed.to_ascii_lowercase().as_str(), "dead_letter" | "dead-letter" | "deadletter")
+    {
+        return Some(ExecutionTaskState::FailedTerminal.as_str().to_string());
+    }
+
+    ExecutionTaskState::parse(trimmed).map(|state| state.as_str().to_string())
+}
+
+fn is_replayable_event_status(status: Option<&str>, attempts: Option<i32>) -> bool {
+    let Some(status) = status else {
+        return false;
+    };
+    let Some(attempts) = attempts else {
+        return false;
+    };
+    sync_status_is_retryable(status) && attempts < MAX_SYNC_ATTEMPTS
+}
+
+async fn list_crm_outbox_tasks(
+    State(state): State<CrmState>,
+    Query(query): Query<CrmOutboxTasksQuery>,
+) -> Result<Json<Vec<CrmOutboxTaskResponse>>, (StatusCode, Json<CrmError>)> {
+    crm_state_guard(&HeaderMap::new(), &state, None, false).await?;
+
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let state_filter = if let Some(raw_state) = query.state.as_deref() {
+        Some(parse_outbox_state_filter(raw_state).ok_or_else(|| {
+            (
+                StatusCode::BAD_REQUEST,
+                Json(CrmError {
+                    error: "state must be queued, running, retryable_failed, failed_terminal, completed, or dead_letter".to_string(),
+                }),
+            )
+        })?)
+    } else {
+        None
+    };
+
+    let mut statement = String::from(
+        "SELECT
+            t.id AS task_id,
+            t.quote_id,
+            t.operation_kind,
+            t.state,
+            t.retry_count,
+            t.max_retries,
+            t.available_at,
+            t.claimed_by,
+            t.claimed_at,
+            t.last_error,
+            t.updated_at,
+            t.idempotency_key,
+            l.correlation_id,
+            e.id AS event_id,
+            e.provider,
+            e.event_type,
+            e.status AS event_status,
+            e.attempts AS event_attempts
+         FROM execution_queue_task t
+         LEFT JOIN execution_idempotency_ledger l
+            ON l.operation_key = t.idempotency_key
+         LEFT JOIN crm_sync_event e
+            ON e.id = l.correlation_id
+         WHERE t.operation_kind = ?",
+    );
+
+    let mut where_clauses: Vec<&str> = Vec::new();
+    if state_filter.is_some() {
+        where_clauses.push("t.state = ?");
+    }
+    if query.provider.is_some() {
+        where_clauses.push("e.provider = ?");
+    }
+    if query.quote_id.is_some() {
+        where_clauses.push("t.quote_id = ?");
+    }
+    if !where_clauses.is_empty() {
+        statement.push_str(" AND ");
+        statement.push_str(&where_clauses.join(" AND "));
+    }
+    statement.push_str(
+        " ORDER BY
+            CASE
+                WHEN t.state = 'failed_terminal' THEN 0
+                WHEN t.state = 'retryable_failed' THEN 1
+                WHEN t.state = 'running' THEN 2
+                ELSE 3
+            END,
+            t.updated_at DESC
+         LIMIT ",
+    );
+    statement.push_str(&limit.to_string());
+
+    let mut db_query = sqlx::query(&statement).bind(CRM_SYNC_OPERATION_KIND);
+    if let Some(state_filter) = state_filter {
+        db_query = db_query.bind(state_filter);
+    }
+    if let Some(provider) = query.provider {
+        db_query = db_query.bind(provider);
+    }
+    if let Some(quote_id) = query.quote_id {
+        db_query = db_query.bind(quote_id);
+    }
+
+    let rows = db_query.fetch_all(&state.db_pool).await.map_err(db_error)?;
+    let mut tasks = Vec::with_capacity(rows.len());
+    for row in rows {
+        let event_status: Option<String> = row.try_get("event_status").ok();
+        let event_attempts: Option<i32> = row.try_get("event_attempts").ok();
+        let replayable = is_replayable_event_status(event_status.as_deref(), event_attempts);
+
+        tasks.push(CrmOutboxTaskResponse {
+            task_id: row.try_get("task_id").unwrap_or_default(),
+            quote_id: row.try_get("quote_id").unwrap_or_default(),
+            operation_kind: row.try_get("operation_kind").unwrap_or_default(),
+            state: row.try_get("state").unwrap_or_default(),
+            retry_count: row.try_get("retry_count").unwrap_or_default(),
+            max_retries: row.try_get("max_retries").unwrap_or_default(),
+            available_at: row.try_get("available_at").unwrap_or_default(),
+            claimed_by: row.try_get("claimed_by").ok(),
+            claimed_at: row.try_get("claimed_at").ok(),
+            last_error: row.try_get("last_error").ok(),
+            updated_at: row.try_get("updated_at").unwrap_or_default(),
+            idempotency_key: row.try_get("idempotency_key").unwrap_or_default(),
+            correlation_id: row.try_get("correlation_id").ok(),
+            event_id: row.try_get("event_id").ok(),
+            provider: row.try_get("provider").ok(),
+            event_type: row.try_get("event_type").ok(),
+            event_status,
+            event_attempts,
+            replayable,
+        });
+    }
+
+    Ok(Json(tasks))
+}
+
+async fn replay_outbox_task(
+    Path(OutboxTaskPath { task_id }): Path<OutboxTaskPath>,
+    State(state): State<CrmState>,
+) -> Result<Json<SyncEventResponse>, (StatusCode, Json<CrmError>)> {
+    crm_state_guard(&HeaderMap::new(), &state, None, false).await?;
+
+    let row = sqlx::query(
+        "SELECT
+            t.state,
+            l.correlation_id,
+            e.status AS event_status,
+            e.attempts AS event_attempts
+         FROM execution_queue_task t
+         LEFT JOIN execution_idempotency_ledger l
+            ON l.operation_key = t.idempotency_key
+         LEFT JOIN crm_sync_event e
+            ON e.id = l.correlation_id
+         WHERE t.id = ? AND t.operation_kind = ?",
+    )
+    .bind(&task_id)
+    .bind(CRM_SYNC_OPERATION_KIND)
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    let row = row.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Json(CrmError { error: format!("crm outbox task `{task_id}` not found") }),
+        )
+    })?;
+
+    let state_value: String = row.try_get("state").unwrap_or_default();
+    if !matches!(state_value.as_str(), "queued" | "retryable_failed" | "failed_terminal") {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(CrmError {
+                error: format!(
+                    "task `{task_id}` in state `{state_value}` is not eligible for replay"
+                ),
+            }),
+        ));
+    }
+
+    let event_id: Option<String> = row.try_get("correlation_id").ok();
+    let event_id = event_id.filter(|value| !value.trim().is_empty()).ok_or_else(|| {
+        (
+            StatusCode::CONFLICT,
+            Json(CrmError {
+                error: format!(
+                    "task `{task_id}` has no correlated crm event; replay requires correlation_id"
+                ),
+            }),
+        )
+    })?;
+
+    let event_status: Option<String> = row.try_get("event_status").ok();
+    let event_attempts: Option<i32> = row.try_get("event_attempts").ok();
+    if !is_replayable_event_status(event_status.as_deref(), event_attempts) {
+        return Err((
+            StatusCode::CONFLICT,
+            Json(CrmError {
+                error: format!(
+                    "task `{task_id}` cannot be replayed because event `{event_id}` is not replayable (status={:?}, attempts={:?})",
+                    event_status, event_attempts
+                ),
+            }),
+        ));
+    }
+
+    retry_sync_event(Path(SyncRetryPath { event_id }), State(state)).await
+}
+
+async fn recover_stale_outbox_tasks(
+    State(state): State<CrmState>,
+    Query(query): Query<CrmOutboxRecoverQuery>,
+) -> Result<Json<CrmOutboxRecoveryResponse>, (StatusCode, Json<CrmError>)> {
+    crm_state_guard(&HeaderMap::new(), &state, None, false).await?;
+
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+    let config = crm_execution_engine_config();
+    let stale_cutoff = (Utc::now() - Duration::seconds(config.claim_timeout_seconds)).to_rfc3339();
+
+    let rows = sqlx::query(
+        "SELECT id
+         FROM execution_queue_task
+         WHERE operation_kind = ?
+           AND state = 'running'
+           AND claimed_at IS NOT NULL
+           AND claimed_at <= ?
+         ORDER BY claimed_at ASC
+         LIMIT ?",
+    )
+    .bind(CRM_SYNC_OPERATION_KIND)
+    .bind(&stale_cutoff)
+    .bind(limit)
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    let scanned = rows.len();
+    let engine = DeterministicExecutionEngine::with_config(config);
+    let repository = SqlExecutionQueueRepository::new(state.db_pool.clone());
+
+    let mut recovered = 0usize;
+    let mut failed_terminal = 0usize;
+    let mut skipped_missing_idempotency = 0usize;
+    let mut results = Vec::with_capacity(scanned);
+
+    for row in rows {
+        let task_id: String = row.try_get("id").unwrap_or_default();
+        if task_id.is_empty() {
+            continue;
+        }
+
+        let Some(task) = repository
+            .find_task_by_id(&ExecutionTaskId(task_id.clone()))
+            .await
+            .map_err(repository_error)?
+        else {
+            continue;
+        };
+
+        let Some(mut idempotency_record) =
+            repository.find_operation(&task.idempotency_key).await.map_err(repository_error)?
+        else {
+            skipped_missing_idempotency += 1;
+            results.push(CrmOutboxRecoveryResult {
+                task_id,
+                event_id: None,
+                resulting_state: "skipped_missing_idempotency".to_string(),
+                retry_count: 0,
+                last_error: Some("missing idempotency record".to_string()),
+            });
+            continue;
+        };
+
+        let transition_result = engine
+            .fail_task(
+                task,
+                "stale claim timeout recovered for retry",
+                "stale_claim_timeout",
+                RetryPolicy::Retry,
+                &mut idempotency_record,
+            )
+            .map_err(map_execution_error)?;
+
+        let updated_task = transition_result.task;
+        repository
+            .append_transition(transition_result.transition)
+            .await
+            .map_err(repository_error)?;
+        repository.save_task(updated_task.clone()).await.map_err(repository_error)?;
+        repository.save_operation(idempotency_record.clone()).await.map_err(repository_error)?;
+
+        recovered += 1;
+        if matches!(updated_task.state, ExecutionTaskState::FailedTerminal) {
+            failed_terminal += 1;
+        }
+
+        let event_id = if idempotency_record.correlation_id.trim().is_empty() {
+            None
+        } else {
+            Some(idempotency_record.correlation_id.clone())
+        };
+        if let Some(event_id) = event_id.as_deref() {
+            if let Some(existing_event) = fetch_sync_event(&state, event_id).await? {
+                let sync_status = crm_sync_queue_status(&updated_task.state);
+                update_sync_event_status(
+                    &state,
+                    event_id,
+                    sync_status,
+                    existing_event.attempts.max(1),
+                    updated_task.last_error.clone(),
+                )
+                .await?;
+            }
+        }
+
+        results.push(CrmOutboxRecoveryResult {
+            task_id,
+            event_id,
+            resulting_state: updated_task.state.as_str().to_string(),
+            retry_count: updated_task.retry_count,
+            last_error: updated_task.last_error,
+        });
+    }
+
+    Ok(Json(CrmOutboxRecoveryResponse {
+        scanned,
+        recovered,
+        failed_terminal,
+        skipped_missing_idempotency,
+        results,
+    }))
 }
 
 async fn retry_sync_event(
@@ -3867,10 +4274,12 @@ mod tests {
 
     use super::{
         batch_retry_inbound_sync_events, batch_retry_quotey_sync_events, encode_query,
-        fetch_and_reserve_oauth_state, oauth_callback, outbound_sync_semantics_for_status,
+        fetch_and_reserve_oauth_state, list_crm_outbox_tasks, oauth_callback,
+        outbound_sync_semantics_for_status, recover_stale_outbox_tasks, replay_outbox_task,
         retry_sync_event, start_oauth, sync_event_alerts, sync_quote_to_crm, webhook_ingest,
-        BatchSyncQuery, CrmProvider, CrmRuntimeConfig, CrmState, OAuthCallbackQuery,
-        OAuthConnectRequest, SyncEventPayloadRequest, WebhookPayload,
+        BatchSyncQuery, CrmOutboxRecoverQuery, CrmOutboxTasksQuery, CrmProvider, CrmRuntimeConfig,
+        CrmState, OAuthCallbackQuery, OAuthConnectRequest, OutboxTaskPath, SyncEventPayloadRequest,
+        WebhookPayload,
     };
 
     async fn setup_state() -> CrmState {
@@ -4285,6 +4694,322 @@ mod tests {
             payload.get("sync_action").and_then(Value::as_str).expect("sync_action field"),
             "update_amount_stage"
         );
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn list_crm_outbox_tasks_surfaces_dead_letter_rows_with_event_context() {
+        let state = setup_state().await;
+        seed_connected_integration(&state, "salesforce").await;
+        seed_quote_with_line(&state, "Q-CRM-OUTBOX-001", "draft").await;
+
+        let Json(initial) = sync_quote_to_crm(
+            Path("Q-CRM-OUTBOX-001".to_string()),
+            State(state.clone()),
+            Query(SyncEventPayloadRequest {
+                direction: None,
+                provider: Some("salesforce".to_string()),
+                event_type: None,
+            }),
+        )
+        .await
+        .expect("initial outbound sync");
+
+        let event_id = initial.provider_results.first().expect("provider result").event_id.clone();
+        let task_row = sqlx::query(
+            "SELECT id, idempotency_key FROM execution_queue_task WHERE quote_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind("Q-CRM-OUTBOX-001")
+        .fetch_one(&state.db_pool)
+        .await
+        .expect("fetch execution queue task");
+        let task_id: String = task_row.try_get("id").expect("task id");
+        let operation_key: String = task_row.try_get("idempotency_key").expect("idempotency key");
+
+        sqlx::query(
+            "UPDATE execution_queue_task
+             SET state = 'failed_terminal',
+                 retry_count = 5,
+                 max_retries = 5,
+                 last_error = 'manual dead-letter seed',
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(&task_id)
+        .execute(&state.db_pool)
+        .await
+        .expect("mark execution task as failed_terminal");
+
+        sqlx::query(
+            "UPDATE execution_idempotency_ledger
+             SET state = 'failed_terminal',
+                 error_snapshot_json = 'manual dead-letter seed',
+                 last_seen_at = ?
+             WHERE operation_key = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(&operation_key)
+        .execute(&state.db_pool)
+        .await
+        .expect("update idempotency state");
+
+        sqlx::query(
+            "UPDATE crm_sync_event
+             SET status = 'failed',
+                 attempts = 2,
+                 error_message = 'manual replay required',
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(&event_id)
+        .execute(&state.db_pool)
+        .await
+        .expect("mark sync event failed");
+
+        let Json(tasks) = list_crm_outbox_tasks(
+            State(state.clone()),
+            Query(CrmOutboxTasksQuery {
+                state: Some("dead_letter".to_string()),
+                provider: Some("salesforce".to_string()),
+                quote_id: Some("Q-CRM-OUTBOX-001".to_string()),
+                limit: Some(10),
+            }),
+        )
+        .await
+        .expect("load outbox tasks");
+
+        assert_eq!(tasks.len(), 1, "expected one dead-letter task");
+        let task = &tasks[0];
+        assert_eq!(task.task_id, task_id);
+        assert_eq!(task.state, "failed_terminal");
+        assert_eq!(task.event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!(task.provider.as_deref(), Some("salesforce"));
+        assert_eq!(task.event_status.as_deref(), Some("failed"));
+        assert_eq!(task.event_attempts, Some(2));
+        assert!(task.replayable, "failed event under retry budget should be replayable");
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn replay_outbox_task_reuses_event_retry_path() {
+        let state = setup_state().await;
+        seed_connected_integration(&state, "salesforce").await;
+        seed_quote_with_line(&state, "Q-CRM-OUTBOX-002", "draft").await;
+
+        let Json(initial) = sync_quote_to_crm(
+            Path("Q-CRM-OUTBOX-002".to_string()),
+            State(state.clone()),
+            Query(SyncEventPayloadRequest {
+                direction: None,
+                provider: Some("salesforce".to_string()),
+                event_type: None,
+            }),
+        )
+        .await
+        .expect("initial outbound sync");
+        let event_id = initial.provider_results.first().expect("provider result").event_id.clone();
+
+        sqlx::query("UPDATE quote SET status = 'finalized', updated_at = ? WHERE id = ?")
+            .bind(Utc::now().to_rfc3339())
+            .bind("Q-CRM-OUTBOX-002")
+            .execute(&state.db_pool)
+            .await
+            .expect("update quote status to finalized");
+
+        let task_row = sqlx::query(
+            "SELECT id, idempotency_key FROM execution_queue_task WHERE quote_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind("Q-CRM-OUTBOX-002")
+        .fetch_one(&state.db_pool)
+        .await
+        .expect("fetch execution queue task");
+        let task_id: String = task_row.try_get("id").expect("task id");
+        let operation_key: String = task_row.try_get("idempotency_key").expect("idempotency key");
+
+        sqlx::query(
+            "UPDATE execution_queue_task
+             SET state = 'failed_terminal',
+                 retry_count = 3,
+                 max_retries = 5,
+                 last_error = 'manual replay trigger',
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(&task_id)
+        .execute(&state.db_pool)
+        .await
+        .expect("mark execution task failed_terminal");
+
+        sqlx::query(
+            "UPDATE execution_idempotency_ledger
+             SET state = 'failed_terminal',
+                 error_snapshot_json = 'manual replay trigger',
+                 last_seen_at = ?
+             WHERE operation_key = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(&operation_key)
+        .execute(&state.db_pool)
+        .await
+        .expect("update idempotency ledger");
+
+        sqlx::query(
+            "UPDATE crm_sync_event
+             SET status = 'failed',
+                 attempts = 1,
+                 error_message = 'manual replay trigger',
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(Utc::now().to_rfc3339())
+        .bind(&event_id)
+        .execute(&state.db_pool)
+        .await
+        .expect("mark event replayable");
+
+        let Json(replayed) = replay_outbox_task(
+            Path(OutboxTaskPath { task_id: task_id.clone() }),
+            State(state.clone()),
+        )
+        .await
+        .expect("outbox replay should succeed");
+
+        assert_eq!(replayed.id, event_id);
+        assert_eq!(replayed.status, "success");
+        assert_eq!(replayed.event_type, "quote_finalized");
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn recover_stale_outbox_tasks_requeues_stuck_running_work() {
+        let state = setup_state().await;
+        seed_connected_integration(&state, "salesforce").await;
+        seed_quote_with_line(&state, "Q-CRM-OUTBOX-003", "draft").await;
+
+        let Json(initial) = sync_quote_to_crm(
+            Path("Q-CRM-OUTBOX-003".to_string()),
+            State(state.clone()),
+            Query(SyncEventPayloadRequest {
+                direction: None,
+                provider: Some("salesforce".to_string()),
+                event_type: None,
+            }),
+        )
+        .await
+        .expect("initial outbound sync");
+        let event_id = initial.provider_results.first().expect("provider result").event_id.clone();
+
+        let task_row = sqlx::query(
+            "SELECT id, idempotency_key
+             FROM execution_queue_task
+             WHERE quote_id = ?
+             ORDER BY created_at DESC
+             LIMIT 1",
+        )
+        .bind("Q-CRM-OUTBOX-003")
+        .fetch_one(&state.db_pool)
+        .await
+        .expect("fetch execution task");
+        let task_id: String = task_row.try_get("id").expect("task id");
+        let operation_key: String = task_row.try_get("idempotency_key").expect("idempotency key");
+
+        let stale = (Utc::now() - Duration::minutes(10)).to_rfc3339();
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "UPDATE execution_queue_task
+             SET state = 'running',
+                 claimed_by = 'stuck-worker',
+                 claimed_at = ?,
+                 retry_count = 0,
+                 max_retries = 4,
+                 last_error = 'stale running task',
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(&stale)
+        .bind(&now)
+        .bind(&task_id)
+        .execute(&state.db_pool)
+        .await
+        .expect("seed stale running execution task");
+
+        sqlx::query(
+            "UPDATE execution_idempotency_ledger
+             SET state = 'running',
+                 correlation_id = ?,
+                 error_snapshot_json = 'stale running task',
+                 last_seen_at = ?
+             WHERE operation_key = ?",
+        )
+        .bind(&event_id)
+        .bind(&now)
+        .bind(&operation_key)
+        .execute(&state.db_pool)
+        .await
+        .expect("seed idempotency running state");
+
+        sqlx::query(
+            "UPDATE crm_sync_event
+             SET status = 'running',
+                 attempts = 1,
+                 error_message = 'stale running task',
+                 updated_at = ?
+             WHERE id = ?",
+        )
+        .bind(&now)
+        .bind(&event_id)
+        .execute(&state.db_pool)
+        .await
+        .expect("seed sync event running state");
+
+        let Json(recovery) = recover_stale_outbox_tasks(
+            State(state.clone()),
+            Query(CrmOutboxRecoverQuery { limit: Some(10) }),
+        )
+        .await
+        .expect("stale recovery should succeed");
+
+        assert_eq!(recovery.scanned, 1);
+        assert_eq!(recovery.recovered, 1);
+        assert_eq!(recovery.failed_terminal, 0);
+        assert_eq!(recovery.skipped_missing_idempotency, 0);
+        assert_eq!(recovery.results.len(), 1);
+        assert_eq!(recovery.results[0].task_id, task_id);
+        assert_eq!(recovery.results[0].event_id.as_deref(), Some(event_id.as_str()));
+        assert_eq!(recovery.results[0].resulting_state, "retryable_failed");
+        assert_eq!(recovery.results[0].retry_count, 1);
+
+        let row = sqlx::query(
+            "SELECT state, claimed_by, last_error
+             FROM execution_queue_task
+             WHERE id = ?",
+        )
+        .bind(&task_id)
+        .fetch_one(&state.db_pool)
+        .await
+        .expect("fetch recovered task");
+        let task_state: String = row.try_get("state").expect("state");
+        let claimed_by: Option<String> = row.try_get("claimed_by").ok();
+        assert_eq!(task_state, "retryable_failed");
+        assert_ne!(
+            claimed_by.as_deref(),
+            Some("stuck-worker"),
+            "recovered task should not remain claimed by stale worker"
+        );
+
+        let event_status: String =
+            sqlx::query_scalar("SELECT status FROM crm_sync_event WHERE id = ?")
+                .bind(&event_id)
+                .fetch_one(&state.db_pool)
+                .await
+                .expect("fetch synced status");
+        assert_eq!(event_status, "retrying");
 
         state.db_pool.close().await;
     }

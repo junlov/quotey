@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#2563eb">
     <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="stylesheet" href="/portal/shell.css">
     <title>Approval: {{ approval.id }} - {{ company_name | default(value="Quotey") }}</title>
     <style>
         :root {
@@ -341,6 +342,7 @@
     </style>
 </head>
 <body>
+    <div id="pc-shell-root"></div>
     <main class="shell" aria-label="Approval detail">
         <a href="/approvals" class="back-link" aria-label="Return to approvals list">&larr; Back to Approvals</a>
 
@@ -561,6 +563,7 @@
     </div>
     {% endif %}
 
+    <script src="/portal/shell.js"></script>
     <script>
         const quoteToken = {{ quote.token | json_encode | safe }};
         const approvalId = {{ approval.id | json_encode | safe }};

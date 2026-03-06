@@ -3,6 +3,34 @@ use serde::{Deserialize, Serialize};
 
 use crate::domain::approval::ApprovalStatus;
 
+/// Configurable policy thresholds loaded from org_settings.
+/// Defaults match the original hardcoded values.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PolicyThresholds {
+    /// Discount % above which manager approval is required (default: 20%).
+    pub manager_discount_pct: Decimal,
+    /// Discount % above which VP/finance approval is required (default: 30%).
+    pub vp_discount_pct: Decimal,
+    /// Minimum margin % below which finance approval is required (default: 10%).
+    pub margin_floor_pct: Decimal,
+    /// Deal value in cents above which finance approval is required (default: None = disabled).
+    pub finance_deal_value_cents: Option<i64>,
+    /// If true, auto-approve quotes with no violations (default: true).
+    pub auto_approve_clean: bool,
+}
+
+impl Default for PolicyThresholds {
+    fn default() -> Self {
+        Self {
+            manager_discount_pct: Decimal::new(2000, 2), // 20%
+            vp_discount_pct: Decimal::new(3000, 2),      // 30%
+            margin_floor_pct: Decimal::new(1000, 2),     // 10%
+            finance_deal_value_cents: None,
+            auto_approve_clean: true,
+        }
+    }
+}
+
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PolicyInput {
     pub requested_discount_pct: Decimal,
@@ -48,6 +76,13 @@ pub fn evaluate_policy() -> PolicyDecision {
 }
 
 pub fn evaluate_policy_input(input: &PolicyInput) -> PolicyDecision {
+    evaluate_policy_with_thresholds(input, &PolicyThresholds::default())
+}
+
+pub fn evaluate_policy_with_thresholds(
+    input: &PolicyInput,
+    thresholds: &PolicyThresholds,
+) -> PolicyDecision {
     let mut decision = evaluate_policy();
     let mut reasons = Vec::new();
     let mut violations = Vec::new();
@@ -81,27 +116,45 @@ pub fn evaluate_policy_input(input: &PolicyInput) -> PolicyDecision {
         });
     }
 
-    if input.requested_discount_pct > Decimal::new(3000, 2) {
-        reasons.push("Discount exceeds 30% hard threshold".to_string());
+    if input.requested_discount_pct > thresholds.vp_discount_pct {
+        reasons.push(format!("Discount exceeds {}% hard threshold", thresholds.vp_discount_pct));
         violations.push(PolicyViolation {
             policy_id: "discount-cap".to_string(),
-            reason: "Requested discount is above 30%".to_string(),
+            reason: format!("Requested discount is above {}%", thresholds.vp_discount_pct),
             required_approval: Some("vp_finance".to_string()),
         });
-    } else if input.requested_discount_pct > Decimal::new(2000, 2) {
-        reasons.push("Discount exceeds standard approval threshold".to_string());
+    } else if input.requested_discount_pct > thresholds.manager_discount_pct {
+        reasons.push(format!(
+            "Discount exceeds {}% standard approval threshold",
+            thresholds.manager_discount_pct
+        ));
         violations.push(PolicyViolation {
             policy_id: "discount-cap".to_string(),
-            reason: "Requested discount is above 20%".to_string(),
+            reason: format!("Requested discount is above {}%", thresholds.manager_discount_pct),
             required_approval: Some("sales_manager".to_string()),
         });
     }
 
-    if input.minimum_margin_pct < Decimal::new(1000, 2) {
-        reasons.push("Margin floor breached".to_string());
+    if let Some(finance_cents) = thresholds.finance_deal_value_cents {
+        let deal_cents = input.deal_value * Decimal::from(100);
+        if deal_cents > Decimal::from(finance_cents) {
+            reasons.push(format!(
+                "Deal value exceeds finance approval threshold ({}c)",
+                finance_cents
+            ));
+            violations.push(PolicyViolation {
+                policy_id: "deal-value-cap".to_string(),
+                reason: format!("Deal value exceeds {}c threshold", finance_cents),
+                required_approval: Some("finance".to_string()),
+            });
+        }
+    }
+
+    if input.minimum_margin_pct < thresholds.margin_floor_pct {
+        reasons.push(format!("Margin floor breached (below {}%)", thresholds.margin_floor_pct));
         violations.push(PolicyViolation {
             policy_id: "margin-floor".to_string(),
-            reason: "Minimum margin is below 10%".to_string(),
+            reason: format!("Minimum margin is below {}%", thresholds.margin_floor_pct),
             required_approval: Some("finance".to_string()),
         });
     }
@@ -121,7 +174,9 @@ pub fn evaluate_policy_input(input: &PolicyInput) -> PolicyDecision {
 mod tests {
     use rust_decimal::Decimal;
 
-    use super::{evaluate_policy_input, PolicyInput};
+    use super::{
+        evaluate_policy_input, evaluate_policy_with_thresholds, PolicyInput, PolicyThresholds,
+    };
 
     #[test]
     fn policy_requires_approver_above_thresholds() {
@@ -151,5 +206,69 @@ mod tests {
             minimum_margin_pct: Decimal::new(2000, 2),
         });
         assert!(!normal.approval_required);
+    }
+
+    #[test]
+    fn custom_thresholds_lower_manager_trigger() {
+        // Lower manager threshold to 10% — a 15% discount should now trigger
+        let thresholds = PolicyThresholds {
+            manager_discount_pct: Decimal::new(1000, 2),
+            ..PolicyThresholds::default()
+        };
+        let result = evaluate_policy_with_thresholds(
+            &PolicyInput {
+                requested_discount_pct: Decimal::new(1500, 2),
+                deal_value: Decimal::new(50_000, 2),
+                minimum_margin_pct: Decimal::new(2000, 2),
+            },
+            &thresholds,
+        );
+        assert!(result.approval_required);
+        assert!(result.violations.iter().any(|v| v.policy_id == "discount-cap"
+            && v.required_approval == Some("sales_manager".to_string())));
+    }
+
+    #[test]
+    fn custom_thresholds_raise_vp_trigger() {
+        // Raise VP threshold to 50% — a 35% discount should only trigger manager
+        let thresholds = PolicyThresholds {
+            vp_discount_pct: Decimal::new(5000, 2),
+            ..PolicyThresholds::default()
+        };
+        let result = evaluate_policy_with_thresholds(
+            &PolicyInput {
+                requested_discount_pct: Decimal::new(3500, 2),
+                deal_value: Decimal::new(50_000, 2),
+                minimum_margin_pct: Decimal::new(2000, 2),
+            },
+            &thresholds,
+        );
+        assert!(result.approval_required);
+        assert!(result
+            .violations
+            .iter()
+            .any(|v| v.required_approval == Some("sales_manager".to_string())));
+        assert!(!result
+            .violations
+            .iter()
+            .any(|v| v.required_approval == Some("vp_finance".to_string())));
+    }
+
+    #[test]
+    fn finance_deal_value_threshold_triggers_when_set() {
+        let thresholds = PolicyThresholds {
+            finance_deal_value_cents: Some(100_000), // $1,000.00
+            ..PolicyThresholds::default()
+        };
+        let result = evaluate_policy_with_thresholds(
+            &PolicyInput {
+                requested_discount_pct: Decimal::new(500, 2),
+                deal_value: Decimal::new(200_000, 2), // $2,000.00
+                minimum_margin_pct: Decimal::new(2000, 2),
+            },
+            &thresholds,
+        );
+        assert!(result.approval_required);
+        assert!(result.violations.iter().any(|v| v.policy_id == "deal-value-cap"));
     }
 }

@@ -1742,8 +1742,10 @@ name = "quotey-core"
 version = "0.1.2"
 dependencies = [
  "async-trait",
+ "blake3",
  "chrono",
  "hmac",
+ "rand 0.8.5",
  "rust_decimal",
  "secrecy",
  "serde",

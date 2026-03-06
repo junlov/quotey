@@ -8,8 +8,10 @@ authors.workspace = true
 
 [dependencies]
 async-trait.workspace = true
+blake3 = "1.5"
 chrono.workspace = true
 hmac = "0.12"
+rand = "0.8"
 rust_decimal.workspace = true
 secrecy.workspace = true
 serde.workspace = true

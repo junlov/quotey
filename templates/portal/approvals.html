@@ -5,6 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#2563eb">
     <link rel="manifest" href="/manifest.webmanifest">
+    <link rel="stylesheet" href="/portal/shell.css">
     <title>{{ branding.company_name | default(value="Quotey") }} Approvals</title>
     <style>
         :root {
@@ -247,6 +248,7 @@
     </style>
 </head>
 <body>
+    <div id="pc-shell-root"></div>
     <main class="shell" aria-label="Pending approvals">
         <header class="hero">
             <p class="kicker">Mobile Approval Queue</p>
@@ -283,5 +285,6 @@
         <p class="empty">No pending approvals. New approval requests will appear here as soon as they are routed.</p>
         {% endif %}
     </main>
+    <script src="/portal/shell.js"></script>
 </body>
 </html>

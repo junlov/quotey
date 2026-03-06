@@ -1,0 +1,122 @@
+.pc-shell {
+    background: #0f172a;
+    border-bottom: 1px solid #1e293b;
+    color: #e2e8f0;
+    position: relative;
+    z-index: 220;
+}
+
+.pc-shell__inner {
+    max-width: 1200px;
+    margin: 0 auto;
+    padding: 10px 16px;
+    display: flex;
+    align-items: center;
+    gap: 12px;
+    flex-wrap: wrap;
+}
+
+.pc-shell__brand {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    font-size: 13px;
+    font-weight: 700;
+    letter-spacing: 0.03em;
+    text-transform: uppercase;
+    white-space: nowrap;
+}
+
+.pc-shell__dot {
+    width: 7px;
+    height: 7px;
+    border-radius: 50%;
+    background: #22d3ee;
+    box-shadow: 0 0 0 4px rgba(34, 211, 238, 0.2);
+}
+
+.pc-shell__surface {
+    font-size: 12px;
+    color: #93c5fd;
+    white-space: nowrap;
+}
+
+.pc-shell__spacer {
+    flex: 1;
+    min-width: 24px;
+}
+
+.pc-shell__controls {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+}
+
+.pc-shell__controls label {
+    font-size: 12px;
+    color: #94a3b8;
+}
+
+.pc-shell__controls select {
+    background: #111827;
+    border: 1px solid #334155;
+    color: #f8fafc;
+    border-radius: 8px;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 6px 8px;
+}
+
+.pc-shell__controls select:focus,
+.pc-shell__controls select:focus-visible {
+    outline: none;
+    border-color: #38bdf8;
+    box-shadow: 0 0 0 3px rgba(56, 189, 248, 0.24);
+}
+
+.pc-shell__nav {
+    display: inline-flex;
+    align-items: center;
+    gap: 8px;
+    flex-wrap: wrap;
+}
+
+.pc-shell__link {
+    color: #cbd5e1;
+    text-decoration: none;
+    font-size: 12px;
+    font-weight: 600;
+    border: 1px solid #334155;
+    border-radius: 999px;
+    padding: 6px 10px;
+    transition: background-color 140ms ease, border-color 140ms ease, color 140ms ease;
+}
+
+.pc-shell__link:hover,
+.pc-shell__link:focus-visible {
+    color: #f8fafc;
+    border-color: #38bdf8;
+    background: rgba(56, 189, 248, 0.14);
+    outline: none;
+}
+
+.pc-shell__link.is-active {
+    color: #0f172a;
+    border-color: #67e8f9;
+    background: #67e8f9;
+}
+
+@media (max-width: 840px) {
+    .pc-shell__inner {
+        gap: 10px;
+    }
+
+    .pc-shell__spacer {
+        display: none;
+    }
+
+    .pc-shell__controls,
+    .pc-shell__nav {
+        width: 100%;
+    }
+}

@@ -1547,6 +1547,74 @@ pub struct RepUpsertInput {
     pub external_user_ref: Option<String>,
 }
 
+// Comment Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CommentAddInput {
+    pub quote_id: String,
+    pub author_type: String,
+    pub author_id: String,
+    pub body: String,
+    #[serde(default)]
+    pub metadata_json: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CommentListInput {
+    pub quote_id: String,
+    #[serde(default = "default_limit")]
+    pub limit: u32,
+}
+
+// Lock Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QuoteLockInput {
+    pub quote_id: String,
+    pub actor_id: String,
+    #[serde(default = "default_lock_duration")]
+    pub duration_minutes: u32,
+}
+
+fn default_lock_duration() -> u32 {
+    30
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QuoteUnlockInput {
+    pub quote_id: String,
+    pub actor_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QuoteForceUnlockInput {
+    pub quote_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct QuoteLockStatusInput {
+    pub quote_id: String,
+}
+
+// Settings Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SettingsGetInput {
+    pub key: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SettingsSetInput {
+    pub key: String,
+    pub value: String,
+    #[serde(default)]
+    pub actor: Option<String>,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct SettingsListInput {}
+
+fn default_limit() -> u32 {
+    DEFAULT_PAGE_LIMIT
+}
+
 // PDF Types
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct QuotePdfInput {
@@ -2176,6 +2244,19 @@ impl QuoteyMcpServer {
         let repo = quotey_db::repositories::SqlQuoteRepository::new(self.db_pool.clone());
         match repo.save(quote).await {
             Ok(()) => {
+                // Auto-comment: record quote creation
+                auto_comment(
+                    &self.db_pool,
+                    &quote_id,
+                    "quote_created",
+                    &format!(
+                        "Quote created with {} line item(s) in {}.",
+                        line_items_result.len(),
+                        &currency
+                    ),
+                )
+                .await;
+
                 let result = QuoteCreateResult {
                     quote_id,
                     version: 1,
@@ -2338,8 +2419,7 @@ impl QuoteyMcpServer {
                 }
             };
 
-        use quotey_core::cpq::policy::evaluate_policy_input;
-        use quotey_core::cpq::policy::PolicyInput;
+        use quotey_core::cpq::policy::{evaluate_policy_with_thresholds, PolicyInput};
         use quotey_core::cpq::pricing::price_quote_with_trace;
         use quotey_core::domain::quote::QuoteId;
         use quotey_db::repositories::QuoteRepository;
@@ -2379,7 +2459,10 @@ impl QuoteyMcpServer {
             deal_value: deal_value_dec,
             minimum_margin_pct: margin_pct,
         };
-        let policy_decision = evaluate_policy_input(&policy_input);
+
+        // Load policy thresholds from org_settings, falling back to defaults
+        let thresholds = load_policy_thresholds(&self.db_pool).await;
+        let policy_decision = evaluate_policy_with_thresholds(&policy_input, &thresholds);
 
         // Build per-line pricing
         let product_repo = quotey_db::repositories::SqlProductRepository::new(self.db_pool.clone());
@@ -2456,6 +2539,18 @@ impl QuoteyMcpServer {
             approval_required: policy_decision.approval_required,
             policy_violations,
         };
+
+        // Auto-comment: record pricing event on the quote
+        let comment_body = if result.approval_required {
+            format!(
+                "Quote priced at ${:.2}. Approval required — {} policy violation(s).",
+                result.pricing.total,
+                result.policy_violations.len()
+            )
+        } else {
+            format!("Quote priced at ${:.2}. No policy violations.", result.pricing.total)
+        };
+        auto_comment(&self.db_pool, &quote_id, "pricing_rendered", &comment_body).await;
 
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
@@ -2681,6 +2776,20 @@ impl QuoteyMcpServer {
 
         self.dispatch_pending_approval_push_notifications(&quote, &approval_id, &approver_role)
             .await;
+
+        // Auto-comment: record approval submission
+        auto_comment(
+            &self.db_pool,
+            &quote_id,
+            "approval_submitted",
+            &format!(
+                "Approval request {} submitted for role '{}'. Expires {}.",
+                approval_id,
+                approver_role,
+                expires_at.to_rfc3339()
+            ),
+        )
+        .await;
 
         let result = ApprovalRequestResult {
             approval_id,
@@ -3775,6 +3884,445 @@ impl QuoteyMcpServer {
         let result = sales_rep_to_json(&rep);
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
+
+    // ── Quote Comment Tools ────────────────────────────────────────────
+
+    #[tool(description = "Add a comment to a quote (by rep, manager, system, ai, or integration)")]
+    pub async fn comment_add(&self, Parameters(input): Parameters<CommentAddInput>) -> String {
+        debug!(quote_id = %input.quote_id, "comment_add called");
+        self.record_mcp_audit_event(
+            "comment_add",
+            Some(&input.quote_id),
+            serde_json::json!({
+                "author_type": &input.author_type,
+                "author_id": &input.author_id,
+            }),
+        )
+        .await;
+
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+        let author_id = match normalize_id(&input.author_id, "author_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+        let body = input.body.trim().to_string();
+        if body.is_empty() {
+            return tool_error("VALIDATION_ERROR", "body is required", None);
+        }
+
+        let author_type =
+            match input.author_type.parse::<quotey_core::domain::quote_comment::AuthorType>() {
+                Ok(at) => at,
+                Err(_) => {
+                    return tool_error(
+                    "VALIDATION_ERROR",
+                    "Invalid author_type. Must be one of: rep, manager, system, ai, integration",
+                    None,
+                );
+                }
+            };
+
+        let comment = quotey_core::domain::quote_comment::QuoteComment {
+            id: format!("CMT-{:.8}", uuid::Uuid::new_v4()),
+            quote_id,
+            author_type,
+            author_id,
+            body,
+            metadata_json: input.metadata_json,
+            created_at: chrono::Utc::now(),
+        };
+
+        let repo = quotey_db::repositories::SqlQuoteCommentRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::QuoteCommentRepository;
+
+        if let Err(e) = repo.add_comment(comment.clone()).await {
+            return internal_tool_error(&e);
+        }
+
+        let result = serde_json::json!({
+            "id": comment.id,
+            "quote_id": comment.quote_id,
+            "author_type": comment.author_type.as_str(),
+            "author_id": comment.author_id,
+            "body": comment.body,
+            "created_at": comment.created_at.to_rfc3339(),
+        });
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
+
+    #[tool(description = "List comments on a quote in chronological order")]
+    pub async fn comment_list(&self, Parameters(input): Parameters<CommentListInput>) -> String {
+        debug!(quote_id = %input.quote_id, "comment_list called");
+        self.record_mcp_audit_event(
+            "comment_list",
+            Some(&input.quote_id),
+            serde_json::json!({ "limit": input.limit }),
+        )
+        .await;
+
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        let limit = normalize_limit(input.limit);
+        let repo = quotey_db::repositories::SqlQuoteCommentRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::QuoteCommentRepository;
+
+        match repo.list_by_quote(&quote_id, limit).await {
+            Ok(comments) => {
+                let items: Vec<serde_json::Value> = comments
+                    .iter()
+                    .map(|c| {
+                        serde_json::json!({
+                            "id": c.id,
+                            "quote_id": c.quote_id,
+                            "author_type": c.author_type.as_str(),
+                            "author_id": c.author_id,
+                            "body": c.body,
+                            "metadata_json": c.metadata_json,
+                            "created_at": c.created_at.to_rfc3339(),
+                        })
+                    })
+                    .collect();
+                let result = serde_json::json!({
+                    "count": items.len(),
+                    "items": items,
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => internal_tool_error(&e),
+        }
+    }
+
+    // ── Quote Lock Tools ───────────────────────────────────────────────
+
+    #[tool(description = "Acquire an exclusive lock on a quote for editing")]
+    pub async fn quote_lock(&self, Parameters(input): Parameters<QuoteLockInput>) -> String {
+        debug!(quote_id = %input.quote_id, actor_id = %input.actor_id, "quote_lock called");
+        self.record_mcp_audit_event(
+            "quote_lock",
+            Some(&input.quote_id),
+            serde_json::json!({
+                "actor_id": &input.actor_id,
+                "duration_minutes": input.duration_minutes,
+            }),
+        )
+        .await;
+
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+        let actor_id = match normalize_id(&input.actor_id, "actor_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        let duration = input.duration_minutes.clamp(1, 480);
+
+        let repo = quotey_db::repositories::SqlQuoteLockRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::QuoteLockRepository;
+
+        match repo.lock_quote(&quote_id, &actor_id, duration).await {
+            Ok(()) => {
+                let result = serde_json::json!({
+                    "locked": true,
+                    "quote_id": quote_id,
+                    "locked_by": actor_id,
+                    "duration_minutes": duration,
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(conflict) => {
+                let result = serde_json::json!({
+                    "error": {
+                        "code": "LOCK_CONFLICT",
+                        "message": "Quote is already locked by another actor",
+                        "details": {
+                            "current_owner": conflict.current_owner,
+                            "locked_since": conflict.locked_since.to_rfc3339(),
+                            "expires_at": conflict.expires_at.to_rfc3339(),
+                        }
+                    }
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+        }
+    }
+
+    #[tool(description = "Release a lock on a quote (only the lock owner can release)")]
+    pub async fn quote_unlock(&self, Parameters(input): Parameters<QuoteUnlockInput>) -> String {
+        debug!(quote_id = %input.quote_id, actor_id = %input.actor_id, "quote_unlock called");
+        self.record_mcp_audit_event(
+            "quote_unlock",
+            Some(&input.quote_id),
+            serde_json::json!({ "actor_id": &input.actor_id }),
+        )
+        .await;
+
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+        let actor_id = match normalize_id(&input.actor_id, "actor_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        let repo = quotey_db::repositories::SqlQuoteLockRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::QuoteLockRepository;
+
+        match repo.unlock_quote(&quote_id, &actor_id).await {
+            Ok(()) => {
+                let result = serde_json::json!({
+                    "unlocked": true,
+                    "quote_id": quote_id,
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => internal_tool_error(&e),
+        }
+    }
+
+    #[tool(description = "Force-unlock a quote regardless of owner (admin action)")]
+    pub async fn quote_force_unlock(
+        &self,
+        Parameters(input): Parameters<QuoteForceUnlockInput>,
+    ) -> String {
+        debug!(quote_id = %input.quote_id, "quote_force_unlock called");
+        self.record_mcp_audit_event(
+            "quote_force_unlock",
+            Some(&input.quote_id),
+            serde_json::json!({}),
+        )
+        .await;
+
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        let repo = quotey_db::repositories::SqlQuoteLockRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::QuoteLockRepository;
+
+        match repo.force_unlock(&quote_id).await {
+            Ok(()) => {
+                let result = serde_json::json!({
+                    "unlocked": true,
+                    "quote_id": quote_id,
+                    "forced": true,
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => internal_tool_error(&e),
+        }
+    }
+
+    #[tool(description = "Check the current lock status of a quote")]
+    pub async fn quote_lock_status(
+        &self,
+        Parameters(input): Parameters<QuoteLockStatusInput>,
+    ) -> String {
+        debug!(quote_id = %input.quote_id, "quote_lock_status called");
+        self.record_mcp_audit_event(
+            "quote_lock_status",
+            Some(&input.quote_id),
+            serde_json::json!({}),
+        )
+        .await;
+
+        let quote_id = match normalize_id(&input.quote_id, "quote_id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        let repo = quotey_db::repositories::SqlQuoteLockRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::QuoteLockRepository;
+
+        match repo.check_lock(&quote_id).await {
+            Ok(Some(lock)) => {
+                let result = serde_json::json!({
+                    "locked": true,
+                    "quote_id": lock.quote_id,
+                    "locked_by": lock.locked_by,
+                    "locked_at": lock.locked_at.to_rfc3339(),
+                    "lock_expires_at": lock.lock_expires_at.to_rfc3339(),
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Ok(None) => {
+                let result = serde_json::json!({
+                    "locked": false,
+                    "quote_id": quote_id,
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => internal_tool_error(&e),
+        }
+    }
+
+    // ── Org Settings Tools ─────────────────────────────────────────────
+
+    #[tool(description = "Get an org-level policy setting by key")]
+    pub async fn settings_get(&self, Parameters(input): Parameters<SettingsGetInput>) -> String {
+        debug!(key = %input.key, "settings_get called");
+        self.record_mcp_audit_event("settings_get", None, serde_json::json!({ "key": &input.key }))
+            .await;
+
+        let key = input.key.trim().to_string();
+        if key.is_empty() {
+            return tool_error("VALIDATION_ERROR", "key is required", None);
+        }
+
+        let repo = quotey_db::repositories::SqlOrgSettingsRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::OrgSettingsRepository;
+
+        match repo.get(&key).await {
+            Ok(Some(setting)) => {
+                let result = org_setting_to_json(&setting);
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Ok(None) => tool_error("NOT_FOUND", "Setting not found", None),
+            Err(e) => internal_tool_error(&e),
+        }
+    }
+
+    #[tool(description = "Set an org-level policy setting (creates or updates)")]
+    pub async fn settings_set(&self, Parameters(input): Parameters<SettingsSetInput>) -> String {
+        debug!(key = %input.key, "settings_set called");
+        self.record_mcp_audit_event(
+            "settings_set",
+            None,
+            serde_json::json!({ "key": &input.key, "actor": &input.actor }),
+        )
+        .await;
+
+        let key = input.key.trim().to_string();
+        if key.is_empty() {
+            return tool_error("VALIDATION_ERROR", "key is required", None);
+        }
+        let value = input.value.trim().to_string();
+        if value.is_empty() {
+            return tool_error("VALIDATION_ERROR", "value is required", None);
+        }
+
+        let repo = quotey_db::repositories::SqlOrgSettingsRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::OrgSettingsRepository;
+
+        let actor_ref = input.actor.as_deref();
+
+        if let Err(e) = repo.set(&key, &value, actor_ref).await {
+            return internal_tool_error(&e);
+        }
+
+        // Read back the saved value
+        match repo.get(&key).await {
+            Ok(Some(setting)) => {
+                let result = org_setting_to_json(&setting);
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Ok(None) => {
+                let result = serde_json::json!({ "saved": true, "key": key });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => internal_tool_error(&e),
+        }
+    }
+
+    #[tool(description = "List all org-level policy settings")]
+    pub async fn settings_list(&self, Parameters(_input): Parameters<SettingsListInput>) -> String {
+        debug!("settings_list called");
+        self.record_mcp_audit_event("settings_list", None, serde_json::json!({})).await;
+
+        let repo = quotey_db::repositories::SqlOrgSettingsRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::OrgSettingsRepository;
+
+        match repo.list_all().await {
+            Ok(settings) => {
+                let items: Vec<serde_json::Value> =
+                    settings.iter().map(org_setting_to_json).collect();
+                let result = serde_json::json!({
+                    "count": items.len(),
+                    "items": items,
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => internal_tool_error(&e),
+        }
+    }
+}
+
+/// Record a system-generated auto-comment on a quote for audit trail purposes.
+/// Failures are logged but do not block the calling tool.
+async fn auto_comment(pool: &quotey_db::DbPool, quote_id: &str, event: &str, body: &str) {
+    use quotey_core::domain::quote_comment::{AuthorType, QuoteComment};
+    use quotey_db::repositories::QuoteCommentRepository;
+
+    let comment = QuoteComment {
+        id: format!("CMT-{:.8}", uuid::Uuid::new_v4()),
+        quote_id: quote_id.to_string(),
+        author_type: AuthorType::System,
+        author_id: format!("system:{event}"),
+        body: body.to_string(),
+        metadata_json: Some(serde_json::json!({ "event": event, "auto": true }).to_string()),
+        created_at: chrono::Utc::now(),
+    };
+
+    let repo = quotey_db::repositories::SqlQuoteCommentRepository::new(pool.clone());
+    if let Err(e) = repo.add_comment(comment).await {
+        warn!(error = %e, quote_id = %quote_id, event = %event, "auto-comment failed (non-blocking)");
+    }
+}
+
+async fn load_policy_thresholds(
+    pool: &quotey_db::DbPool,
+) -> quotey_core::cpq::policy::PolicyThresholds {
+    use quotey_core::cpq::policy::PolicyThresholds;
+    use quotey_db::repositories::OrgSettingsRepository;
+    use rust_decimal::prelude::FromPrimitive;
+    use rust_decimal::Decimal;
+
+    let repo = quotey_db::repositories::SqlOrgSettingsRepository::new(pool.clone());
+    let mut thresholds = PolicyThresholds::default();
+
+    if let Ok(Some(s)) = repo.get("require_manager_approval_above_discount_pct").await {
+        if let Some(v) = s.value_as_f64() {
+            // The setting stores a fraction (0.10 = 10%), convert to percentage for the engine
+            if let Some(d) = Decimal::from_f64(v * 100.0) {
+                thresholds.manager_discount_pct = d;
+            }
+        }
+    }
+
+    if let Ok(Some(s)) = repo.get("require_finance_approval_above_deal_value_cents").await {
+        if let Some(v) = s.value_as_i64() {
+            thresholds.finance_deal_value_cents = Some(v);
+        }
+    }
+
+    if let Ok(Some(s)) = repo.get("auto_approve_standard_pricing").await {
+        if let Some(v) = s.value_as_bool() {
+            thresholds.auto_approve_clean = v;
+        }
+    }
+
+    thresholds
+}
+
+fn org_setting_to_json(
+    setting: &quotey_core::domain::org_settings::OrgSetting,
+) -> serde_json::Value {
+    serde_json::json!({
+        "key": setting.key,
+        "value": setting.value_json,
+        "description": setting.description,
+        "updated_at": setting.updated_at.to_rfc3339(),
+        "updated_by": setting.updated_by,
+    })
 }
 
 fn sales_rep_to_json(rep: &quotey_core::domain::sales_rep::SalesRep) -> serde_json::Value {
@@ -5804,5 +6352,399 @@ mod tests {
             }))
             .await;
         assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    // ── Comment Tool Tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn comment_add_and_list() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-CMT-001").await;
+        let srv = server(pool);
+
+        let result = srv
+            .comment_add(Parameters(CommentAddInput {
+                quote_id: "Q-CMT-001".to_string(),
+                author_type: "rep".to_string(),
+                author_id: "rep-alice".to_string(),
+                body: "Looks good to me".to_string(),
+                metadata_json: None,
+            }))
+            .await;
+        let json = parse_output(&result);
+        assert!(json["id"].as_str().unwrap().starts_with("CMT-"));
+        assert_eq!(json["author_type"].as_str().unwrap(), "rep");
+        assert_eq!(json["body"].as_str().unwrap(), "Looks good to me");
+
+        // Add a second comment
+        srv.comment_add(Parameters(CommentAddInput {
+            quote_id: "Q-CMT-001".to_string(),
+            author_type: "system".to_string(),
+            author_id: "system".to_string(),
+            body: "Price validated".to_string(),
+            metadata_json: Some("{\"event\":\"price_check\"}".to_string()),
+        }))
+        .await;
+
+        let list_result = srv
+            .comment_list(Parameters(CommentListInput {
+                quote_id: "Q-CMT-001".to_string(),
+                limit: 20,
+            }))
+            .await;
+        let list_json = parse_output(&list_result);
+        assert_eq!(list_json["count"].as_u64().unwrap(), 2);
+        let items = list_json["items"].as_array().unwrap();
+        assert_eq!(items[0]["body"].as_str().unwrap(), "Looks good to me");
+        assert_eq!(items[1]["body"].as_str().unwrap(), "Price validated");
+    }
+
+    #[tokio::test]
+    async fn comment_add_rejects_empty_body() {
+        let pool = test_db().await;
+        let srv = server(pool);
+        let result = srv
+            .comment_add(Parameters(CommentAddInput {
+                quote_id: "Q-CMT-002".to_string(),
+                author_type: "rep".to_string(),
+                author_id: "rep-bob".to_string(),
+                body: "   ".to_string(),
+                metadata_json: None,
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    #[tokio::test]
+    async fn comment_add_rejects_invalid_author_type() {
+        let pool = test_db().await;
+        let srv = server(pool);
+        let result = srv
+            .comment_add(Parameters(CommentAddInput {
+                quote_id: "Q-CMT-003".to_string(),
+                author_type: "admin".to_string(),
+                author_id: "user-1".to_string(),
+                body: "Hello".to_string(),
+                metadata_json: None,
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    // ── Lock Tool Tests ────────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn quote_lock_and_status_and_unlock() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-LOCK-001").await;
+        let srv = server(pool);
+
+        // Lock
+        let result = srv
+            .quote_lock(Parameters(QuoteLockInput {
+                quote_id: "Q-LOCK-001".to_string(),
+                actor_id: "rep-alice".to_string(),
+                duration_minutes: 15,
+            }))
+            .await;
+        let json = parse_output(&result);
+        assert_eq!(json["locked"].as_bool().unwrap(), true);
+        assert_eq!(json["locked_by"].as_str().unwrap(), "rep-alice");
+
+        // Check status
+        let status = srv
+            .quote_lock_status(Parameters(QuoteLockStatusInput {
+                quote_id: "Q-LOCK-001".to_string(),
+            }))
+            .await;
+        let status_json = parse_output(&status);
+        assert_eq!(status_json["locked"].as_bool().unwrap(), true);
+        assert_eq!(status_json["locked_by"].as_str().unwrap(), "rep-alice");
+
+        // Unlock
+        let unlock = srv
+            .quote_unlock(Parameters(QuoteUnlockInput {
+                quote_id: "Q-LOCK-001".to_string(),
+                actor_id: "rep-alice".to_string(),
+            }))
+            .await;
+        let unlock_json = parse_output(&unlock);
+        assert_eq!(unlock_json["unlocked"].as_bool().unwrap(), true);
+
+        // Verify unlocked
+        let status2 = srv
+            .quote_lock_status(Parameters(QuoteLockStatusInput {
+                quote_id: "Q-LOCK-001".to_string(),
+            }))
+            .await;
+        let status2_json = parse_output(&status2);
+        assert_eq!(status2_json["locked"].as_bool().unwrap(), false);
+    }
+
+    #[tokio::test]
+    async fn quote_lock_conflict() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-LOCK-002").await;
+        let srv = server(pool);
+
+        // First lock succeeds
+        srv.quote_lock(Parameters(QuoteLockInput {
+            quote_id: "Q-LOCK-002".to_string(),
+            actor_id: "rep-alice".to_string(),
+            duration_minutes: 30,
+        }))
+        .await;
+
+        // Second lock by different actor conflicts
+        let conflict = srv
+            .quote_lock(Parameters(QuoteLockInput {
+                quote_id: "Q-LOCK-002".to_string(),
+                actor_id: "rep-bob".to_string(),
+                duration_minutes: 30,
+            }))
+            .await;
+        let conflict_json = parse_output(&conflict);
+        assert_eq!(conflict_json["error"]["code"].as_str().unwrap(), "LOCK_CONFLICT");
+        assert_eq!(
+            conflict_json["error"]["details"]["current_owner"].as_str().unwrap(),
+            "rep-alice"
+        );
+    }
+
+    #[tokio::test]
+    async fn quote_force_unlock_works() {
+        let pool = test_db().await;
+        seed_quote(&pool, "Q-LOCK-003").await;
+        let srv = server(pool);
+
+        srv.quote_lock(Parameters(QuoteLockInput {
+            quote_id: "Q-LOCK-003".to_string(),
+            actor_id: "rep-alice".to_string(),
+            duration_minutes: 30,
+        }))
+        .await;
+
+        let result = srv
+            .quote_force_unlock(Parameters(QuoteForceUnlockInput {
+                quote_id: "Q-LOCK-003".to_string(),
+            }))
+            .await;
+        let json = parse_output(&result);
+        assert_eq!(json["unlocked"].as_bool().unwrap(), true);
+        assert_eq!(json["forced"].as_bool().unwrap(), true);
+    }
+
+    // ── Settings Tool Tests ────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn settings_get_returns_seeded_value() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .settings_get(Parameters(SettingsGetInput { key: "approval_sla_hours".to_string() }))
+            .await;
+        let json = parse_output(&result);
+        assert_eq!(json["key"].as_str().unwrap(), "approval_sla_hours");
+        assert_eq!(json["value"].as_str().unwrap(), "4");
+    }
+
+    #[tokio::test]
+    async fn settings_set_and_get_round_trip() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let set_result = srv
+            .settings_set(Parameters(SettingsSetInput {
+                key: "custom_flag".to_string(),
+                value: "true".to_string(),
+                actor: Some("admin-test".to_string()),
+            }))
+            .await;
+        let set_json = parse_output(&set_result);
+        assert_eq!(set_json["key"].as_str().unwrap(), "custom_flag");
+        assert_eq!(set_json["value"].as_str().unwrap(), "true");
+        assert_eq!(set_json["updated_by"].as_str().unwrap(), "admin-test");
+
+        let get_result =
+            srv.settings_get(Parameters(SettingsGetInput { key: "custom_flag".to_string() })).await;
+        let get_json = parse_output(&get_result);
+        assert_eq!(get_json["value"].as_str().unwrap(), "true");
+    }
+
+    #[tokio::test]
+    async fn settings_list_returns_seeded_entries() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv.settings_list(Parameters(SettingsListInput {})).await;
+        let json = parse_output(&result);
+        let count = json["count"].as_u64().unwrap();
+        // Migration 0037 seeds 8 default settings
+        assert!(count >= 8, "expected at least 8 seeded settings, got {count}");
+    }
+
+    #[tokio::test]
+    async fn settings_get_not_found() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .settings_get(Parameters(SettingsGetInput { key: "nonexistent_key_xyz".to_string() }))
+            .await;
+        assert_error_envelope(&result, "NOT_FOUND");
+    }
+
+    #[tokio::test]
+    async fn settings_set_rejects_empty_key() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .settings_set(Parameters(SettingsSetInput {
+                key: "  ".to_string(),
+                value: "42".to_string(),
+                actor: None,
+            }))
+            .await;
+        assert_error_envelope(&result, "VALIDATION_ERROR");
+    }
+
+    // ── Auto-Comment Tests ─────────────────────────────────────────────
+
+    #[tokio::test]
+    async fn quote_create_generates_auto_comment() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-AC1", "SKU-AC1", "Widget", "10.00").await;
+        let srv = server(pool.clone());
+
+        let result = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "acct-autocomment".to_string(),
+                currency: "USD".to_string(),
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-AC1".to_string(),
+                    quantity: 1,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                term_months: None,
+                start_date: None,
+                deal_id: None,
+                idempotency_key: None,
+                notes: None,
+            }))
+            .await;
+        let json = parse_output(&result);
+        let qid = json["quote_id"].as_str().unwrap();
+
+        // Verify auto-comment exists
+        use quotey_db::repositories::QuoteCommentRepository;
+        let comment_repo = quotey_db::repositories::SqlQuoteCommentRepository::new(pool);
+        let comments = comment_repo.list_by_quote(qid, 10).await.expect("list comments");
+        assert!(
+            comments.iter().any(|c| c.body.contains("Quote created")),
+            "expected auto-comment on quote create, got: {:?}",
+            comments.iter().map(|c| &c.body).collect::<Vec<_>>()
+        );
+    }
+
+    #[tokio::test]
+    async fn quote_price_generates_auto_comment() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-AC2", "SKU-AC2", "Gadget", "50.00").await;
+        let srv = server(pool.clone());
+
+        // Create a quote
+        let create_result = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "acct-price-ac".to_string(),
+                currency: "USD".to_string(),
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-AC2".to_string(),
+                    quantity: 2,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                term_months: None,
+                start_date: None,
+                deal_id: None,
+                idempotency_key: None,
+                notes: None,
+            }))
+            .await;
+        let qid = parse_output(&create_result)["quote_id"].as_str().unwrap().to_string();
+
+        // Price the quote
+        srv.quote_price(Parameters(QuotePriceInput {
+            quote_id: qid.clone(),
+            requested_discount_pct: 0.0,
+        }))
+        .await;
+
+        // Verify pricing auto-comment
+        use quotey_db::repositories::QuoteCommentRepository;
+        let comment_repo = quotey_db::repositories::SqlQuoteCommentRepository::new(pool);
+        let comments = comment_repo.list_by_quote(&qid, 20).await.expect("list comments");
+        assert!(
+            comments.iter().any(|c| c.body.contains("priced at")),
+            "expected pricing auto-comment, got: {:?}",
+            comments.iter().map(|c| &c.body).collect::<Vec<_>>()
+        );
+    }
+
+    // ── Policy Threshold Wiring Test ───────────────────────────────────
+
+    #[tokio::test]
+    async fn quote_price_uses_org_settings_thresholds() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-TH1", "SKU-TH1", "Thing", "100.00").await;
+        let srv = server(pool.clone());
+
+        // Create a quote
+        let create_result = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "acct-thresh".to_string(),
+                currency: "USD".to_string(),
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-TH1".to_string(),
+                    quantity: 10,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                term_months: None,
+                start_date: None,
+                deal_id: None,
+                idempotency_key: None,
+                notes: None,
+            }))
+            .await;
+        let qid = parse_output(&create_result)["quote_id"].as_str().unwrap().to_string();
+
+        // Lower the manager approval threshold to 5% via org_settings
+        // (default is 10% which maps to 10% discount threshold from the seeded 0.10 value)
+        srv.settings_set(Parameters(SettingsSetInput {
+            key: "require_manager_approval_above_discount_pct".to_string(),
+            value: "0.05".to_string(),
+            actor: Some("test".to_string()),
+        }))
+        .await;
+
+        // Price with 8% discount — should now trigger manager approval
+        let price_result = srv
+            .quote_price(Parameters(QuotePriceInput {
+                quote_id: qid.clone(),
+                requested_discount_pct: 8.0,
+            }))
+            .await;
+        let price_json = parse_output(&price_result);
+        assert_eq!(
+            price_json["approval_required"].as_bool().unwrap(),
+            true,
+            "8% discount should trigger approval when threshold is set to 5%"
+        );
     }
 }

@@ -6,6 +6,7 @@
     <meta name="description" content="{{ branding.company_name | default(value='Quotey') }} Customer Portal - View and manage your quotes">
     <meta name="theme-color" content="{{ branding.primary_color | default(value='#2563eb') }}">
     <link rel="manifest" href="/portal/manifest.webmanifest">
+    <link rel="stylesheet" href="/portal/shell.css">
     <title>{{ branding.company_name | default(value="Quotey") }} Portal - Your Quotes</title>
     <style>
         :root {
@@ -602,6 +603,7 @@
     </style>
 </head>
 <body>
+    <div id="pc-shell-root"></div>
     <header class="portal-header">
         <div class="header-content">
             <div class="company-branding">
@@ -786,6 +788,7 @@
         </section>
     </main>
 
+    <script src="/portal/shell.js"></script>
     <script>
         let currentStatusFilter = 'all';
         let currentSearchQuery = '';

@@ -8,6 +8,9 @@ Quotey exposes deterministic OAuth endpoints for CRM providers:
 - `POST /api/v1/crm/sync/batch` (batch fallback replay for outbound sync events)
 - `POST /api/v1/crm/sync/inbound/batch` (batch fallback replay for inbound sync events)
 - `POST /api/v1/crm/events/{event_id}/retry` (manual replay)
+- `GET /api/v1/crm/outbox/tasks` (execution outbox visibility)
+- `POST /api/v1/crm/outbox/tasks/{task_id}/replay` (dead-letter/task replay via correlated event)
+- `POST /api/v1/crm/outbox/recover-stale` (recover stuck running outbox tasks)
 
 Supported providers:
 
@@ -151,3 +154,45 @@ Query params:
 
 - `provider` (optional): `salesforce` or `hubspot`
 - `limit` (optional): max events to replay (`1..200`, default `50`)
+
+## CRM Outbox Visibility + Replay
+
+The CRM execution path writes deterministic queue state into:
+
+- `execution_queue_task`
+- `execution_idempotency_ledger`
+- `execution_queue_transition_audit`
+
+Use `GET /api/v1/crm/outbox/tasks` to inspect replay posture with correlated CRM event context.
+
+Query params:
+
+- `state` (optional): `queued`, `running`, `retryable_failed`, `failed_terminal`, `completed`, or `dead_letter`
+- `provider` (optional): `salesforce` or `hubspot`
+- `quote_id` (optional)
+- `limit` (optional): `1..200` (default `50`)
+
+Use `POST /api/v1/crm/outbox/tasks/{task_id}/replay` for deterministic replay of eligible queue tasks.
+
+Replay invariants:
+
+- Task must be in `queued`, `retryable_failed`, or `failed_terminal`.
+- Task must have a correlated CRM event ID (`correlation_id` from idempotency ledger).
+- Correlated CRM event must still be replayable (`queued|failed|retrying|skipped` and below retry cap).
+
+The outbox replay endpoint delegates to the canonical event retry flow, so payload refresh and Quotey-wins conflict resolution remain unchanged.
+
+### Stale Task Recovery
+
+Use `POST /api/v1/crm/outbox/recover-stale` to recover tasks stuck in `running` past the configured claim timeout.
+
+Query params:
+
+- `limit` (optional): max stale tasks to recover (`1..200`, default `50`)
+
+Recovery behavior:
+
+- Selects stale `running` tasks for `operation_kind = crm.quote_sync`.
+- Applies deterministic failure transition with retry policy (`running -> retryable_failed` or `running -> failed_terminal` when retry budget is exhausted).
+- Persists transition audit + idempotency ledger updates.
+- If a correlated CRM sync event exists, updates event status to match queue state (`retrying` or `failed`).

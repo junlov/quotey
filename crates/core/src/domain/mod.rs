@@ -1,3 +1,4 @@
+pub mod ai_cost;
 pub mod analytics;
 pub mod approval;
 pub mod auth;
@@ -9,6 +10,7 @@ pub mod explanation;
 pub mod negotiation;
 pub mod optimizer;
 pub mod org_settings;
+pub mod outbox;
 pub mod precedent;
 pub mod product;
 pub mod quote;

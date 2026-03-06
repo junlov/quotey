@@ -25,6 +25,7 @@ pub mod flows;
 pub mod ghost;
 pub mod ledger;
 pub mod policy;
+pub mod services;
 pub mod suggestions;
 
 pub use approvals::{

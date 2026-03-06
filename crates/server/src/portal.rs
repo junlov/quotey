@@ -595,8 +595,12 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/settings", get(approvals_settings_page))
         .route("/manifest.webmanifest", get(portal_manifest))
         .route("/sw.js", get(portal_service_worker))
+        .route("/shell.js", get(portal_shell_script))
+        .route("/shell.css", get(portal_shell_stylesheet))
         .route("/portal/manifest.webmanifest", get(portal_manifest))
         .route("/portal/sw.js", get(portal_service_worker))
+        .route("/portal/shell.js", get(portal_shell_script))
+        .route("/portal/shell.css", get(portal_shell_stylesheet))
         // JSON API routes
         .route("/quote/{token}/approve", post(approve_quote))
         .route("/quote/{token}/reject", post(reject_quote))
@@ -655,7 +659,9 @@ fn normalize_status_filter(raw_status: Option<&str>) -> Option<Vec<String>> {
     match normalized.as_deref() {
         None | Some("") | Some("all") => None,
         Some("pending") => Some(INDEX_PENDING_STATUSES.iter().map(ToString::to_string).collect()),
-        Some("declined") => Some(vec!["rejected".to_string(), "declined".to_string()]),
+        Some("declined") | Some("rejected") => {
+            Some(vec!["rejected".to_string(), "declined".to_string()])
+        }
         Some("sent") => Some(vec!["sent".to_string()]),
         Some("approved") => Some(vec!["approved".to_string()]),
         Some("expired") => Some(vec!["expired".to_string()]),
@@ -666,6 +672,7 @@ fn normalize_status_filter(raw_status: Option<&str>) -> Option<Vec<String>> {
 fn selected_status(raw_status: Option<&str>) -> String {
     let normalized = raw_status.map(|value| value.trim().to_ascii_lowercase());
     match normalized.as_deref() {
+        Some("rejected") => "declined".to_string(),
         Some(value) if !value.is_empty() => value.to_string(),
         _ => "all".to_string(),
     }
@@ -1424,10 +1431,14 @@ async fn portal_index_page(
     let search_pattern =
         if search_pattern.is_empty() { None } else { Some(format!("%{}%", search_pattern)) };
 
-    let now = Utc::now().to_rfc3339();
+    let now_utc = Utc::now();
+    let now = now_utc.to_rfc3339();
     let mut query_builder = QueryBuilder::new(
         r#"
         SELECT q.id, q.status, q.created_at, q.valid_until,
+            q.created_by, q.created_by_sales_rep_id,
+            q.locked_by, q.lock_expires_at,
+            sr.name AS sales_rep_name, sr.role AS sales_rep_role,
             COALESCE(SUM(
                 COALESCE(ql.subtotal, COALESCE(ql.unit_price, 0.0) * COALESCE(ql.quantity, 0))
                 * (1.0 - (MAX(0.0, MIN(COALESCE(ql.discount_pct, 0.0), 100.0)) / 100.0))
@@ -1447,6 +1458,7 @@ async fn portal_index_page(
             ) AS token
         FROM quote q
         LEFT JOIN quote_line ql ON ql.quote_id = q.id
+        LEFT JOIN sales_rep sr ON sr.id = q.created_by_sales_rep_id
         "#,
     );
     query_builder.push(" WHERE 1=1");
@@ -1466,6 +1478,8 @@ async fn portal_index_page(
         query_builder.push(" OR LOWER(q.account_id) LIKE ");
         query_builder.push_bind(pattern.clone());
         query_builder.push(" OR LOWER(q.created_by) LIKE ");
+        query_builder.push_bind(pattern.clone());
+        query_builder.push(" OR LOWER(COALESCE(sr.name, '')) LIKE ");
         query_builder.push_bind(pattern);
         query_builder.push(")");
     }
@@ -1566,6 +1580,57 @@ async fn portal_index_page(
             let quote_id: String = row.try_get("id").unwrap_or_default();
             let status = canonical_quote_status(&row.try_get::<String, _>("status").unwrap_or_default());
             let link_token: Option<String> = row.try_get::<Option<String>, _>("token").unwrap_or(None);
+            let created_by = row.try_get::<String, _>("created_by").unwrap_or_default();
+            let created_by = created_by.trim().to_string();
+            let rep_name = row
+                .try_get::<Option<String>, _>("sales_rep_name")
+                .unwrap_or(None)
+                .and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+                });
+            let rep_role = row
+                .try_get::<Option<String>, _>("sales_rep_role")
+                .unwrap_or(None)
+                .and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+                });
+            let owner_display = rep_name
+                .clone()
+                .or_else(|| if created_by.is_empty() { None } else { Some(created_by.clone()) })
+                .unwrap_or_else(|| "Unassigned".to_string());
+
+            let lock_owner = row
+                .try_get::<Option<String>, _>("locked_by")
+                .unwrap_or(None)
+                .and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+                });
+            let lock_expires_at = row
+                .try_get::<Option<String>, _>("lock_expires_at")
+                .unwrap_or(None)
+                .and_then(|value| {
+                    let trimmed = value.trim();
+                    if trimmed.is_empty() { None } else { Some(trimmed.to_string()) }
+                });
+            let lock_is_active = match (&lock_owner, &lock_expires_at) {
+                (Some(_), Some(expires_at)) => chrono::DateTime::parse_from_rfc3339(expires_at)
+                    .map(|timestamp| timestamp.with_timezone(&Utc) > now_utc)
+                    .unwrap_or(true),
+                (Some(_), None) => true,
+                _ => false,
+            };
+            let lock_signal = if lock_is_active {
+                match (&lock_owner, &lock_expires_at) {
+                    (Some(owner), Some(expires_at)) => format!("Locked by {owner} until {expires_at}"),
+                    (Some(owner), None) => format!("Locked by {owner}"),
+                    _ => "Locked".to_string(),
+                }
+            } else {
+                "Available for collaboration".to_string()
+            };
 
             // Only show quotes that have a valid portal link token — never expose raw quote IDs
             let token = link_token?;
@@ -1578,6 +1643,13 @@ async fn portal_index_page(
                 "status": status,
                 "total_amount": format_price(row.try_get::<f64, _>("computed_total").unwrap_or(0.0)),
                 "total_amount_raw": row.try_get::<f64, _>("computed_total").unwrap_or(0.0),
+                "owner_display": owner_display,
+                "owner_role": rep_role,
+                "owner_signal": if rep_name.is_some() { "rep-profile" } else if created_by.is_empty() { "unassigned" } else { "legacy-actor" },
+                "lock_state": if lock_is_active { "locked" } else { "available" },
+                "lock_signal": lock_signal,
+                "lock_owner": lock_owner,
+                "lock_expires_at": lock_expires_at,
             }))
         })
         .collect();
@@ -2058,6 +2130,20 @@ async fn portal_service_worker() -> impl IntoResponse {
     (
         [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
         include_str!("../../../templates/portal/sw.js"),
+    )
+}
+
+async fn portal_shell_script() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        include_str!("../../../templates/portal/shell.js"),
+    )
+}
+
+async fn portal_shell_stylesheet() -> impl IntoResponse {
+    (
+        [(header::CONTENT_TYPE, "text/css; charset=utf-8")],
+        include_str!("../../../templates/portal/shell.css"),
     )
 }
 
@@ -4323,6 +4409,7 @@ mod tests {
         assert_portal_security_headers(comments_response.headers());
 
         let manifest_response = app
+            .clone()
             .oneshot(
                 Request::builder()
                     .uri("/manifest.webmanifest")
@@ -4333,6 +4420,31 @@ mod tests {
             .expect("manifest response");
         assert_eq!(manifest_response.status(), StatusCode::OK);
         assert_portal_security_headers(manifest_response.headers());
+
+        let shell_js_response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .uri("/portal/shell.js")
+                    .body(Body::empty())
+                    .expect("shell.js request"),
+            )
+            .await
+            .expect("shell.js response");
+        assert_eq!(shell_js_response.status(), StatusCode::OK);
+        assert_portal_security_headers(shell_js_response.headers());
+
+        let shell_css_response = app
+            .oneshot(
+                Request::builder()
+                    .uri("/portal/shell.css")
+                    .body(Body::empty())
+                    .expect("shell.css request"),
+            )
+            .await
+            .expect("shell.css response");
+        assert_eq!(shell_css_response.status(), StatusCode::OK);
+        assert_portal_security_headers(shell_css_response.headers());
     }
 
     #[tokio::test]

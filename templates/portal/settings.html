@@ -3,6 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <link rel="stylesheet" href="/portal/shell.css">
     <title>{{ branding.company_name | default(value="Quotey") }} Approvals Settings</title>
     <style>
         :root {
@@ -263,6 +264,7 @@
     </style>
 </head>
 <body>
+    <div id="pc-shell-root"></div>
     <main class="shell" aria-labelledby="settings-title">
         <p class="kicker">Mobile Approvals</p>
         <h1 id="settings-title">Notification Settings</h1>
@@ -401,6 +403,7 @@
             <a class="btn secondary" href="/portal">Open Full Portal</a>
         </nav>
     </main>
+    <script src="/portal/shell.js"></script>
     <script>
         const APPROVER_NAME_KEY = 'quotey.portal.approver_name';
         const APPROVER_EMAIL_KEY = 'quotey.portal.approver_email';
