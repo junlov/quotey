@@ -1,0 +1,99 @@
+version: '3.8'
+
+# Headless Quotey deployment for AI agent integration
+# No Slack required - pure CLI/MCP access
+
+services:
+  # MCP Server for AI agent tool calling
+  quotey-mcp:
+    build: .
+    container_name: quotey-mcp
+    restart: unless-stopped
+    environment:
+      - QUOTEY_DATABASE_URL=sqlite:///data/quotey.db
+      - QUOTEY_LLM_PROVIDER=ollama
+      - QUOTEY_LLM_BASE_URL=http://ollama:11434
+      - QUOTEY_LLM_MODEL=llama3.1
+      - RUST_LOG=info
+      # Optional: Enable API key auth
+      # - MCP_API_KEY=${MCP_API_KEY}
+      # - MCP_DEFAULT_REQUESTS_PER_MINUTE=120
+    volumes:
+      - quotey-data:/data
+      - ./config/quotey.headless.toml:/app/config/quotey.toml:ro
+    ports:
+      - "${MCP_PORT:-3001}:3001"  # MCP SSE transport
+    command:
+      - quotey-mcp
+      - --transport=sse
+      - --port=3001
+      - --host=0.0.0.0
+    depends_on:
+      - ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3001/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Main Quotey server (health checks, optional REST API)
+  quotey-api:
+    build: .
+    container_name: quotey-api
+    restart: unless-stopped
+    environment:
+      - QUOTEY_CONFIG=/app/config/quotey.toml
+      - QUOTEY_DATABASE_URL=sqlite:///data/quotey.db
+      - QUOTEY_LLM_PROVIDER=ollama
+      - QUOTEY_LLM_BASE_URL=http://ollama:11434
+      - RUST_LOG=info
+    volumes:
+      - quotey-data:/data
+      - ./config/quotey.headless.toml:/app/config/quotey.toml:ro
+    ports:
+      - "${API_PORT:-8080}:8080"
+    command: ["quotey-server"]
+    depends_on:
+      - ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  # Ollama LLM server (local, private)
+  ollama:
+    image: ollama/ollama:latest
+    container_name: quotey-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    # Uncomment for NVIDIA GPU support:
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+  # Optional: Run migrations on startup
+  quotey-migrate:
+    build: .
+    container_name: quotey-migrate
+    environment:
+      - QUOTEY_DATABASE_URL=sqlite:///data/quotey.db
+    volumes:
+      - quotey-data:/data
+    command: ["quotey", "migrate"]
+    depends_on:
+      - ollama
+    restart: "no"
+
+volumes:
+  quotey-data:
+    driver: local
+  ollama-data:
+    driver: local

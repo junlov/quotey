@@ -1,5 +1,6 @@
 pub mod analytics;
 pub mod approval;
+pub mod auth;
 pub mod autopsy;
 pub mod customer;
 pub mod dialogue;

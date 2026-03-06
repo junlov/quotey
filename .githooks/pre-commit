@@ -1,6 +1,6 @@
 #!/bin/bash
 # Quotey pre-commit hook
-# Runs fast quality checks before each commit
+# Runs: large-file guard, binary guard, formatting, clippy, bug scanner
 
 set -euo pipefail
 
@@ -12,15 +12,55 @@ export TMPDIR="${QUOTEY_TMPDIR_OVERRIDE:-$ROOT_DIR/.tmp}"
 export CARGO_TARGET_DIR="${QUOTEY_CARGO_TARGET_DIR_OVERRIDE:-$ROOT_DIR/.tmp-target}"
 mkdir -p "$TMPDIR" "$CARGO_TARGET_DIR"
 
+# ── Large-file guard ─────────────────────────────────────────────
+# Block any staged file over threshold (default 2 MB)
+MAX_BYTES="${GIT_GUARDRAILS_MAX_BYTES:-2097152}"
+
+large_files=()
+while IFS= read -r -d '' file; do
+  [ -f "$file" ] || continue
+  size=$(wc -c < "$file" 2>/dev/null || echo 0)
+  if [ "$size" -gt "$MAX_BYTES" ]; then
+    large_files+=("$file ($(( size / 1024 ))KB)")
+  fi
+done < <(git diff --cached --name-only -z --diff-filter=d)
+
+if [ ${#large_files[@]} -gt 0 ]; then
+  echo "[pre-commit] BLOCKED: staged files exceed $(( MAX_BYTES / 1048576 )) MB limit:"
+  printf '   %s\n' "${large_files[@]}"
+  echo ""
+  echo "   Add to .gitignore or use: git reset HEAD <file>"
+  echo "   Override with: git commit --no-verify"
+  exit 1
+fi
+
+# ── Binary extension guard ───────────────────────────────────────
+BLOCKED_EXTS="\.so$|\.dylib$|\.dll$|\.exe$|\.a$|\.rlib$|\.rmeta$|\.o$|\.dSYM"
+
+blocked=()
+while IFS= read -r -d '' file; do
+  if echo "$file" | grep -qE "$BLOCKED_EXTS"; then
+    blocked+=("$file")
+  fi
+done < <(git diff --cached --name-only -z --diff-filter=d)
+
+if [ ${#blocked[@]} -gt 0 ]; then
+  echo "[pre-commit] BLOCKED: binary/compiled files staged for commit:"
+  printf '   %s\n' "${blocked[@]}"
+  echo ""
+  echo "   These file types should never be in git."
+  echo "   Override with: git commit --no-verify"
+  exit 1
+fi
+
 echo "[pre-commit] Running quality checks..."
 
-# Check for required tools
+# ── Formatting ───────────────────────────────────────────────────
 if ! command -v cargo >/dev/null 2>&1; then
     echo "[pre-commit] ERROR: cargo is not installed"
     exit 1
 fi
 
-# Run fast checks
 echo "[pre-commit] Checking formatting..."
 if ! cargo fmt --all -- --check; then
     echo "[pre-commit] ERROR: formatting issues run 'cargo fmt --all' to fix"
@@ -28,7 +68,7 @@ if ! cargo fmt --all -- --check; then
 fi
 echo "[pre-commit] Formatting OK"
 
-# Clippy can be slow, so make it optional via env var
+# ── Clippy ───────────────────────────────────────────────────────
 if [[ "${QUOTEY_PRE_COMMIT_CLIPPY:-1}" == "1" ]]; then
     echo "[pre-commit] Running clippy..."
     if command -v cargo lint >/dev/null 2>&1; then
@@ -37,6 +77,27 @@ if [[ "${QUOTEY_PRE_COMMIT_CLIPPY:-1}" == "1" ]]; then
         cargo clippy --workspace --all-targets -- -D warnings || exit 1
     fi
     echo "[pre-commit] Clippy OK"
+fi
+
+# ── Bug scanner (optional) ───────────────────────────────────────
+find_ubs() {
+  if command -v ubs >/dev/null 2>&1; then
+    command -v ubs
+  elif [ -x "${HOME}/.local/bin/ubs" ]; then
+    echo "${HOME}/.local/bin/ubs"
+  elif [ -x "/usr/local/bin/ubs" ]; then
+    echo "/usr/local/bin/ubs"
+  else
+    return 1
+  fi
+}
+
+if UBS_CMD="$(find_ubs)"; then
+  echo "[pre-commit] Running bug scanner..."
+  if ! "$UBS_CMD" . --fail-on-warning 2>&1 | tail -30; then
+    echo "[pre-commit] Bug scanner found issues. Fix or use: git commit --no-verify"
+    exit 1
+  fi
 fi
 
 echo "[pre-commit] All checks passed!"

@@ -2,7 +2,7 @@
 //!
 //! Provides API key authentication and rate limiting for MCP requests.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, VecDeque};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::RwLock;
@@ -27,31 +27,40 @@ pub struct ApiKeyEntry {
 #[derive(Debug)]
 struct RateLimitEntry {
     /// Request timestamps (within the current window)
-    requests: Vec<Instant>,
+    requests: VecDeque<Instant>,
 }
 
 impl RateLimitEntry {
     fn new() -> Self {
-        Self { requests: Vec::new() }
+        Self { requests: VecDeque::new() }
+    }
+
+    /// Drop timestamps that are outside the current rate-limit window.
+    fn prune_expired(&mut self, now: Instant, window: Duration) {
+        let window_start = now - window;
+        while let Some(oldest) = self.requests.front() {
+            if *oldest <= window_start {
+                self.requests.pop_front();
+            } else {
+                break;
+            }
+        }
     }
 
     /// Clean old requests outside the window and check/add new request
     /// Returns Ok(count) if request is allowed, Err(retry_after_secs) if rate limited
     fn record_request(&mut self, window: Duration, limit: usize) -> Result<usize, u64> {
         let now = Instant::now();
-        let window_start = now - window;
-
-        // Remove requests outside the window
-        self.requests.retain(|&t| t > window_start);
+        self.prune_expired(now, window);
 
         // Check limit BEFORE adding (prevents off-by-one error)
         if self.requests.len() >= limit {
             // Calculate retry after time
             let retry_after = self
                 .requests
-                .first()
+                .front()
                 .map(|oldest| {
-                    let elapsed = oldest.elapsed();
+                    let elapsed = now.saturating_duration_since(*oldest);
                     window.saturating_sub(elapsed).as_secs().max(1)
                 })
                 .unwrap_or(window.as_secs().max(1));
@@ -59,7 +68,7 @@ impl RateLimitEntry {
         }
 
         // Add new request
-        self.requests.push(now);
+        self.requests.push_back(now);
         Ok(self.requests.len())
     }
 
@@ -550,5 +559,22 @@ mod tests {
         assert_eq!(key1.len(), 32);
         assert_eq!(key2.len(), 32);
         assert_ne!(key1, key2); // Should be random
+    }
+
+    #[test]
+    fn test_rate_limit_entry_prunes_expired_requests_from_front() {
+        let mut entry = RateLimitEntry::new();
+        let now = Instant::now();
+        let window = Duration::from_secs(60);
+
+        entry.requests.push_back(now - Duration::from_secs(120));
+        entry.requests.push_back(now - Duration::from_secs(61));
+        entry.requests.push_back(now - Duration::from_secs(5));
+
+        entry.prune_expired(now, window);
+
+        assert_eq!(entry.requests.len(), 1);
+        let remaining = entry.requests.front().expect("remaining request");
+        assert!(*remaining > now - window);
     }
 }

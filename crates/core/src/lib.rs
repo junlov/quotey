@@ -71,6 +71,9 @@ pub use domain::analytics::{
     AnalyticsContractError, AnalyticsQuerySpec, DimensionKind, MetricKind, ANALYTICS_SCHEMA_VERSION,
 };
 pub use domain::approval::{ApprovalId, ApprovalRequest, ApprovalStatus};
+pub use domain::auth::{
+    AuthChannel, AuthContext, AuthError, AuthErrorCode, AuthMethod, AuthPrincipal, AuthStrength,
+};
 pub use domain::autopsy::*;
 pub use domain::execution::{
     ExecutionTask, ExecutionTaskId, ExecutionTaskState, ExecutionTransitionEvent,

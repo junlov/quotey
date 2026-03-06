@@ -35,6 +35,7 @@ use axum::{
     Json, Router,
 };
 use chrono::{Datelike, Duration, Timelike, Utc};
+use quotey_core::{AuthChannel, AuthContext, AuthMethod, AuthPrincipal, AuthStrength};
 use quotey_db::DbPool;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row};
@@ -196,6 +197,63 @@ impl ApprovalActionAuth {
             Self::Biometric => "biometric",
             Self::Password => "password",
         }
+    }
+
+    fn auth_method(self) -> AuthMethod {
+        match self {
+            Self::None => AuthMethod::None,
+            Self::Biometric => AuthMethod::WebAuthn,
+            Self::Password => AuthMethod::Password,
+        }
+    }
+
+    fn auth_strength(self) -> AuthStrength {
+        match self {
+            Self::None => AuthStrength::Anonymous,
+            Self::Biometric => AuthStrength::PossessionAndBiometric,
+            Self::Password => AuthStrength::PossessionAndKnowledge,
+        }
+    }
+}
+
+fn portal_actor_id_for_email(email: &str) -> String {
+    let normalized = email.trim().to_ascii_lowercase();
+    if normalized.is_empty() {
+        "portal:customer".to_string()
+    } else {
+        format!("portal:{normalized}")
+    }
+}
+
+fn portal_approval_auth_context(
+    auth: ApprovalActionAuth,
+    approver_name: &str,
+    approver_email: &str,
+) -> AuthContext {
+    AuthContext {
+        channel: AuthChannel::Portal,
+        method: auth.auth_method(),
+        strength: auth.auth_strength(),
+        principal: AuthPrincipal {
+            actor_id: portal_actor_id_for_email(approver_email),
+            display_name: Some(approver_name.trim().to_string()).filter(|value| !value.is_empty()),
+        },
+        token_fingerprint: None,
+        session_id: None,
+    }
+}
+
+fn portal_rejection_auth_context(auth: ApprovalActionAuth) -> AuthContext {
+    AuthContext {
+        channel: AuthChannel::Portal,
+        method: auth.auth_method(),
+        strength: auth.auth_strength(),
+        principal: AuthPrincipal {
+            actor_id: "portal:customer".to_string(),
+            display_name: Some("Portal Customer".to_string()),
+        },
+        token_fingerprint: None,
+        session_id: None,
     }
 }
 
@@ -1417,6 +1475,57 @@ async fn portal_index_page(
             .await
             .unwrap_or(0);
 
+    // Fetch pending quotes for "Pending Approvals" section (limit 6, filtered on backend)
+    let pending_quote_rows = sqlx::query(
+        r#"
+        SELECT q.id, q.status, q.created_at, q.valid_until,
+            COALESCE(SUM(
+                COALESCE(ql.subtotal, COALESCE(ql.unit_price, 0.0) * COALESCE(ql.quantity, 0))
+                * (1.0 - (MAX(0.0, MIN(COALESCE(ql.discount_pct, 0.0), 100.0)) / 100.0))
+            ), 0.0) AS computed_total,
+            (
+                SELECT pl.token
+                FROM portal_link pl
+                WHERE pl.quote_id = q.id
+                  AND pl.revoked = 0
+                  AND pl.expires_at > ?
+                ORDER BY pl.created_at DESC
+                LIMIT 1
+            ) AS token
+        FROM quote q
+        LEFT JOIN quote_line ql ON ql.quote_id = q.id
+        WHERE q.status IN ('draft', 'pending', 'sent')
+        GROUP BY q.id
+        ORDER BY q.created_at DESC
+        LIMIT 6
+        "#,
+    )
+    .bind(&now)
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(redacted_db_error)?;
+
+    // Build pending quotes list
+    let pending_quotes: Vec<serde_json::Value> = pending_quote_rows
+        .iter()
+        .filter_map(|row: &sqlx::sqlite::SqliteRow| {
+            let quote_id: String = row.try_get("id").unwrap_or_default();
+            let status = canonical_quote_status(&row.try_get::<String, _>("status").unwrap_or_default());
+            let link_token: Option<String> = row.try_get::<Option<String>, _>("token").unwrap_or(None);
+
+            let token = link_token?;
+
+            Some(serde_json::json!({
+                "token": token,
+                "quote_id": quote_id,
+                "created_at": row.try_get::<String, _>("created_at").unwrap_or_default(),
+                "valid_until": row.try_get::<String, _>("valid_until").unwrap_or_default(),
+                "status": status,
+                "total_amount": format_price(row.try_get::<f64, _>("computed_total").unwrap_or(0.0)),
+            }))
+        })
+        .collect();
+
     // Build quotes list — only include quotes with valid portal link tokens
     let quotes: Vec<serde_json::Value> = quote_rows
         .iter()
@@ -1462,6 +1571,7 @@ async fn portal_index_page(
     );
 
     context.insert("quotes", &quotes);
+    context.insert("pending_quotes", &pending_quotes);
     context.insert("status_filter", &selected_filter);
     context.insert("search", &selected_search_value);
 
@@ -2051,6 +2161,7 @@ async fn approve_quote(
             )?,
             None => ApprovalActionAuth::None,
         };
+    let auth_context = portal_approval_auth_context(auth_method, approver_name, approver_email);
 
     let now = Utc::now();
     let quote_version: i64 = sqlx::query_scalar("SELECT version FROM quote WHERE id = ?")
@@ -2074,6 +2185,7 @@ async fn approve_quote(
             .map(str::trim)
             .is_some_and(|value| !value.is_empty()),
         "fallback_password_used": matches!(auth_method, ApprovalActionAuth::Password),
+        "auth_context": auth_context,
     });
     let approval_id = format!("PAPR-{}", &uuid_v4()[..12]);
 
@@ -2103,7 +2215,7 @@ async fn approve_quote(
         .map_err(db_error)?;
 
     // Record audit event
-    record_audit_event(
+    record_audit_event_with_auth(
         &state.db_pool,
         Some(&quote_id),
         "portal.approval",
@@ -2115,15 +2227,17 @@ async fn approve_quote(
             requester_ip,
             auth_method.as_str()
         ),
+        Some(&auth_context),
     )
     .await;
 
     // Funnel telemetry: approval action
+    let funnel_actor = auth_context.principal.actor_id.clone();
     record_funnel_event(
         &state.db_pool,
         quotey_core::audit::funnel::APPROVAL_ACTION,
         Some(&quote_id),
-        &format!("portal:{approver_email}"),
+        &funnel_actor,
         "success",
         &[("action", "approved")],
     )
@@ -2172,6 +2286,7 @@ async fn reject_quote(
             )?,
             None => ApprovalActionAuth::None,
         };
+    let auth_context = portal_rejection_auth_context(auth_method);
 
     let now = Utc::now();
     let rejection_id = format!("PREJ-{}", &uuid_v4()[..12]);
@@ -2201,20 +2316,22 @@ async fn reject_quote(
         .map_err(db_error)?;
 
     // Record audit event
-    record_audit_event(
+    record_audit_event_with_auth(
         &state.db_pool,
         Some(&quote_id),
         "portal.rejection",
         &format!("Quote declined via web portal: {reason} [auth={}]", auth_method.as_str()),
+        Some(&auth_context),
     )
     .await;
 
     // Funnel telemetry: rejection action
+    let funnel_actor = auth_context.principal.actor_id.clone();
     record_funnel_event(
         &state.db_pool,
         quotey_core::audit::funnel::APPROVAL_ACTION,
         Some(&quote_id),
-        "portal:customer",
+        &funnel_actor,
         "rejected",
         &[("action", "rejected")],
     )
@@ -3623,23 +3740,55 @@ async fn resolve_quote_by_token(
 /// Record an audit event for traceability.
 ///
 /// Uses the existing `audit_event` schema from migration 0001:
-///   id, timestamp, actor, actor_type, quote_id, event_type, event_category, payload_json
+///   id, timestamp, actor, actor_type, quote_id, event_type, event_category, payload_json, metadata_json
 async fn record_audit_event(pool: &DbPool, quote_id: Option<&str>, event_type: &str, detail: &str) {
+    record_audit_event_with_auth(pool, quote_id, event_type, detail, None).await;
+}
+
+async fn record_audit_event_with_auth(
+    pool: &DbPool,
+    quote_id: Option<&str>,
+    event_type: &str,
+    detail: &str,
+    auth_context: Option<&AuthContext>,
+) {
     let now = Utc::now();
     let audit_id = format!("PAUD-{}", &uuid_v4()[..12]);
 
-    let payload = serde_json::json!({ "detail": detail }).to_string();
+    let payload = match auth_context {
+        Some(context) => serde_json::json!({ "detail": detail, "auth": context }).to_string(),
+        None => serde_json::json!({ "detail": detail }).to_string(),
+    };
+    let metadata_json = auth_context.map(|context| {
+        serde_json::json!({
+            "auth_channel": context.channel,
+            "auth_method": context.method,
+            "auth_strength": context.strength,
+            "auth_principal": context.principal.actor_id,
+            "auth_display_name": context.principal.display_name,
+            "token_fingerprint": context.token_fingerprint,
+            "session_id": context.session_id,
+        })
+        .to_string()
+    });
+    let actor = auth_context
+        .map(|context| context.principal.actor_id.clone())
+        .unwrap_or_else(|| "portal".to_string());
+    let actor_type = if auth_context.is_some() { "human" } else { "system" };
 
     let result = sqlx::query(
         "INSERT INTO audit_event
-            (id, timestamp, actor, actor_type, quote_id, event_type, event_category, payload_json)
-         VALUES (?, ?, 'portal', 'system', ?, ?, 'portal', ?)",
+            (id, timestamp, actor, actor_type, quote_id, event_type, event_category, payload_json, metadata_json)
+         VALUES (?, ?, ?, ?, ?, ?, 'portal', ?, ?)",
     )
     .bind(&audit_id)
     .bind(now.to_rfc3339())
+    .bind(&actor)
+    .bind(actor_type)
     .bind(quote_id)
     .bind(event_type)
     .bind(&payload)
+    .bind(metadata_json)
     .execute(pool)
     .await;
 
@@ -4132,7 +4281,19 @@ mod tests {
         .fetch_one(&pool)
         .await
         .expect("fetch audit");
-        assert!(audit_payload.contains("approved"));
+        let audit_payload_json: serde_json::Value =
+            serde_json::from_str(&audit_payload).expect("audit payload json");
+        assert_eq!(audit_payload_json["auth"]["channel"], serde_json::json!("portal"));
+        assert_eq!(audit_payload_json["auth"]["method"], serde_json::json!("password"));
+        assert_eq!(
+            audit_payload_json["auth"]["strength"],
+            serde_json::json!("possession_and_knowledge")
+        );
+        assert_eq!(
+            audit_payload_json["auth"]["principal"]["actor_id"],
+            serde_json::json!("portal:jane@acme.com")
+        );
+        assert!(audit_payload_json["detail"].as_str().unwrap_or_default().contains("approved"));
 
         // Verify captured approval metadata includes required fields
         let justification: String = sqlx::query_scalar(
@@ -4147,6 +4308,16 @@ mod tests {
         assert_eq!(metadata["quote_version"], serde_json::json!(1));
         assert_eq!(metadata["requester_ip"], serde_json::json!("unknown"));
         assert_eq!(metadata["approver_email"], serde_json::json!("jane@acme.com"));
+        assert_eq!(metadata["auth_context"]["channel"], serde_json::json!("portal"));
+        assert_eq!(metadata["auth_context"]["method"], serde_json::json!("password"));
+        assert_eq!(
+            metadata["auth_context"]["strength"],
+            serde_json::json!("possession_and_knowledge")
+        );
+        assert_eq!(
+            metadata["auth_context"]["principal"]["actor_id"],
+            serde_json::json!("portal:jane@acme.com")
+        );
     }
 
     #[tokio::test]
@@ -4285,6 +4456,16 @@ mod tests {
         assert_eq!(metadata["auth_method"], serde_json::json!("biometric"));
         assert_eq!(metadata["biometric_assertion_present"], serde_json::json!(true));
         assert_eq!(metadata["fallback_password_used"], serde_json::json!(false));
+        assert_eq!(metadata["auth_context"]["channel"], serde_json::json!("portal"));
+        assert_eq!(metadata["auth_context"]["method"], serde_json::json!("web_authn"));
+        assert_eq!(
+            metadata["auth_context"]["strength"],
+            serde_json::json!("possession_and_biometric")
+        );
+        assert_eq!(
+            metadata["auth_context"]["principal"]["actor_id"],
+            serde_json::json!("portal:jane@acme.com")
+        );
     }
 
     #[tokio::test]
@@ -4323,6 +4504,35 @@ mod tests {
         .await
         .expect("fetch rejection");
         assert_eq!(rejection_status, "rejected");
+
+        let (audit_payload, audit_metadata): (String, Option<String>) = sqlx::query_as(
+            "SELECT payload_json, metadata_json
+             FROM audit_event
+             WHERE quote_id = ? AND event_type = 'portal.rejection'
+             ORDER BY timestamp DESC
+             LIMIT 1",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch rejection audit");
+
+        let payload_json: serde_json::Value =
+            serde_json::from_str(&audit_payload).expect("rejection payload json");
+        assert_eq!(payload_json["auth"]["channel"], serde_json::json!("portal"));
+        assert_eq!(payload_json["auth"]["method"], serde_json::json!("password"));
+        assert_eq!(
+            payload_json["auth"]["principal"]["actor_id"],
+            serde_json::json!("portal:customer")
+        );
+
+        let metadata_json: serde_json::Value =
+            serde_json::from_str(&audit_metadata.expect("rejection metadata"))
+                .expect("rejection metadata json");
+        assert_eq!(metadata_json["auth_channel"], serde_json::json!("portal"));
+        assert_eq!(metadata_json["auth_method"], serde_json::json!("password"));
+        assert_eq!(metadata_json["auth_strength"], serde_json::json!("possession_and_knowledge"));
+        assert_eq!(metadata_json["auth_principal"], serde_json::json!("portal:customer"));
     }
 
     #[tokio::test]

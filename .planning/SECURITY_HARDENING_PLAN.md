@@ -1,12 +1,117 @@
 # Security & Reliability Hardening Plan
 
-**Document Version:** 1.0  
-**Last Updated:** 2025-03-06  
-**Status:** Draft for Review  
+**Document Version:** 1.1  
+**Last Updated:** 2026-03-06  
+**Status:** Draft for Review (includes unified auth addendum)  
 
 ## Executive Summary
 
 This plan addresses 20+ security and reliability issues identified through comprehensive code review of the Quotey CPQ system. Issues span memory exhaustion vectors, integer overflow risks, DoS vulnerabilities, and architectural gaps.
+
+---
+
+## 0. Unified Authentication System Addendum (bd-s7h / quotey-099-2)
+
+### 0.1 Scope
+
+This addendum defines a single authentication model across:
+
+1. MCP agent calls (`quotey-mcp`)
+2. Portal quote links + approval actions (`quotey-server`)
+3. Mobile/PWA approval path (currently routed through portal endpoints)
+
+Out of scope for this slice:
+
+1. Replacing Slack transport authentication (Socket Mode controls remain)
+2. Full WebAuthn challenge verification backend (tracked as follow-up implementation)
+
+### 0.2 Current State (Code-Backed)
+
+| Surface | Current Credential | Validation Path | Current Gap |
+|---|---|---|---|
+| MCP | API key in `_meta` (`api_key`, `x-api-key`, `authorization`) | `crates/mcp/src/server.rs` + `crates/mcp/src/auth.rs` | Error contract differs from portal; key lifecycle is in-memory config only |
+| Portal | `portal_link.token` in URL | `crates/server/src/portal.rs` (`resolve_quote_by_token`) | Link auth not represented as shared auth context |
+| Portal approval | `authMethod` + assertion/password fields | `validate_portal_approval_auth` in `crates/server/src/portal.rs` | Biometric path currently verifies assertion presence, not challenge signature |
+| Mobile/PWA | WebAuthn/local fallback via browser storage | `templates/portal/settings.html`, `templates/portal/approval_detail.html` | Device credential state is local-only and not server-bound |
+| CRM OAuth setup | `crm_oauth_state.state_token` | `migrations/0025_crm_integration.up.sql` | Not yet integrated into shared auth telemetry model |
+
+### 0.3 Canonical Auth Contract
+
+New shared contract is introduced in `crates/core/src/domain/auth.rs`:
+
+1. `AuthChannel` (`slack`, `mcp`, `portal`, `mobile_pwa`, `cli`)
+2. `AuthMethod` (`api_key`, `link_token`, `password`, `webauthn`, `oauth_bearer`)
+3. `AuthStrength` for assurance-aware policy decisions
+4. `AuthContext` + `AuthPrincipal` for deterministic downstream checks
+5. `AuthError` + `AuthErrorCode` with deterministic HTTP mapping
+
+This gives one transport-agnostic shape for auth decisions before policy/approval engines run.
+
+### 0.4 Unified Decision Flow
+
+1. **Extract credential**
+   1. MCP adapter extracts API key aliases from `_meta`.
+   2. Portal adapter extracts link token + optional approval auth payload.
+2. **Authenticate**
+   1. Channel-specific validator verifies credential state (active, not expired, not revoked).
+   2. Validator emits canonical `AuthContext`.
+3. **Authorize**
+   1. Business operation requires minimum `AuthStrength` and scope.
+   2. Authorization result is deterministic and explainable.
+4. **Audit**
+   1. Persist auth metadata with every approval-sensitive event:
+      `auth.channel`, `auth.method`, `auth.strength`, `auth.principal`, `auth.session`.
+5. **Revoke**
+   1. API keys, portal links, and OAuth state all map to a single revocation semantic:
+      revoked credentials must fail with deterministic reason codes.
+
+### 0.5 Unified Error Contract
+
+Authentication failures should converge on this code family:
+
+1. `missing_credential` -> `401`
+2. `invalid_credential` -> `401`
+3. `credential_expired` -> `401` (retryable once renewed)
+4. `credential_revoked` -> `401`
+5. `unauthorized_scope` -> `403`
+6. `unsupported_method` -> `400`
+7. `rate_limited` -> `429` + `retry_after_seconds`
+
+MCP/portal response payloads should include this canonical `code` field so UI, agents, and automation can share retry behavior.
+
+### 0.6 Implementation Slices
+
+#### Slice A (landed in this bead)
+
+1. Added shared auth domain contract in `quotey-core`:
+   - `crates/core/src/domain/auth.rs`
+   - exported via `crates/core/src/domain/mod.rs` and `crates/core/src/lib.rs`
+2. Added deterministic tests for:
+   - assurance tier checks
+   - status-code mapping
+   - retry-after clamping
+
+#### Slice B (next)
+
+1. Adopt `AuthContext` in MCP request handling path.
+2. Emit canonical auth error codes in MCP error data.
+
+#### Slice C (next)
+
+1. Adopt `AuthContext` in portal approve/reject handlers.
+2. Include canonical auth metadata keys in portal audit payloads.
+
+#### Slice D (next)
+
+1. Add server-side WebAuthn challenge/verification endpoint set.
+2. Bind mobile biometric assertions to server-issued challenge nonce.
+
+### 0.7 Non-Negotiable Invariants
+
+1. LLM output never decides authentication or authorization outcomes.
+2. Deterministic validators are sole authority for auth pass/fail.
+3. Approval/finalization operations require explicit authenticated principal.
+4. Every deny/allow outcome is auditable with machine-parsable reason code.
 
 ---
 

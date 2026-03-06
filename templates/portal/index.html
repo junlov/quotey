@@ -663,22 +663,20 @@
             </div>
         </div>
 
-        {% if stats.pending | default(value=0) > 0 %}
+        {% if pending_quotes | length > 0 %}
         <section class="pending-approvals" aria-label="Pending approvals">
             <div class="pending-approvals-header">
                 <h2>Pending Approvals</h2>
                 <span class="section-meta">{{ stats.pending }} waiting for decision</span>
             </div>
             <div class="pending-approvals-grid">
-                {% for quote in quotes %}
-                {% if quote.status == "pending" and loop.index <= 6 %}
+                {% for quote in pending_quotes %}
                 <article class="pending-approval-card">
                     <a href="/quote/{{ quote.token }}" class="quote-link">{{ quote.quote_id }}</a>
                     <div class="amount">{{ quote.total_amount }}</div>
                     <div class="pending-approval-meta">Created {{ quote.created_at }} · Valid until {{ quote.valid_until }}</div>
                     <a href="/quote/{{ quote.token }}" class="btn btn-secondary">View</a>
                 </article>
-                {% endif %}
                 {% endfor %}
             </div>
         </section>

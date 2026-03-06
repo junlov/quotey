@@ -20,6 +20,9 @@ use tokio::process::Command;
 
 use crate::auth::{AuthManager, AuthResult};
 use quotey_core::domain::quote::Quote;
+use quotey_core::{
+    AuthChannel, AuthContext, AuthError, AuthErrorCode, AuthMethod, AuthPrincipal, AuthStrength,
+};
 use quotey_db::repositories::ApprovalRepository;
 
 const MAX_PAGE_LIMIT: u32 = 100;
@@ -354,6 +357,92 @@ fn extract_api_key_from_meta(meta: &rmcp::model::Meta) -> Option<String> {
     None
 }
 
+fn auth_error_from_denial(reason: &str, retry_after: Option<u32>) -> AuthError {
+    if let Some(retry_after_seconds) = retry_after {
+        return AuthError::new(AuthErrorCode::RateLimited, reason.to_string())
+            .with_retry_after(retry_after_seconds);
+    }
+
+    let code = match reason {
+        "API key required" => AuthErrorCode::MissingCredential,
+        "API key deactivated" => AuthErrorCode::CredentialRevoked,
+        "Invalid API key" => AuthErrorCode::InvalidCredential,
+        _ => AuthErrorCode::InvalidCredential,
+    };
+    AuthError::new(code, reason.to_string())
+}
+
+fn auth_context_for_allowed_mcp_call(
+    auth_result: &AuthResult,
+    presented_key: Option<&str>,
+) -> AuthContext {
+    match auth_result {
+        AuthResult::Allowed { key_name, .. } => {
+            let is_no_auth_anonymous = key_name == "anonymous";
+            if is_no_auth_anonymous {
+                return AuthContext {
+                    channel: AuthChannel::Mcp,
+                    method: AuthMethod::None,
+                    strength: AuthStrength::Anonymous,
+                    principal: AuthPrincipal {
+                        actor_id: "mcp:anonymous".to_string(),
+                        display_name: None,
+                    },
+                    token_fingerprint: None,
+                    session_id: None,
+                };
+            }
+
+            let key_fingerprint =
+                presented_key.map(checksum_of).unwrap_or_else(|| checksum_of(key_name));
+            AuthContext {
+                channel: AuthChannel::Mcp,
+                method: AuthMethod::ApiKey,
+                strength: AuthStrength::Possession,
+                principal: AuthPrincipal {
+                    actor_id: format!("mcp:key:{key_name}"),
+                    display_name: Some(key_name.clone()),
+                },
+                token_fingerprint: Some(key_fingerprint),
+                session_id: None,
+            }
+        }
+        AuthResult::Denied { .. } => AuthContext {
+            channel: AuthChannel::Mcp,
+            method: AuthMethod::None,
+            strength: AuthStrength::Anonymous,
+            principal: AuthPrincipal { actor_id: "mcp:anonymous".to_string(), display_name: None },
+            token_fingerprint: None,
+            session_id: None,
+        },
+    }
+}
+
+fn auth_context_for_denied_mcp_call(presented_key: Option<&str>) -> AuthContext {
+    let method = if presented_key.is_some() { AuthMethod::ApiKey } else { AuthMethod::None };
+    AuthContext {
+        channel: AuthChannel::Mcp,
+        method,
+        strength: AuthStrength::Anonymous,
+        principal: AuthPrincipal { actor_id: "mcp:anonymous".to_string(), display_name: None },
+        token_fingerprint: presented_key.map(checksum_of),
+        session_id: None,
+    }
+}
+
+fn actor_from_auth_context(auth_context: &AuthContext) -> String {
+    if auth_context.method == AuthMethod::ApiKey {
+        if let Some(display_name) = auth_context.principal.display_name.as_deref() {
+            return format!("agent:mcp:{display_name}");
+        }
+    }
+    "agent:mcp:anonymous".to_string()
+}
+
+fn auth_code_from_error_data(error: &rmcp::ErrorData) -> Option<String> {
+    error.data.as_ref()?.get("code")?.as_str().map(|code| code.to_string())
+}
+
 fn outcome_from_tool_result(
     result: &Result<CallToolResult, rmcp::ErrorData>,
 ) -> (bool, String, Option<String>) {
@@ -382,12 +471,14 @@ struct McpInvocationAuditEnvelope {
     tool_name: String,
     quote_id: Option<String>,
     actor: String,
+    auth_context: AuthContext,
     request_id: String,
     correlation_id: String,
     input_hash: String,
     success: bool,
     outcome_code: String,
     error_message: Option<String>,
+    auth_error_code: Option<String>,
 }
 
 fn parse_protocol_version(raw: Option<&str>) -> Result<ProtocolVersion, String> {
@@ -548,6 +639,7 @@ impl QuoteyMcpServer {
         let payload = serde_json::json!({
             "tool_name": tool_name,
             "actor": envelope.actor,
+            "auth": &envelope.auth_context,
             "request_id": envelope.request_id,
             "correlation_id": envelope.correlation_id,
             "input_hash": envelope.input_hash,
@@ -566,7 +658,11 @@ impl QuoteyMcpServer {
             "audit_version": 1,
             "request_id": envelope.request_id,
             "correlation_id": envelope.correlation_id,
-            "input_hash": envelope.input_hash
+            "input_hash": envelope.input_hash,
+            "auth_channel": envelope.auth_context.channel,
+            "auth_method": envelope.auth_context.method,
+            "auth_strength": envelope.auth_context.strength,
+            "auth_principal": envelope.auth_context.principal.actor_id.as_str()
         })
         .to_string();
         let quote_id = self.sanitize_quote_id_for_audit(envelope.quote_id.as_deref()).await;
@@ -600,13 +696,15 @@ impl QuoteyMcpServer {
         let tool_name = envelope.tool_name.as_str();
         let payload = serde_json::json!({
             "tool_name": tool_name,
+            "auth": &envelope.auth_context,
             "request_id": envelope.request_id,
             "correlation_id": envelope.correlation_id,
             "input_hash": envelope.input_hash,
             "outcome": {
                 "success": envelope.success,
                 "code": envelope.outcome_code,
-                "error_message": envelope.error_message
+                "error_message": envelope.error_message,
+                "auth_code": envelope.auth_error_code
             },
             "timestamp": chrono::Utc::now().to_rfc3339(),
         });
@@ -623,7 +721,12 @@ impl QuoteyMcpServer {
             "audit_version": 1,
             "request_id": envelope.request_id,
             "correlation_id": envelope.correlation_id,
-            "input_hash": envelope.input_hash
+            "input_hash": envelope.input_hash,
+            "auth_channel": envelope.auth_context.channel,
+            "auth_method": envelope.auth_context.method,
+            "auth_strength": envelope.auth_context.strength,
+            "auth_principal": envelope.auth_context.principal.actor_id.as_str(),
+            "auth_error_code": envelope.auth_error_code.as_deref()
         })
         .to_string();
         let quote_id = self.sanitize_quote_id_for_audit(envelope.quote_id.as_deref()).await;
@@ -865,18 +968,20 @@ impl QuoteyMcpServer {
             }
             AuthResult::Denied { reason, retry_after } => {
                 warn!(reason = %reason, "Authentication denied");
+                let auth_error = auth_error_from_denial(reason, *retry_after);
                 let mut data = serde_json::Map::new();
-                data.insert("reason".to_string(), serde_json::json!(reason));
+                data.insert("reason".to_string(), serde_json::json!(auth_error.message));
+                data.insert("code".to_string(), serde_json::json!(auth_error.code.as_str()));
                 data.insert(
                     "error_code".to_string(),
-                    serde_json::json!(if retry_after.is_some() {
+                    serde_json::json!(if auth_error.retry_after_seconds.is_some() {
                         "RATE_LIMIT_EXCEEDED"
                     } else {
                         "AUTHENTICATION_FAILED"
                     }),
                 );
-                if let Some(retry) = retry_after {
-                    data.insert("http_status".to_string(), serde_json::json!(429));
+                data.insert("http_status".to_string(), serde_json::json!(auth_error.http_status()));
+                if let Some(retry) = auth_error.retry_after_seconds {
                     data.insert("retry_after".to_string(), serde_json::json!(retry));
                     return Err(rmcp::ErrorData::new(
                         rmcp::model::ErrorCode(429),
@@ -885,7 +990,7 @@ impl QuoteyMcpServer {
                     ));
                 }
                 Err(rmcp::ErrorData::invalid_request(
-                    format!("Authentication failed: {}", reason),
+                    format!("Authentication failed: {}", auth_error.message),
                     Some(serde_json::Value::Object(data)),
                 ))
             }
@@ -929,6 +1034,7 @@ impl ServerHandler for QuoteyMcpServer {
         let arguments = request.arguments.clone();
         let quote_id_for_audit = extract_quote_id_from_arguments(arguments.as_ref());
         let input_hash = hash_tool_arguments(arguments.as_ref());
+        let presented_key = extract_api_key_from_meta(&context.meta);
 
         // Enforce authentication when configured.
         // Clients pass their API key via `_meta.api_key` on each tool-call request.
@@ -936,16 +1042,19 @@ impl ServerHandler for QuoteyMcpServer {
         let auth_result = match self.check_auth(&context.meta).await {
             Ok(result) => result,
             Err(error) => {
+                let auth_context = auth_context_for_denied_mcp_call(presented_key.as_deref());
                 let envelope = McpInvocationAuditEnvelope {
                     tool_name: tool_name.clone(),
                     quote_id: quote_id_for_audit.clone(),
-                    actor: "agent:mcp:anonymous".to_string(),
+                    actor: actor_from_auth_context(&auth_context),
+                    auth_context,
                     request_id: request_id.clone(),
                     correlation_id: correlation_id.clone(),
                     input_hash: input_hash.clone(),
                     success: false,
                     outcome_code: "AUTH_DENIED".to_string(),
                     error_message: Some(error.message.to_string()),
+                    auth_error_code: auth_code_from_error_data(&error),
                 };
                 self.record_mcp_invocation_received(&envelope).await;
                 self.record_mcp_invocation_outcome(&envelope).await;
@@ -953,21 +1062,22 @@ impl ServerHandler for QuoteyMcpServer {
             }
         };
 
-        let actor = match &auth_result {
-            AuthResult::Allowed { key_name, .. } => format!("agent:mcp:{key_name}"),
-            AuthResult::Denied { .. } => "agent:mcp:anonymous".to_string(),
-        };
+        let auth_context =
+            auth_context_for_allowed_mcp_call(&auth_result, presented_key.as_deref());
+        let actor = actor_from_auth_context(&auth_context);
 
         self.record_mcp_invocation_received(&McpInvocationAuditEnvelope {
             tool_name: tool_name.clone(),
             quote_id: quote_id_for_audit.clone(),
             actor: actor.clone(),
+            auth_context: auth_context.clone(),
             request_id: request_id.clone(),
             correlation_id: correlation_id.clone(),
             input_hash: input_hash.clone(),
             success: true,
             outcome_code: "RECEIVED".to_string(),
             error_message: None,
+            auth_error_code: None,
         })
         .await;
 
@@ -980,12 +1090,14 @@ impl ServerHandler for QuoteyMcpServer {
             tool_name,
             quote_id: quote_id_for_audit,
             actor,
+            auth_context,
             request_id,
             correlation_id,
             input_hash,
             success,
             outcome_code,
             error_message,
+            auth_error_code: None,
         })
         .await;
 
@@ -3514,6 +3626,20 @@ mod tests {
         .expect("seed portal push subscription");
     }
 
+    fn test_mcp_auth_context(display_name: Option<&str>) -> AuthContext {
+        AuthContext {
+            channel: AuthChannel::Mcp,
+            method: AuthMethod::ApiKey,
+            strength: AuthStrength::Possession,
+            principal: AuthPrincipal {
+                actor_id: "mcp:key:test-key".to_string(),
+                display_name: display_name.map(str::to_string),
+            },
+            token_fingerprint: Some("checksum:test".to_string()),
+            session_id: None,
+        }
+    }
+
     fn server(pool: quotey_db::DbPool) -> QuoteyMcpServer {
         QuoteyMcpServer::new(pool)
     }
@@ -3584,12 +3710,14 @@ mod tests {
             tool_name: "quote_get".to_string(),
             quote_id: Some("Q-AUD-001".to_string()),
             actor: "agent:mcp:test-key".to_string(),
+            auth_context: test_mcp_auth_context(Some("test-key")),
             request_id: "req-123".to_string(),
             correlation_id: "corr-123".to_string(),
             input_hash: "hash-abc".to_string(),
             success: true,
             outcome_code: "RECEIVED".to_string(),
             error_message: None,
+            auth_error_code: None,
         };
 
         srv.record_mcp_invocation_received(&envelope).await;
@@ -3615,6 +3743,10 @@ mod tests {
             serde_json::from_str(&row.get::<String, _>("payload_json")).expect("payload json");
         assert_eq!(payload["tool_name"].as_str(), Some("quote_get"));
         assert_eq!(payload["actor"].as_str(), Some("agent:mcp:test-key"));
+        assert_eq!(payload["auth"]["channel"].as_str(), Some("mcp"));
+        assert_eq!(payload["auth"]["method"].as_str(), Some("api_key"));
+        assert_eq!(payload["auth"]["strength"].as_str(), Some("possession"));
+        assert_eq!(payload["auth"]["principal"]["actor_id"].as_str(), Some("mcp:key:test-key"));
         assert_eq!(payload["request_id"].as_str(), Some("req-123"));
         assert_eq!(payload["correlation_id"].as_str(), Some("corr-123"));
         assert_eq!(payload["input_hash"].as_str(), Some("hash-abc"));
@@ -3628,6 +3760,10 @@ mod tests {
         assert_eq!(metadata["request_id"].as_str(), Some("req-123"));
         assert_eq!(metadata["correlation_id"].as_str(), Some("corr-123"));
         assert_eq!(metadata["input_hash"].as_str(), Some("hash-abc"));
+        assert_eq!(metadata["auth_channel"].as_str(), Some("mcp"));
+        assert_eq!(metadata["auth_method"].as_str(), Some("api_key"));
+        assert_eq!(metadata["auth_strength"].as_str(), Some("possession"));
+        assert_eq!(metadata["auth_principal"].as_str(), Some("mcp:key:test-key"));
     }
 
     #[tokio::test]
@@ -3639,12 +3775,14 @@ mod tests {
             tool_name: "quote_price".to_string(),
             quote_id: Some("Q-AUD-002".to_string()),
             actor: "agent:mcp:test-key".to_string(),
+            auth_context: test_mcp_auth_context(Some("test-key")),
             request_id: "req-456".to_string(),
             correlation_id: "corr-456".to_string(),
             input_hash: "hash-def".to_string(),
             success: false,
             outcome_code: "VALIDATION_ERROR".to_string(),
             error_message: Some("bad input".to_string()),
+            auth_error_code: Some("invalid_credential".to_string()),
         };
 
         srv.record_mcp_invocation_outcome(&envelope).await;
@@ -3669,12 +3807,15 @@ mod tests {
         let payload: serde_json::Value =
             serde_json::from_str(&row.get::<String, _>("payload_json")).expect("payload json");
         assert_eq!(payload["tool_name"].as_str(), Some("quote_price"));
+        assert_eq!(payload["auth"]["channel"].as_str(), Some("mcp"));
+        assert_eq!(payload["auth"]["method"].as_str(), Some("api_key"));
         assert_eq!(payload["request_id"].as_str(), Some("req-456"));
         assert_eq!(payload["correlation_id"].as_str(), Some("corr-456"));
         assert_eq!(payload["input_hash"].as_str(), Some("hash-def"));
         assert_eq!(payload["outcome"]["success"].as_bool(), Some(false));
         assert_eq!(payload["outcome"]["code"].as_str(), Some("VALIDATION_ERROR"));
         assert_eq!(payload["outcome"]["error_message"].as_str(), Some("bad input"));
+        assert_eq!(payload["outcome"]["auth_code"].as_str(), Some("invalid_credential"));
         assert!(payload["timestamp"].is_string());
 
         let metadata: serde_json::Value =
@@ -3685,6 +3826,11 @@ mod tests {
         assert_eq!(metadata["request_id"].as_str(), Some("req-456"));
         assert_eq!(metadata["correlation_id"].as_str(), Some("corr-456"));
         assert_eq!(metadata["input_hash"].as_str(), Some("hash-def"));
+        assert_eq!(metadata["auth_channel"].as_str(), Some("mcp"));
+        assert_eq!(metadata["auth_method"].as_str(), Some("api_key"));
+        assert_eq!(metadata["auth_strength"].as_str(), Some("possession"));
+        assert_eq!(metadata["auth_principal"].as_str(), Some("mcp:key:test-key"));
+        assert_eq!(metadata["auth_error_code"].as_str(), Some("invalid_credential"));
     }
 
     #[tokio::test]
@@ -3695,12 +3841,14 @@ mod tests {
             tool_name: "quote_get".to_string(),
             quote_id: Some("Q-NOT-REAL".to_string()),
             actor: "agent:mcp:test-key".to_string(),
+            auth_context: test_mcp_auth_context(Some("test-key")),
             request_id: "req-789".to_string(),
             correlation_id: "corr-789".to_string(),
             input_hash: "hash-ghi".to_string(),
             success: false,
             outcome_code: "NOT_FOUND".to_string(),
             error_message: Some("quote missing".to_string()),
+            auth_error_code: None,
         };
 
         srv.record_mcp_invocation_outcome(&envelope).await;
@@ -3750,6 +3898,79 @@ mod tests {
     }
 
     #[test]
+    fn auth_context_for_allowed_mcp_call_maps_api_key_to_possession() {
+        let result =
+            AuthResult::Allowed { key_name: "test-key".to_string(), remaining_requests: 9 };
+        let context = auth_context_for_allowed_mcp_call(&result, Some("secret-api-key"));
+        assert_eq!(context.channel, AuthChannel::Mcp);
+        assert_eq!(context.method, AuthMethod::ApiKey);
+        assert_eq!(context.strength, AuthStrength::Possession);
+        assert_eq!(context.principal.actor_id, "mcp:key:test-key");
+        assert_eq!(context.principal.display_name.as_deref(), Some("test-key"));
+        assert!(context.token_fingerprint.is_some());
+    }
+
+    #[test]
+    fn auth_context_for_allowed_anonymous_key_stays_anonymous_even_with_presented_key() {
+        let result =
+            AuthResult::Allowed { key_name: "anonymous".to_string(), remaining_requests: u32::MAX };
+        let context = auth_context_for_allowed_mcp_call(&result, Some("ignored-key"));
+        assert_eq!(context.channel, AuthChannel::Mcp);
+        assert_eq!(context.method, AuthMethod::None);
+        assert_eq!(context.strength, AuthStrength::Anonymous);
+        assert_eq!(context.principal.actor_id, "mcp:anonymous");
+        assert_eq!(context.principal.display_name, None);
+        assert_eq!(context.token_fingerprint, None);
+    }
+
+    #[test]
+    fn auth_context_for_denied_mcp_call_with_no_key_is_anonymous() {
+        let context = auth_context_for_denied_mcp_call(None);
+        assert_eq!(context.channel, AuthChannel::Mcp);
+        assert_eq!(context.method, AuthMethod::None);
+        assert_eq!(context.strength, AuthStrength::Anonymous);
+        assert_eq!(context.principal.actor_id, "mcp:anonymous");
+        assert_eq!(context.token_fingerprint, None);
+    }
+
+    #[test]
+    fn auth_context_for_denied_mcp_call_with_key_tracks_method_but_not_assurance() {
+        let context = auth_context_for_denied_mcp_call(Some("bad-key"));
+        assert_eq!(context.channel, AuthChannel::Mcp);
+        assert_eq!(context.method, AuthMethod::ApiKey);
+        assert_eq!(context.strength, AuthStrength::Anonymous);
+        assert_eq!(context.principal.actor_id, "mcp:anonymous");
+        assert!(context.token_fingerprint.is_some());
+    }
+
+    #[test]
+    fn actor_from_auth_context_uses_display_name_for_api_key_method() {
+        let auth_context = AuthContext {
+            channel: AuthChannel::Mcp,
+            method: AuthMethod::ApiKey,
+            strength: AuthStrength::Possession,
+            principal: AuthPrincipal {
+                actor_id: "mcp:key:test-key".to_string(),
+                display_name: Some("test-key".to_string()),
+            },
+            token_fingerprint: Some("checksum:test".to_string()),
+            session_id: None,
+        };
+        assert_eq!(actor_from_auth_context(&auth_context), "agent:mcp:test-key");
+    }
+
+    #[test]
+    fn auth_code_from_error_data_extracts_canonical_code() {
+        let mut data = serde_json::Map::new();
+        data.insert("code".to_string(), serde_json::json!("missing_credential"));
+        let error = rmcp::ErrorData::invalid_request(
+            "Authentication failed".to_string(),
+            Some(serde_json::Value::Object(data)),
+        );
+        assert_eq!(auth_code_from_error_data(&error).as_deref(), Some("missing_credential"));
+    }
+
+    #[test]
     fn extract_api_key_from_meta_supports_aliases_and_priority() {
         let mut meta = rmcp::model::Meta::new();
         meta.0.insert("authorization".to_string(), serde_json::json!("Bearer auth-token"));
@@ -3783,12 +4004,91 @@ mod tests {
 
         let err = srv.check_auth(&meta).await.expect_err("should be rate limited");
         assert_eq!(err.code, rmcp::model::ErrorCode(429));
-        let retry_after = err
-            .data
-            .as_ref()
-            .and_then(|value| value.get("retry_after"))
-            .and_then(|value| value.as_u64());
+        let retry_after = auth_denial_u64(&err, "retry_after");
         assert!(retry_after.is_some());
+        assert_eq!(auth_denial_str(&err, "reason"), Some("Rate limit exceeded"));
+        assert_eq!(auth_denial_str(&err, "code"), Some("rate_limited"));
+        assert_eq!(auth_denial_str(&err, "error_code"), Some("RATE_LIMIT_EXCEEDED"));
+        assert_eq!(auth_denial_u64(&err, "http_status"), Some(429));
+    }
+
+    #[tokio::test]
+    async fn check_auth_missing_key_uses_canonical_auth_error_code() {
+        let pool = test_db().await;
+        let auth = crate::auth::AuthManager::from_config(&crate::auth::AuthConfig {
+            enabled: true,
+            rate_limit_window_secs: 60,
+            api_keys: vec![crate::auth::ApiKeyConfig {
+                key: "required-key".to_string(),
+                name: "required".to_string(),
+                requests_per_minute: 10,
+            }],
+        });
+        let srv = QuoteyMcpServer::with_auth(pool, auth);
+
+        let meta = rmcp::model::Meta::new();
+        let err = srv.check_auth(&meta).await.expect_err("missing key should fail");
+        assert_eq!(auth_denial_str(&err, "reason"), Some("API key required"));
+        assert_eq!(auth_denial_str(&err, "code"), Some("missing_credential"));
+        assert_eq!(auth_denial_str(&err, "error_code"), Some("AUTHENTICATION_FAILED"));
+        assert_eq!(auth_denial_u64(&err, "http_status"), Some(401));
+        assert_eq!(auth_denial_u64(&err, "retry_after"), None);
+    }
+
+    #[tokio::test]
+    async fn check_auth_invalid_key_uses_invalid_credential_code() {
+        let pool = test_db().await;
+        let auth = crate::auth::AuthManager::from_config(&crate::auth::AuthConfig {
+            enabled: true,
+            rate_limit_window_secs: 60,
+            api_keys: vec![crate::auth::ApiKeyConfig {
+                key: "valid-key".to_string(),
+                name: "valid".to_string(),
+                requests_per_minute: 10,
+            }],
+        });
+        let srv = QuoteyMcpServer::with_auth(pool, auth);
+
+        let mut meta = rmcp::model::Meta::new();
+        meta.0.insert("api_key".to_string(), serde_json::json!("wrong-key"));
+        let err = srv.check_auth(&meta).await.expect_err("invalid key should fail");
+
+        assert_eq!(auth_denial_str(&err, "reason"), Some("Invalid API key"));
+        assert_eq!(auth_denial_str(&err, "code"), Some("invalid_credential"));
+        assert_eq!(auth_denial_str(&err, "error_code"), Some("AUTHENTICATION_FAILED"));
+        assert_eq!(auth_denial_u64(&err, "http_status"), Some(401));
+        assert_eq!(auth_denial_u64(&err, "retry_after"), None);
+    }
+
+    #[tokio::test]
+    async fn check_auth_deactivated_key_uses_credential_revoked_code() {
+        let pool = test_db().await;
+        let auth = crate::auth::AuthManager::with_keys(vec![crate::auth::ApiKeyEntry {
+            key: "disabled-key".to_string(),
+            name: "disabled".to_string(),
+            requests_per_minute: 10,
+            created_at: chrono::Utc::now(),
+            active: false,
+        }]);
+        let srv = QuoteyMcpServer::with_auth(pool, auth);
+
+        let mut meta = rmcp::model::Meta::new();
+        meta.0.insert("api_key".to_string(), serde_json::json!("disabled-key"));
+        let err = srv.check_auth(&meta).await.expect_err("deactivated key should fail");
+
+        assert_eq!(auth_denial_str(&err, "reason"), Some("API key deactivated"));
+        assert_eq!(auth_denial_str(&err, "code"), Some("credential_revoked"));
+        assert_eq!(auth_denial_str(&err, "error_code"), Some("AUTHENTICATION_FAILED"));
+        assert_eq!(auth_denial_u64(&err, "http_status"), Some(401));
+        assert_eq!(auth_denial_u64(&err, "retry_after"), None);
+    }
+
+    fn auth_denial_str<'a>(err: &'a rmcp::ErrorData, key: &'a str) -> Option<&'a str> {
+        err.data.as_ref()?.get(key)?.as_str()
+    }
+
+    fn auth_denial_u64(err: &rmcp::ErrorData, key: &str) -> Option<u64> {
+        err.data.as_ref()?.get(key)?.as_u64()
     }
 
     #[test]

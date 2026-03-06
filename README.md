@@ -2,6 +2,62 @@
 
 Planning-first Rust CPQ agent for Slack.
 
+## 🚀 Getting Started
+
+New to Quotey? Start here:
+
+| Use Case | Start Here |
+|----------|------------|
+| **Quick Test** | [QUICK_START.md](QUICK_START.md) - Run locally in 15 minutes |
+| **Production Deploy** | [DEPLOYMENT_GUIDE.md](DEPLOYMENT_GUIDE.md) - VPS, Docker, systemd |
+| **AI Agent Integration** | [AI_AGENT_INTEGRATION.md](AI_AGENT_INTEGRATION.md) - Pi Claude, Codex, headless |
+| **Architecture** | [DEPLOYMENT_ARCHITECTURE.md](DEPLOYMENT_ARCHITECTURE.md) - System diagrams |
+
+### AI Agent / Headless Mode (No Slack Required!)
+
+Use Quotey with Pi Claude, Codex, or any AI agent via CLI or MCP:
+
+```bash
+# Deploy headless on VPS
+sudo ./scripts/deploy-headless-vps.sh
+
+# Or run locally
+./scripts/setup-local.sh
+cargo run -p quotey-cli -- quote list --format=json
+```
+
+See [AI_AGENT_INTEGRATION.md](AI_AGENT_INTEGRATION.md) for MCP server setup and tool calling.
+
+### TL;DR - Run Locally
+
+```bash
+# 1. Setup (installs Rust, builds, creates config)
+./scripts/setup-local.sh
+
+# 2. Add your Slack tokens to config/quotey.toml
+#    (see DEPLOYMENT_GUIDE.md for Slack setup)
+
+# 3. Run migrations
+cargo run -p quotey-cli -- migrate
+
+# 4. Start the server
+cargo run -p quotey-server
+
+# 5. Test in Slack: /quote new for Acme Corp, Pro Plan
+```
+
+### TL;DR - Production Deploy
+
+```bash
+# Docker (easiest)
+cp .env.example .env
+# Edit .env with your tokens
+docker-compose up -d
+
+# Or VPS with systemd
+./scripts/deploy-systemd.sh
+```
+
 ## Foundation Start
 
 Before scaffold implementation, read:
@@ -167,7 +223,19 @@ Tool calls can supply keys through MCP request metadata using:
 - `_meta.x-api-key` (or `_meta.x_api_key`)
 - `_meta.authorization` (`Bearer <token>`, `ApiKey <token>`, `Token <token>`, or raw key)
 
-When rate limits are exceeded, MCP errors include `retry_after` and `http_status: 429` in error data.
+MCP auth denial payloads now include:
+
+- `code`: canonical snake_case auth code from shared auth taxonomy.
+  Current MCP auth denials emit: `missing_credential`, `invalid_credential`, `credential_revoked`, `rate_limited`.
+- `http_status`: deterministic transport status mapping
+- `retry_after`: included for rate-limited responses
+- `error_code`: legacy compatibility field (`AUTHENTICATION_FAILED` or `RATE_LIMIT_EXCEEDED`)
+
+MCP invocation audit events (`mcp.<tool>.received` / `mcp.<tool>.completed`) now include canonical auth metadata:
+
+- payload `auth`: `channel`, `method`, `strength`, `principal`, optional token fingerprint/session
+- metadata keys: `auth_channel`, `auth_method`, `auth_strength`, `auth_principal`
+- completion events also include `outcome.auth_code` / `metadata.auth_error_code` when applicable
 
 AI-agent smoke workflow test (catalog -> quote create/price -> approval -> PDF):
 
@@ -192,12 +260,16 @@ Slack operator shortcut:
 
 ## Portal Approval Auth
 
-Mobile approval actions now support explicit auth method metadata (`biometric` or `password`) on
+Portal approval actions support explicit auth method metadata (`biometric` or `password`) on
 `POST /quote/{token}/approve` and `POST /quote/{token}/reject`.
 
 - Legacy payloads without `authMethod` remain accepted for compatibility.
 - Set `QUOTEY_PORTAL_APPROVAL_FALLBACK_PASSWORD` to enforce server-side verification when `authMethod=password`.
 - Use `/settings` in the portal to register Face ID / Touch ID on-device and manage fallback credentials.
+- Portal approval/rejection audit events now persist canonical auth context metadata (`auth_channel`, `auth_method`, `auth_strength`, `auth_principal`) in `audit_event.metadata_json`.
+- Auth failures include canonical `code` values:
+  `missing_credential` (required field missing), `invalid_credential` (wrong fallback password),
+  `unsupported_method` (unsupported `authMethod`).
 
 ## Troubleshooting
 

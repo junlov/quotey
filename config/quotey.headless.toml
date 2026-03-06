@@ -1,0 +1,35 @@
+# Quotey Headless Configuration
+# For AI agent integration - no Slack required
+
+[database]
+url = "sqlite:///data/quotey.db"
+max_connections = 5
+timeout_secs = 30
+
+[llm]
+provider = "ollama"
+base_url = "http://localhost:11434"
+model = "llama3.1"
+timeout_secs = 30
+max_retries = 2
+# No API key needed for Ollama
+
+[server]
+bind_address = "0.0.0.0"
+health_check_port = 8080
+graceful_shutdown_secs = 15
+
+[logging]
+level = "info"
+format = "json"  # Better for log aggregation
+
+[features]
+# Disable Slack-specific features
+enable_catalog_bootstrap = true
+enable_quote_intelligence = true
+enable_approval_workflow = true
+enable_pdf_generation = true
+
+[crm]
+provider = "stub"
+fixtures_path = "config/demo_fixtures"

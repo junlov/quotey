@@ -1,0 +1,49 @@
+version: '3.8'
+
+services:
+  quotey:
+    build: .
+    container_name: quotey
+    restart: unless-stopped
+    environment:
+      - QUOTEY_SLACK_APP_TOKEN=${SLACK_APP_TOKEN}
+      - QUOTEY_SLACK_BOT_TOKEN=${SLACK_BOT_TOKEN}
+      - QUOTEY_DATABASE_URL=sqlite:///data/quotey.db
+      - QUOTEY_LLM_PROVIDER=${LLM_PROVIDER:-ollama}
+      - QUOTEY_LLM_BASE_URL=${LLM_BASE_URL:-http://ollama:11434}
+      - QUOTEY_LLM_API_KEY=${LLM_API_KEY:-}
+      - QUOTEY_LLM_MODEL=${LLM_MODEL:-llama3.1}
+      - RUST_LOG=${RUST_LOG:-info}
+    volumes:
+      - quotey-data:/data
+    ports:
+      - "${HEALTH_CHECK_PORT:-8080}:8080"
+    depends_on:
+      - ollama
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 10s
+
+  ollama:
+    image: ollama/ollama:latest
+    container_name: quotey-ollama
+    restart: unless-stopped
+    volumes:
+      - ollama-data:/root/.ollama
+    # Uncomment below for NVIDIA GPU support
+    # deploy:
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+volumes:
+  quotey-data:
+    driver: local
+  ollama-data:
+    driver: local

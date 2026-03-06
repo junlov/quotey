@@ -52,6 +52,10 @@ venv/
 target/
 .tmp-target/
 .sqlx/
-quotey_migration_check.db
-quotey_migration_check.db-shm
-quotey_migration_check.db-wal
+
+# SQLite databases (never commit binaries — use migrations instead)
+*.db
+*.db-shm
+*.db-wal
+*.sqlite
+*.sqlite3
