@@ -14,6 +14,7 @@ pub mod precedent;
 pub mod pricing;
 pub mod product_matcher;
 pub mod replay;
+pub mod rollout;
 pub mod rule_builder;
 pub mod safety;
 pub mod simulator;
