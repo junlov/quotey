@@ -10,6 +10,7 @@ use std::collections::HashMap;
 
 use chrono::{DateTime, Duration, Utc};
 use serde::{Deserialize, Serialize};
+use serde_json::Value;
 
 use crate::domain::execution::{ExecutionTaskId, OperationKey};
 use crate::domain::quote::QuoteId;
@@ -145,13 +146,40 @@ impl OutboxOperation {
         // Operation type
         hasher.update(self.kind().as_bytes());
 
-        // Canonical JSON of payload (this works because we derive Serialize)
-        let canonical_json = serde_json::to_string(self).unwrap_or_default();
+        // Canonical JSON with object keys sorted recursively.
+        let canonical_json = canonical_operation_json(self);
         hasher.update(canonical_json.as_bytes());
 
         let hash = hasher.finalize();
+        let short_hash: String = hash.to_hex().to_string().chars().take(16).collect();
 
-        OperationKey(format!("{}:{:.16}", quote_id.0, hash.to_hex()))
+        OperationKey(format!("{}:{short_hash}", quote_id.0))
+    }
+}
+
+fn canonical_operation_json(operation: &OutboxOperation) -> String {
+    match serde_json::to_value(operation).map(canonicalize_json_value) {
+        Ok(value) => serde_json::to_string(&value).unwrap_or_else(|_| format!("{operation:?}")),
+        Err(_) => format!("{operation:?}"),
+    }
+}
+
+fn canonicalize_json_value(value: Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut entries: Vec<(String, Value)> = map.into_iter().collect();
+            entries.sort_by(|left, right| left.0.cmp(&right.0));
+
+            let mut normalized = serde_json::Map::with_capacity(entries.len());
+            for (key, nested_value) in entries {
+                normalized.insert(key, canonicalize_json_value(nested_value));
+            }
+            Value::Object(normalized)
+        }
+        Value::Array(items) => {
+            Value::Array(items.into_iter().map(canonicalize_json_value).collect())
+        }
+        primitive => primitive,
     }
 }
 
@@ -281,10 +309,7 @@ mod tests {
 
     #[test]
     fn retry_policy_max_retries() {
-        let policy = RetryPolicy {
-            max_retries: 3,
-            ..Default::default()
-        };
+        let policy = RetryPolicy { max_retries: 3, ..Default::default() };
 
         assert!(policy.next_retry_at(0).is_some());
         assert!(policy.next_retry_at(1).is_some());
@@ -350,5 +375,33 @@ mod tests {
             .kind(),
             "crm.sync_quote"
         );
+    }
+
+    #[test]
+    fn idempotency_key_is_stable_for_equivalent_map_payloads() {
+        let quote_id = QuoteId("Q-TEST-001".to_string());
+
+        let mut headers_a = HashMap::new();
+        headers_a.insert("x-customer".to_string(), "acme".to_string());
+        headers_a.insert("x-request-id".to_string(), "REQ-123".to_string());
+
+        let mut headers_b = HashMap::new();
+        headers_b.insert("x-request-id".to_string(), "REQ-123".to_string());
+        headers_b.insert("x-customer".to_string(), "acme".to_string());
+
+        let op_a = OutboxOperation::WebhookCall {
+            url: "https://example.com/hook".to_string(),
+            method: "POST".to_string(),
+            headers: headers_a,
+            body: "{\"event\":\"quote.updated\"}".to_string(),
+        };
+        let op_b = OutboxOperation::WebhookCall {
+            url: "https://example.com/hook".to_string(),
+            method: "POST".to_string(),
+            headers: headers_b,
+            body: "{\"event\":\"quote.updated\"}".to_string(),
+        };
+
+        assert_eq!(op_a.idempotency_key(&quote_id), op_b.idempotency_key(&quote_id));
     }
 }

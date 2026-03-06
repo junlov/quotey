@@ -28,7 +28,7 @@ pub enum OutboxServiceError {
     #[error("Operation not found: {0}")]
     NotFound(String),
 
-    #[error("Duplicate operation: idempotency key {0} already exists")]
+    #[error("Duplicate operation: existing task {0}")]
     Duplicate(String),
 
     #[error("Invalid state transition from {from} to {to}")]
@@ -49,8 +49,10 @@ pub type Result<T> = std::result::Result<T, OutboxServiceError>;
 pub trait OutboxService: Send + Sync {
     /// Enqueue a side effect for guaranteed delivery
     ///
-    /// Returns the task ID. If an identical operation (by idempotency key)
-    /// already exists, returns the existing task ID.
+    /// Returns the newly created task ID.
+    ///
+    /// Implementations should return `OutboxServiceError::Duplicate(existing_task_id)`
+    /// when an identical operation already exists.
     async fn enqueue(
         &self,
         quote_id: &QuoteId,
@@ -170,16 +172,8 @@ impl<T: OutboxService + ?Sized> OutboxServiceExt for T {
         for op in request.operations {
             match self.enqueue(&request.quote_id, op.clone()).await {
                 Ok(task_id) => task_ids.push(task_id),
-                Err(OutboxServiceError::Duplicate(_)) => {
-                    // Fetch the existing task ID
-                    if let Ok(Some(status)) = self.get_status(&ExecutionTaskId(format!(
-                        "{:?}",
-                        op.idempotency_key(&request.quote_id)
-                    ))).await
-                    {
-                        // This is a simplified approach - in reality we'd need to look up by idempotency key
-                        duplicates.push((op, status.task_id));
-                    }
+                Err(OutboxServiceError::Duplicate(existing_task_id)) => {
+                    duplicates.push((op, ExecutionTaskId(existing_task_id)));
                 }
                 Err(e) => return Err(e),
             }
@@ -212,7 +206,7 @@ impl<T: OutboxService + ?Sized> OutboxServiceExt for T {
 
     async fn get_quote_timeline(
         &self,
-        quote_id: &QuoteId,
+        _quote_id: &QuoteId,
     ) -> Result<Vec<(DateTime<Utc>, String, OutboxState, Option<String>)>> {
         // This would need a proper repository method
         // For now, return empty - implementation would fetch from audit log
