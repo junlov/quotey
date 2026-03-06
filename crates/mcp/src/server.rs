@@ -1711,6 +1711,29 @@ fn default_limit() -> u32 {
     DEFAULT_PAGE_LIMIT
 }
 
+// Budget Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BudgetCheckInput {
+    /// Sales rep ID
+    pub rep_id: String,
+    /// Proposed discount amount in cents
+    pub proposed_discount_cents: i64,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BudgetStatusInput {
+    /// Sales rep ID
+    pub rep_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct BudgetRecordInput {
+    /// Sales rep ID
+    pub rep_id: String,
+    /// Discount amount in cents to record
+    pub discount_cents: i64,
+}
+
 // PDF Types
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct QuotePdfInput {
