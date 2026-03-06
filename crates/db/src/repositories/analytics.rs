@@ -54,7 +54,7 @@ fn dimension_sql(dimension: &DimensionKind) -> &'static str {
         DimensionKind::CustomerSegment => "COALESCE(q.account_id, 'unknown')",
         DimensionKind::Industry => "COALESCE(json_extract(q.notes, '$.industry'), 'unknown')",
         DimensionKind::Region => "COALESCE(json_extract(q.notes, '$.region'), 'unknown')",
-        DimensionKind::SalesRep => "COALESCE(q.created_by, 'unknown')",
+        DimensionKind::SalesRep => "COALESCE(q.created_by_sales_rep_id, q.created_by, 'unknown')",
         DimensionKind::ProductFamily => "COALESCE(pf.name, 'unknown')",
         DimensionKind::ApprovalRole => "COALESCE(ar.approver_role, 'none')",
     }

@@ -1,0 +1,2 @@
+-- Down migration intentionally empty: additive columns are safe to leave in place.
+-- SQLite does not support DROP COLUMN in older versions.

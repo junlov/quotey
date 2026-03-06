@@ -89,11 +89,13 @@ pub use domain::optimizer::*;
 pub use domain::precedent::*;
 pub use domain::product::{Product, ProductId};
 pub use domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
+pub use domain::quote_lock::{LockConflict, LockInfo};
 pub use domain::requirement_extraction::{
     ExtractedRequirement, ExtractedRequirements, RequirementAmbiguity,
     RequirementExtractionValidationError, RequirementSourceType,
     REQUIREMENT_EXTRACTION_SCHEMA_VERSION,
 };
+pub use domain::sales_rep::{SalesRep, SalesRepId, SalesRepRole, SalesRepStatus};
 pub use domain::simulation::*;
 pub use domain::visual_rule::{
     LogicalConnector, VisualActionType, VisualOperator, VisualRuleAction, VisualRuleCondition,

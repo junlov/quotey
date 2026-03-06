@@ -1,6 +1,4 @@
 -- SQLite cannot DROP COLUMN directly; rebuild suggestion_feedback without was_hidden.
-PRAGMA foreign_keys = OFF;
-BEGIN TRANSACTION;
 
 CREATE TABLE suggestion_feedback_revert (
     id                  TEXT PRIMARY KEY NOT NULL,
@@ -67,6 +65,3 @@ CREATE INDEX idx_suggestion_feedback_customer_product
     ON suggestion_feedback(customer_id, product_id);
 CREATE INDEX idx_suggestion_feedback_product_id
     ON suggestion_feedback(product_id);
-
-COMMIT;
-PRAGMA foreign_keys = ON;

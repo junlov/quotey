@@ -119,11 +119,22 @@ impl ApprovalRepository for SqlApprovalRepository {
     async fn save(&self, approval: ApprovalRequest) -> Result<(), RepositoryError> {
         let status_str = approval_status_as_str(&approval.status);
         let expires_at_str = approval.expires_at.map(|dt| dt.to_rfc3339());
+        let requested_by_sales_rep_id: Option<String> = sqlx::query_scalar(
+            "SELECT id
+             FROM sales_rep
+             WHERE id = ? OR external_user_ref = ?
+             LIMIT 1",
+        )
+        .bind(&approval.requested_by)
+        .bind(&approval.requested_by)
+        .fetch_optional(&self.pool)
+        .await?;
 
         sqlx::query(
             "INSERT INTO approval_request (id, quote_id, approver_role, reason, justification,
-                                           status, requested_by, expires_at, created_at, updated_at)
-             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                                           status, requested_by, expires_at, created_at, updated_at,
+                                           requested_by_sales_rep_id)
+             VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
              ON CONFLICT(id) DO UPDATE SET
                  approver_role = excluded.approver_role,
                  reason = excluded.reason,
@@ -131,6 +142,8 @@ impl ApprovalRepository for SqlApprovalRepository {
                  status = excluded.status,
                  requested_by = excluded.requested_by,
                  expires_at = excluded.expires_at,
+                 requested_by_sales_rep_id =
+                    COALESCE(excluded.requested_by_sales_rep_id, requested_by_sales_rep_id),
                  updated_at = excluded.updated_at",
         )
         .bind(&approval.id.0)
@@ -143,6 +156,7 @@ impl ApprovalRepository for SqlApprovalRepository {
         .bind(&expires_at_str)
         .bind(approval.created_at.to_rfc3339())
         .bind(approval.updated_at.to_rfc3339())
+        .bind(&requested_by_sales_rep_id)
         .execute(&self.pool)
         .await?;
 
@@ -266,6 +280,25 @@ mod tests {
         }
     }
 
+    async fn insert_sales_rep(pool: &sqlx::SqlitePool, id: &str, external_user_ref: &str) {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO sales_rep (
+                id, external_user_ref, name, email, role, title, team_id, reports_to, status,
+                max_discount_pct, auto_approve_threshold_cents, capabilities_json, config_json,
+                created_at, updated_at
+             ) VALUES (?, ?, ?, NULL, 'manager', NULL, NULL, NULL, 'active', NULL, NULL, '[]', '{}', ?, ?)",
+        )
+        .bind(id)
+        .bind(external_user_ref)
+        .bind(format!("Rep {id}"))
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .expect("insert sales_rep");
+    }
+
     #[tokio::test]
     async fn save_and_find_by_id() {
         let pool = setup().await;
@@ -347,5 +380,28 @@ mod tests {
 
         let found = repo.find_by_id(&ApprovalId("APR-001".to_string())).await.expect("find");
         assert_eq!(found.unwrap().status, ApprovalStatus::Approved);
+    }
+
+    #[tokio::test]
+    async fn save_populates_requested_by_sales_rep_id_when_actor_matches_external_ref() {
+        let pool = setup().await;
+        insert_quote(&pool, "Q-100").await;
+        insert_sales_rep(&pool, "rep-manager-1", "U-MGR-1").await;
+
+        let repo = SqlApprovalRepository::new(pool.clone());
+        let mut approval = sample_approval("APR-REP-001", "Q-100");
+        approval.requested_by = "U-MGR-1".to_string();
+
+        repo.save(approval).await.expect("save approval");
+
+        let mapped_rep_id: Option<String> = sqlx::query_scalar(
+            "SELECT requested_by_sales_rep_id FROM approval_request WHERE id = ?",
+        )
+        .bind("APR-REP-001")
+        .fetch_one(&pool)
+        .await
+        .expect("load approval sales_rep mapping");
+
+        assert_eq!(mapped_rep_id.as_deref(), Some("rep-manager-1"));
     }
 }

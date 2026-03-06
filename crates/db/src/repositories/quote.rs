@@ -111,15 +111,25 @@ impl QuoteRepository for SqlQuoteRepository {
         let now = Utc::now().to_rfc3339();
         let created_at = quote.created_at.to_rfc3339();
         let term_months = quote.term_months.map(|v| v as i32);
+        let created_by_sales_rep_id: Option<String> = sqlx::query_scalar(
+            "SELECT id
+             FROM sales_rep
+             WHERE id = ? OR external_user_ref = ?
+             LIMIT 1",
+        )
+        .bind(&quote.created_by)
+        .bind(&quote.created_by)
+        .fetch_optional(&mut *tx)
+        .await?;
 
         sqlx::query(
             r#"
             INSERT INTO quote (
                 id, status, currency, start_date, end_date,
                 term_months, valid_until, created_by, created_at, updated_at,
-                account_id, deal_id, notes, version
+                account_id, deal_id, notes, version, created_by_sales_rep_id
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
             ON CONFLICT(id) DO UPDATE SET
                 status = excluded.status,
                 currency = excluded.currency,
@@ -129,6 +139,8 @@ impl QuoteRepository for SqlQuoteRepository {
                 valid_until = excluded.valid_until,
                 notes = excluded.notes,
                 version = excluded.version,
+                created_by_sales_rep_id =
+                    COALESCE(excluded.created_by_sales_rep_id, created_by_sales_rep_id),
                 updated_at = excluded.updated_at
             "#,
         )
@@ -146,6 +158,7 @@ impl QuoteRepository for SqlQuoteRepository {
         .bind(&quote.deal_id)
         .bind(&quote.notes)
         .bind(quote.version as i32)
+        .bind(&created_by_sales_rep_id)
         .execute(&mut *tx)
         .await?;
 
@@ -387,6 +400,31 @@ mod tests {
             .map_err(RepositoryError::Database)
     }
 
+    async fn insert_sales_rep(
+        pool: &DbPool,
+        id: &str,
+        external_user_ref: &str,
+    ) -> Result<(), RepositoryError> {
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO sales_rep (
+                id, external_user_ref, name, email, role, title, team_id, reports_to, status,
+                max_discount_pct, auto_approve_threshold_cents, capabilities_json, config_json,
+                created_at, updated_at
+             ) VALUES (?, ?, ?, NULL, 'ae', NULL, NULL, NULL, 'active', NULL, NULL, '[]', '{}', ?, ?)",
+        )
+        .bind(id)
+        .bind(external_user_ref)
+        .bind(format!("Rep {id}"))
+        .bind(&now)
+        .bind(&now)
+        .execute(pool)
+        .await
+        .map_err(RepositoryError::Database)?;
+
+        Ok(())
+    }
+
     fn test_quote(id: &str, account: Option<&str>) -> Quote {
         let now = Utc::now();
         Quote {
@@ -514,6 +552,30 @@ mod tests {
         let all_quotes = repo.list(None, None, 20, 0).await.map_err(|e| e.to_string())?;
         assert_eq!(all_quotes.len(), 3);
 
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn save_populates_created_by_sales_rep_id_when_actor_matches_external_ref(
+    ) -> Result<(), String> {
+        let pool = in_memory_pool().await.map_err(|error| error.to_string())?;
+        run_pending(&pool).await.map_err(|error| error.to_string())?;
+        insert_sales_rep(&pool, "rep-42", "U-REP-42").await.map_err(|error| error.to_string())?;
+
+        let repo = SqlQuoteRepository::new(pool.clone());
+        let mut quote = test_quote("Q-REP-001", Some("acct_acme"));
+        quote.created_by = "U-REP-42".to_string();
+
+        repo.save(quote.clone()).await.map_err(|error| error.to_string())?;
+
+        let mapped_rep_id: Option<String> =
+            sqlx::query_scalar("SELECT created_by_sales_rep_id FROM quote WHERE id = ?")
+                .bind(&quote.id.0)
+                .fetch_one(&pool)
+                .await
+                .map_err(|error| error.to_string())?;
+
+        assert_eq!(mapped_rep_id.as_deref(), Some("rep-42"));
         Ok(())
     }
 }

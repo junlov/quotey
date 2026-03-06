@@ -1,0 +1,3 @@
+-- SQLite does not support DROP COLUMN in older versions.
+-- These additive columns are safe to leave on rollback.
+-- The budget system simply ignores them when not active.

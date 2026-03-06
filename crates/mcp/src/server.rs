@@ -1507,6 +1507,46 @@ pub struct NegotiationEscalateInput {
     pub reason: String,
 }
 
+// Sales Rep Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RepGetInput {
+    #[schemars(description = "Sales rep ID or external user reference")]
+    pub id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RepListInput {
+    #[serde(default)]
+    #[schemars(description = "Filter by role (ae, se, manager, vp, cro, ops)")]
+    pub role: Option<String>,
+    #[serde(default)]
+    #[schemars(description = "Filter by team ID")]
+    pub team_id: Option<String>,
+    #[serde(default = "default_true")]
+    #[schemars(description = "Only return active reps")]
+    pub active_only: bool,
+    #[serde(default = "default_20")]
+    pub limit: u32,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct RepUpsertInput {
+    #[schemars(description = "Sales rep ID")]
+    pub id: String,
+    #[schemars(description = "Full name")]
+    pub name: String,
+    #[schemars(description = "Role: ae, se, manager, vp, cro, ops")]
+    pub role: String,
+    #[serde(default)]
+    pub email: Option<String>,
+    #[serde(default)]
+    pub title: Option<String>,
+    #[serde(default)]
+    pub team_id: Option<String>,
+    #[serde(default)]
+    pub external_user_ref: Option<String>,
+}
+
 // PDF Types
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct QuotePdfInput {
@@ -3561,6 +3601,200 @@ impl QuoteyMcpServer {
 
         serde_json::to_string_pretty(&result).unwrap_or_default()
     }
+
+    // ── Sales Rep Tools ─────────────────────────────────────────────────
+
+    #[tool(description = "Get a sales rep profile by ID or external user reference")]
+    pub async fn rep_get(&self, Parameters(input): Parameters<RepGetInput>) -> String {
+        debug!(id = %input.id, "rep_get called");
+        self.record_mcp_audit_event("rep_get", None, serde_json::json!({ "id": &input.id })).await;
+
+        let id = input.id.trim().to_string();
+        if id.is_empty() {
+            return tool_error("VALIDATION_ERROR", "id is required", None);
+        }
+
+        let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::SalesRepRepository;
+
+        // Try by ID first, then by external ref
+        let rep =
+            match repo.find_by_id(&quotey_core::domain::sales_rep::SalesRepId(id.clone())).await {
+                Ok(Some(r)) => r,
+                Ok(None) => match repo.find_by_external_user_ref(&id).await {
+                    Ok(Some(r)) => r,
+                    Ok(None) => return tool_error("NOT_FOUND", "Sales rep not found", None),
+                    Err(e) => return internal_tool_error(&e),
+                },
+                Err(e) => return internal_tool_error(&e),
+            };
+
+        let result = sales_rep_to_json(&rep);
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
+
+    #[tool(description = "List sales reps with optional filters by role, team, or status")]
+    pub async fn rep_list(&self, Parameters(input): Parameters<RepListInput>) -> String {
+        debug!("rep_list called");
+        self.record_mcp_audit_event(
+            "rep_list",
+            None,
+            serde_json::json!({
+                "role": &input.role,
+                "team_id": &input.team_id,
+                "active_only": input.active_only,
+                "limit": input.limit,
+            }),
+        )
+        .await;
+
+        let limit = normalize_limit(input.limit);
+        let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::SalesRepRepository;
+
+        let reps = if let Some(ref role) = input.role {
+            let role = role.trim().to_ascii_lowercase();
+            if role.is_empty() {
+                return tool_error("VALIDATION_ERROR", "role filter cannot be empty", None);
+            }
+            repo.list_by_role(&role, input.active_only).await
+        } else if let Some(ref team_id) = input.team_id {
+            let team_id = team_id.trim().to_string();
+            if team_id.is_empty() {
+                return tool_error("VALIDATION_ERROR", "team_id filter cannot be empty", None);
+            }
+            repo.list_by_team(&team_id, input.active_only).await
+        } else {
+            repo.list_active(limit).await
+        };
+
+        match reps {
+            Ok(reps) => {
+                let items: Vec<serde_json::Value> =
+                    reps.into_iter().take(limit as usize).map(|r| sales_rep_to_json(&r)).collect();
+                let result = serde_json::json!({
+                    "count": items.len(),
+                    "items": items,
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Err(e) => internal_tool_error(&e),
+        }
+    }
+
+    #[tool(description = "Create or update a sales rep profile")]
+    pub async fn rep_upsert(&self, Parameters(input): Parameters<RepUpsertInput>) -> String {
+        debug!(id = %input.id, "rep_upsert called");
+        self.record_mcp_audit_event(
+            "rep_upsert",
+            None,
+            serde_json::json!({ "id": &input.id, "name": &input.name, "role": &input.role }),
+        )
+        .await;
+
+        let id = match normalize_id(&input.id, "id") {
+            Ok(v) => v,
+            Err(msg) => return tool_error("VALIDATION_ERROR", &msg, None),
+        };
+
+        let name = input.name.trim().to_string();
+        if name.is_empty() {
+            return tool_error("VALIDATION_ERROR", "name is required", None);
+        }
+
+        let role = match input
+            .role
+            .trim()
+            .to_ascii_lowercase()
+            .parse::<quotey_core::domain::sales_rep::SalesRepRole>()
+        {
+            Ok(r) => r,
+            Err(_) => {
+                return tool_error(
+                    "VALIDATION_ERROR",
+                    "Invalid role. Must be one of: ae, se, manager, vp, cro, ops",
+                    None,
+                );
+            }
+        };
+
+        let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
+        use quotey_db::repositories::SalesRepRepository;
+
+        let now = chrono::Utc::now();
+
+        // Check if exists for update vs create
+        let existing =
+            repo.find_by_id(&quotey_core::domain::sales_rep::SalesRepId(id.clone())).await;
+
+        let rep = match existing {
+            Ok(Some(mut existing)) => {
+                existing.name = name;
+                existing.role = role;
+                if let Some(ref email) = input.email {
+                    existing.email = Some(email.trim().to_string());
+                }
+                if let Some(ref title) = input.title {
+                    existing.title = Some(title.trim().to_string());
+                }
+                if let Some(ref team_id) = input.team_id {
+                    existing.team_id = Some(team_id.trim().to_string());
+                }
+                if let Some(ref ext_ref) = input.external_user_ref {
+                    existing.external_user_ref = Some(ext_ref.trim().to_string());
+                }
+                existing.updated_at = now;
+                existing
+            }
+            Ok(None) => quotey_core::domain::sales_rep::SalesRep {
+                id: quotey_core::domain::sales_rep::SalesRepId(id.clone()),
+                external_user_ref: input.external_user_ref.as_ref().map(|s| s.trim().to_string()),
+                name,
+                email: input.email.as_ref().map(|s| s.trim().to_string()),
+                role,
+                title: input.title.as_ref().map(|s| s.trim().to_string()),
+                team_id: input.team_id.as_ref().map(|s| s.trim().to_string()),
+                reports_to: None,
+                status: quotey_core::domain::sales_rep::SalesRepStatus::Active,
+                max_discount_pct: Some(0.10),
+                auto_approve_threshold_cents: Some(0),
+                capabilities_json: "[]".to_string(),
+                config_json: "{}".to_string(),
+                discount_budget_monthly_cents: 0,
+                spent_discount_cents: 0,
+                created_at: now,
+                updated_at: now,
+            },
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        if let Err(e) = repo.save(rep.clone()).await {
+            return internal_tool_error(&e);
+        }
+
+        let result = sales_rep_to_json(&rep);
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
+}
+
+fn sales_rep_to_json(rep: &quotey_core::domain::sales_rep::SalesRep) -> serde_json::Value {
+    serde_json::json!({
+        "id": rep.id.0,
+        "external_user_ref": rep.external_user_ref,
+        "name": rep.name,
+        "email": rep.email,
+        "role": rep.role.as_str(),
+        "title": rep.title,
+        "team_id": rep.team_id,
+        "reports_to": rep.reports_to.as_ref().map(|id| &id.0),
+        "status": rep.status.as_str(),
+        "max_discount_pct": rep.max_discount_pct,
+        "auto_approve_threshold_cents": rep.auto_approve_threshold_cents,
+        "discount_budget_monthly_cents": rep.discount_budget_monthly_cents,
+        "spent_discount_cents": rep.spent_discount_cents,
+        "created_at": rep.created_at.to_rfc3339(),
+        "updated_at": rep.updated_at.to_rfc3339(),
+    })
 }
 
 #[cfg(test)]

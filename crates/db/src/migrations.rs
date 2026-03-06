@@ -243,6 +243,20 @@ mod tests {
         "idx_negotiation_turn_session_id",
         "idx_negotiation_turn_session_number",
         "idx_negotiation_turn_transition_key",
+        // 0033 — sales rep identity bridge
+        "sales_rep",
+        "idx_sales_rep_external_ref",
+        "idx_sales_rep_role",
+        "idx_sales_rep_reports_to",
+        "idx_sales_rep_status",
+        "idx_quote_created_by_sales_rep_id",
+        "idx_approval_request_requested_by_sales_rep_id",
+        // 0035 — quote comments
+        "quote_comment",
+        "idx_quote_comment_quote_id",
+        "idx_quote_comment_author",
+        // 0037 — org settings
+        "org_settings",
     ];
 
     async fn managed_object_count(pool: &sqlx::SqlitePool, object_name: &str) -> TestResult<i64> {
