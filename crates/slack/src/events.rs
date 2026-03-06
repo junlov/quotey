@@ -4,14 +4,15 @@ use async_trait::async_trait;
 use thiserror::Error;
 
 use crate::{
-    blocks::MessageTemplate,
+    blocks::{Block, MessageTemplate},
     commands::{
-        action_quote_id, infer_thread_quote_command, normalize_quote_command, CommandParseError,
-        CommandRouteError, CommandRouter, NoopQuoteCommandService, QuoteCommandService,
-        SlashCommandPayload,
+        action_quote_id, action_value_pairs, extract_suggestion_feedback,
+        infer_thread_quote_command, normalize_quote_command, CommandParseError, CommandRouteError,
+        CommandRouter, NoopQuoteCommandService, QuoteCommandService, SlashCommandPayload,
     },
 };
 use quotey_core::domain::dialogue::SlackQuoteState;
+use quotey_core::suggestions::SuggestionFeedbackEvent;
 
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct SlackEnvelope {
@@ -106,6 +107,8 @@ pub enum EventHandlerError {
     Route(#[from] CommandRouteError),
     #[error("thread message handler failure: {0}")]
     ThreadMessage(String),
+    #[error("block action handler failure: {0}")]
+    BlockAction(String),
     #[error("reaction approval handler failure: {0}")]
     ReactionApproval(String),
 }
@@ -161,31 +164,83 @@ impl EventDispatcher {
 }
 
 pub fn default_dispatcher() -> EventDispatcher {
+    dispatcher_with_block_action_service(NoopBlockActionService::new())
+}
+
+pub fn dispatcher_with_block_action_service<S>(block_action_service: S) -> EventDispatcher
+where
+    S: BlockActionService + 'static,
+{
     let mut dispatcher = EventDispatcher::new();
     dispatcher.register(SlashCommandHandler::new(NoopQuoteCommandService));
     dispatcher.register(ThreadMessageHandler::new(NoopThreadMessageService::new()));
     dispatcher.register(ReactionAddedHandler::new(NoopReactionApprovalService));
-    dispatcher.register(BlockActionHandler::new(NoopBlockActionService));
+    dispatcher.register(BlockActionHandler::new(block_action_service));
     dispatcher
 }
 
-pub struct SlashCommandHandler<S> {
-    router: CommandRouter<S>,
+#[derive(Clone, Debug, PartialEq)]
+pub struct SuggestionShownRecord {
+    pub request_id: String,
+    pub customer_hint: String,
+    pub product_id: String,
+    pub product_sku: String,
+    pub quote_id: Option<String>,
+    pub score: Option<f64>,
+    pub confidence: Option<String>,
+    pub category_description: Option<String>,
 }
 
-impl<S> SlashCommandHandler<S>
+#[async_trait]
+pub trait SuggestionShownRecorder: Send + Sync {
+    async fn record_shown(
+        &self,
+        records: Vec<SuggestionShownRecord>,
+    ) -> Result<(), EventHandlerError>;
+}
+
+#[derive(Default)]
+pub struct NoopSuggestionShownRecorder;
+
+#[async_trait]
+impl SuggestionShownRecorder for NoopSuggestionShownRecorder {
+    async fn record_shown(
+        &self,
+        _records: Vec<SuggestionShownRecord>,
+    ) -> Result<(), EventHandlerError> {
+        Ok(())
+    }
+}
+
+pub struct SlashCommandHandler<S, R = NoopSuggestionShownRecorder> {
+    router: CommandRouter<S>,
+    shown_recorder: R,
+}
+
+impl<S> SlashCommandHandler<S, NoopSuggestionShownRecorder>
 where
     S: QuoteCommandService,
 {
     pub fn new(service: S) -> Self {
-        Self { router: CommandRouter::new(service) }
+        Self { router: CommandRouter::new(service), shown_recorder: NoopSuggestionShownRecorder }
+    }
+}
+
+impl<S, R> SlashCommandHandler<S, R>
+where
+    S: QuoteCommandService,
+    R: SuggestionShownRecorder,
+{
+    pub fn with_shown_recorder(service: S, shown_recorder: R) -> Self {
+        Self { router: CommandRouter::new(service), shown_recorder }
     }
 }
 
 #[async_trait]
-impl<S> EventHandler for SlashCommandHandler<S>
+impl<S, R> EventHandler for SlashCommandHandler<S, R>
 where
     S: QuoteCommandService + 'static,
+    R: SuggestionShownRecorder + 'static,
 {
     fn event_type(&self) -> SlackEventType {
         SlackEventType::SlashCommand
@@ -201,9 +256,110 @@ where
         };
 
         let normalized = normalize_quote_command(payload.clone())?;
+        let request_id = normalized.request_id.clone();
         let message = self.router.route(normalized)?;
+
+        let shown_records = extract_suggestion_shown_records(&message, &request_id);
+        if !shown_records.is_empty() {
+            if let Err(error) = self.shown_recorder.record_shown(shown_records).await {
+                tracing::warn!(
+                    event_name = "ingress.slack.suggestion_shown.persist_failed",
+                    request_id = %request_id,
+                    error = %error,
+                    "failed to persist suggestion shown records"
+                );
+            }
+        }
+
         Ok(HandlerResult::Responded(message))
     }
+}
+
+fn extract_suggestion_shown_records(
+    message: &MessageTemplate,
+    fallback_request_id: &str,
+) -> Vec<SuggestionShownRecord> {
+    let mut records = Vec::new();
+
+    for block in &message.blocks {
+        let Block::Actions { elements, .. } = block else {
+            continue;
+        };
+
+        for button in elements {
+            if !button.action_id.starts_with("suggest.add.") {
+                continue;
+            }
+            let Some(raw_value) = button.value.as_deref() else {
+                continue;
+            };
+            let Some(pairs) = action_value_pairs(Some(raw_value)) else {
+                continue;
+            };
+
+            let Some(product_id) = pairs
+                .get("product")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+            let Some(product_sku) = pairs
+                .get("sku")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+            else {
+                continue;
+            };
+
+            let request_id = pairs
+                .get("request")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| fallback_request_id.to_owned());
+            let quote_id = pairs
+                .get("quote")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let customer_hint = pairs
+                .get("customer")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned)
+                .unwrap_or_else(|| "unknown".to_owned());
+            let score = pairs
+                .get("score")
+                .and_then(|value| value.trim().parse::<f64>().ok())
+                .filter(|value| value.is_finite());
+            let confidence = pairs
+                .get("confidence")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+            let category_description = pairs
+                .get("category")
+                .map(|value| value.trim())
+                .filter(|value| !value.is_empty())
+                .map(ToOwned::to_owned);
+
+            records.push(SuggestionShownRecord {
+                request_id,
+                customer_hint,
+                product_id,
+                product_sku,
+                quote_id,
+                score,
+                confidence,
+                category_description,
+            });
+        }
+    }
+
+    records
 }
 
 #[async_trait]
@@ -389,6 +545,27 @@ pub trait BlockActionService: Send + Sync {
     ) -> Result<Option<MessageTemplate>, EventHandlerError>;
 }
 
+#[async_trait]
+pub trait SuggestionFeedbackRecorder: Send + Sync {
+    async fn record_feedback(
+        &self,
+        event: SuggestionFeedbackEvent,
+    ) -> Result<(), EventHandlerError>;
+}
+
+#[derive(Default)]
+pub struct NoopSuggestionFeedbackRecorder;
+
+#[async_trait]
+impl SuggestionFeedbackRecorder for NoopSuggestionFeedbackRecorder {
+    async fn record_feedback(
+        &self,
+        _event: SuggestionFeedbackEvent,
+    ) -> Result<(), EventHandlerError> {
+        Ok(())
+    }
+}
+
 pub struct BlockActionHandler<S> {
     service: S,
 }
@@ -428,16 +605,55 @@ where
     }
 }
 
-pub struct NoopBlockActionService;
+pub struct NoopBlockActionService<R = NoopSuggestionFeedbackRecorder> {
+    feedback_recorder: R,
+}
+
+impl NoopBlockActionService<NoopSuggestionFeedbackRecorder> {
+    pub fn new() -> Self {
+        Self { feedback_recorder: NoopSuggestionFeedbackRecorder }
+    }
+}
+
+impl Default for NoopBlockActionService<NoopSuggestionFeedbackRecorder> {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl<R> NoopBlockActionService<R>
+where
+    R: SuggestionFeedbackRecorder,
+{
+    pub fn with_feedback_recorder(feedback_recorder: R) -> Self {
+        Self { feedback_recorder }
+    }
+}
 
 #[async_trait]
-impl BlockActionService for NoopBlockActionService {
+impl<R> BlockActionService for NoopBlockActionService<R>
+where
+    R: SuggestionFeedbackRecorder,
+{
     async fn handle_block_action(
         &self,
         event: &BlockActionEvent,
         ctx: &EventContext,
     ) -> Result<Option<MessageTemplate>, EventHandlerError> {
         let request_id = event.request_id.as_deref().unwrap_or(&ctx.correlation_id);
+        if let Some(feedback_event) =
+            extract_suggestion_feedback(&event.action_id, event.value.as_deref(), request_id)
+        {
+            if let Err(error) = self.feedback_recorder.record_feedback(feedback_event).await {
+                tracing::warn!(
+                    event_name = "ingress.slack.suggestion_feedback.persist_failed",
+                    action_id = %event.action_id,
+                    request_id = %request_id,
+                    error = %error,
+                    "failed to persist suggestion feedback"
+                );
+            }
+        }
         if event.action_id == "quote.help.v1" {
             return Ok(Some(crate::blocks::help_message()));
         }
@@ -681,14 +897,51 @@ fn parse_thread_ts_from_value(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::sync::{Arc, Mutex};
+
     use super::{
-        async_trait, default_dispatcher, BlockActionEvent, EventContext, EventDispatcher,
-        EventHandlerError, HandlerResult, NoopSessionLookup, ReactionAddedEvent,
-        ReactionApprovalAction, ResumableSessionInfo, ResumableThreadMessageService, SessionLookup,
-        SlackEnvelope, SlackEvent, ThreadMessageEvent, ThreadMessageService,
+        async_trait, default_dispatcher, BlockActionEvent, BlockActionService, EventContext,
+        EventDispatcher, EventHandler, EventHandlerError, HandlerResult, NoopBlockActionService,
+        NoopSessionLookup, ReactionAddedEvent, ReactionApprovalAction, ResumableSessionInfo,
+        ResumableThreadMessageService, SessionLookup, SlackEnvelope, SlackEvent,
+        SlashCommandHandler, SuggestionFeedbackRecorder, SuggestionShownRecord,
+        SuggestionShownRecorder, ThreadMessageEvent, ThreadMessageService,
     };
-    use crate::commands::SlashCommandPayload;
+    use crate::commands::{NoopQuoteCommandService, SlashCommandPayload};
     use quotey_core::domain::dialogue::SlackQuoteState;
+    use quotey_core::suggestions::SuggestionFeedbackEvent;
+
+    #[derive(Clone, Default)]
+    struct RecordingSuggestionFeedbackRecorder {
+        events: Arc<Mutex<Vec<SuggestionFeedbackEvent>>>,
+    }
+
+    #[async_trait]
+    impl SuggestionFeedbackRecorder for RecordingSuggestionFeedbackRecorder {
+        async fn record_feedback(
+            &self,
+            event: SuggestionFeedbackEvent,
+        ) -> Result<(), EventHandlerError> {
+            self.events.lock().expect("lock events").push(event);
+            Ok(())
+        }
+    }
+
+    #[derive(Clone, Default)]
+    struct RecordingSuggestionShownRecorder {
+        records: Arc<Mutex<Vec<SuggestionShownRecord>>>,
+    }
+
+    #[async_trait]
+    impl SuggestionShownRecorder for RecordingSuggestionShownRecorder {
+        async fn record_shown(
+            &self,
+            records: Vec<SuggestionShownRecord>,
+        ) -> Result<(), EventHandlerError> {
+            self.records.lock().expect("lock shown records").extend(records);
+            Ok(())
+        }
+    }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)
     #[tokio::test]
@@ -710,6 +963,38 @@ mod tests {
             dispatcher.dispatch(&envelope, &EventContext::default()).await.expect("dispatch");
 
         assert!(matches!(result, HandlerResult::Responded(_)));
+    }
+
+    #[tokio::test]
+    async fn slash_command_handler_records_suggestion_shown_records() {
+        let recorder = RecordingSuggestionShownRecorder::default();
+        let captured = recorder.records.clone();
+        let handler = SlashCommandHandler::with_shown_recorder(NoopQuoteCommandService, recorder);
+
+        let envelope = SlackEnvelope {
+            envelope_id: "env-suggest-shown-1".to_owned(),
+            event: SlackEvent::SlashCommand(SlashCommandPayload {
+                command: "/quote".to_owned(),
+                text: "suggest Q-2026-0501 for Acme Corp".to_owned(),
+                channel_id: "C1".to_owned(),
+                user_id: "U1".to_owned(),
+                trigger_ts: "1".to_owned(),
+                request_id: "req-suggest-shown".to_owned(),
+            }),
+        };
+
+        let result = handler
+            .handle(&envelope, &EventContext::default())
+            .await
+            .expect("slash command should be handled");
+        assert!(matches!(result, HandlerResult::Responded(_)));
+
+        let records = captured.lock().expect("lock shown records");
+        assert_eq!(records.len(), 3, "noop suggestion service should emit three shown records");
+        assert!(records.iter().all(|record| record.request_id == "req-suggest-shown"));
+        assert!(records.iter().all(|record| record.customer_hint == "Acme Corp"));
+        assert!(records.iter().all(|record| record.quote_id.as_deref() == Some("Q-2026-0501")));
+        assert!(records.iter().all(|record| record.score.is_some()));
     }
 
     #[tokio::test]
@@ -805,6 +1090,136 @@ mod tests {
             _ => unreachable!(),
         };
         assert!(message.fallback_text.contains("Preview mode active"));
+    }
+
+    #[tokio::test]
+    async fn noop_block_action_service_records_add_suggestion_feedback_event() {
+        let recorder = RecordingSuggestionFeedbackRecorder::default();
+        let captured = recorder.events.clone();
+        let service = NoopBlockActionService::with_feedback_recorder(recorder);
+        let event = BlockActionEvent {
+            channel_id: "C1".to_owned(),
+            message_ts: "1730000001.1111".to_owned(),
+            thread_ts: Some("1730000001.0000".to_owned()),
+            user_id: "U12".to_owned(),
+            action_id: "suggest.add.0.v1".to_owned(),
+            value: Some(
+                "request=req-suggest-origin-add;quote=Q-2026-1012;product=prod_sso;sku=SKU-SSO"
+                    .to_owned(),
+            ),
+            quote_id: Some("Q-2026-1012".to_owned()),
+            request_id: Some("req-suggest-add".to_owned()),
+        };
+
+        let result = service
+            .handle_block_action(&event, &EventContext::default())
+            .await
+            .expect("block action should succeed");
+        assert!(result.is_some());
+
+        let events = captured.lock().expect("lock events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            SuggestionFeedbackEvent::Added {
+                request_id: "req-suggest-origin-add".to_owned(),
+                product_id: "prod_sso".to_owned(),
+                product_sku: "SKU-SSO".to_owned(),
+                quote_id: Some("Q-2026-1012".to_owned()),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn noop_block_action_service_records_details_suggestion_feedback_event() {
+        let recorder = RecordingSuggestionFeedbackRecorder::default();
+        let captured = recorder.events.clone();
+        let service = NoopBlockActionService::with_feedback_recorder(recorder);
+        let event = BlockActionEvent {
+            channel_id: "C1".to_owned(),
+            message_ts: "1730000001.2222".to_owned(),
+            thread_ts: Some("1730000001.0000".to_owned()),
+            user_id: "U13".to_owned(),
+            action_id: "suggest.details.0.v1".to_owned(),
+            value: Some("request=req-suggest-origin-details;product=prod_bundle".to_owned()),
+            quote_id: Some("Q-2026-1013".to_owned()),
+            request_id: Some("req-suggest-details".to_owned()),
+        };
+
+        let result = service
+            .handle_block_action(&event, &EventContext::default())
+            .await
+            .expect("block action should succeed");
+        assert!(result.is_some());
+
+        let events = captured.lock().expect("lock events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            SuggestionFeedbackEvent::Clicked {
+                request_id: "req-suggest-origin-details".to_owned(),
+                product_id: "prod_bundle".to_owned(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn noop_block_action_service_records_hide_suggestion_feedback_event() {
+        let recorder = RecordingSuggestionFeedbackRecorder::default();
+        let captured = recorder.events.clone();
+        let service = NoopBlockActionService::with_feedback_recorder(recorder);
+        let event = BlockActionEvent {
+            channel_id: "C1".to_owned(),
+            message_ts: "1730000001.2555".to_owned(),
+            thread_ts: Some("1730000001.0000".to_owned()),
+            user_id: "U13".to_owned(),
+            action_id: "suggest.hide.0.v1".to_owned(),
+            value: Some("request=req-suggest-origin-hide;product=prod_bundle".to_owned()),
+            quote_id: Some("Q-2026-1013".to_owned()),
+            request_id: Some("req-suggest-hide".to_owned()),
+        };
+
+        let result = service
+            .handle_block_action(&event, &EventContext::default())
+            .await
+            .expect("block action should succeed");
+        assert!(result.is_some());
+
+        let events = captured.lock().expect("lock events");
+        assert_eq!(events.len(), 1);
+        assert_eq!(
+            events[0],
+            SuggestionFeedbackEvent::Hidden {
+                request_id: "req-suggest-origin-hide".to_owned(),
+                product_id: "prod_bundle".to_owned(),
+            }
+        );
+    }
+
+    #[tokio::test]
+    async fn noop_block_action_service_ignores_non_suggestion_feedback_actions() {
+        let recorder = RecordingSuggestionFeedbackRecorder::default();
+        let captured = recorder.events.clone();
+        let service = NoopBlockActionService::with_feedback_recorder(recorder);
+        let event = BlockActionEvent {
+            channel_id: "C1".to_owned(),
+            message_ts: "1730000001.3333".to_owned(),
+            thread_ts: Some("1730000001.0000".to_owned()),
+            user_id: "U14".to_owned(),
+            action_id: "quote.refresh.v1".to_owned(),
+            value: Some("quote=Q-2026-1014".to_owned()),
+            quote_id: Some("Q-2026-1014".to_owned()),
+            request_id: Some("req-refresh".to_owned()),
+        };
+
+        let result = service
+            .handle_block_action(&event, &EventContext::default())
+            .await
+            .expect("block action should succeed");
+        assert!(result.is_some());
+
+        let events = captured.lock().expect("lock events");
+        assert!(events.is_empty());
     }
 
     /// qa-tag: fake-in-memory-critical-path (bd-3vp2.1)

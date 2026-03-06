@@ -37,6 +37,11 @@ pub struct ReconnectPolicy {
     pub max_delay_ms: u64,
 }
 
+/// Hard upper bound on retries to prevent infinite reconnect loops.
+const MAX_RETRIES_CAP: u32 = 100;
+/// Minimum base delay to prevent tight reconnect loops.
+const MIN_BASE_DELAY_MS: u64 = 50;
+
 impl Default for ReconnectPolicy {
     fn default() -> Self {
         Self { max_retries: 5, base_delay_ms: 250, max_delay_ms: 5_000 }
@@ -47,8 +52,15 @@ impl ReconnectPolicy {
     fn backoff(&self, attempt: u32) -> Duration {
         let exponent = attempt.min(16);
         let multiplier = 1_u64 << exponent;
-        let delay_ms = self.base_delay_ms.saturating_mul(multiplier).min(self.max_delay_ms);
+        let base = self.base_delay_ms.max(MIN_BASE_DELAY_MS);
+        let max = self.max_delay_ms.max(base);
+        let delay_ms = base.saturating_mul(multiplier).min(max);
         Duration::from_millis(delay_ms)
+    }
+
+    /// Returns max_retries clamped to a safe upper bound.
+    fn effective_max_retries(&self) -> u32 {
+        self.max_retries.min(MAX_RETRIES_CAP)
     }
 }
 
@@ -136,20 +148,21 @@ impl SocketModeRunner {
             );
         }
 
-        for attempt in 0..=self.reconnect_policy.max_retries {
+        let max_retries = self.reconnect_policy.effective_max_retries();
+        for attempt in 0..=max_retries {
             match self.connect_and_pump(attempt).await {
                 Ok(()) => return Ok(()),
                 Err(transport_error) => {
                     warn!(
                         attempt,
-                        max_retries = self.reconnect_policy.max_retries,
+                        max_retries,
                         error = %transport_error,
                         "socket mode transport failed"
                     );
 
-                    if attempt >= self.reconnect_policy.max_retries {
+                    if attempt >= max_retries {
                         warn!(
-                            max_retries = self.reconnect_policy.max_retries,
+                            max_retries,
                             "socket mode retries exhausted after {} attempts; returning startup error",
                             attempt + 1
                         );
@@ -161,9 +174,7 @@ impl SocketModeRunner {
                     }
 
                     let delay = self.reconnect_policy.backoff(attempt);
-                    if !delay.is_zero() {
-                        tokio::time::sleep(delay).await;
-                    }
+                    tokio::time::sleep(delay).await;
                 }
             }
         }
@@ -251,9 +262,15 @@ fn correlation_fields(envelope: &SlackEnvelope) -> (Option<String>, Option<Strin
     }
 }
 
+/// Maximum length for extracted quote IDs (prevents memory/log abuse from crafted input).
+const MAX_QUOTE_ID_LEN: usize = 64;
+
 fn quote_id_from_text(text: &str) -> Option<String> {
     text.split_whitespace().find_map(|token| {
         let candidate = token.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-');
+        if candidate.len() > MAX_QUOTE_ID_LEN {
+            return None;
+        }
         let normalized = candidate.to_ascii_uppercase();
         // Accept Q- prefix followed by alphanumeric segments (e.g., Q-2026-0032, Q-ABC-123, Q-X123)
         if normalized.starts_with("Q-") && normalized.len() >= 3 && normalized[2..].contains('-') {

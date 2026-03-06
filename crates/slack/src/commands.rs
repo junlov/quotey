@@ -26,7 +26,15 @@ const SUPPORTED_QUOTE_VERBS: [&str; 15] = [
     "parse-email",
     "parse-rfp",
 ];
-const SUPPORTED_QUOTEY_VERBS: [&str; 2] = ["help", "branding"];
+const SUPPORTED_QUOTEY_VERBS: [&str; 7] =
+    ["help", "branding", "crm-status", "crm", "crm-mapping", "mapping", "map"];
+
+/// Maximum input length for slash command text (prevents excessive allocation from crafted input).
+const MAX_COMMAND_INPUT_LEN: usize = 2048;
+const DEFAULT_BRANDING_COMPANY_NAME: &str = "Quotey";
+const DEFAULT_BRANDING_PRIMARY_COLOR: &str = "#2563eb";
+const DEFAULT_BRANDING_SECONDARY_COLOR: &str = "#1e40af";
+const DEFAULT_BRANDING_ACCENT_COLOR: &str = "#3b82f6";
 
 fn suggest_supported_verb(input: &str) -> Option<&'static str> {
     let input = input.trim().to_ascii_lowercase();
@@ -103,6 +111,8 @@ pub enum QuoteCommand {
     ParseEmail { freeform_args: String },
     ParseRfp { freeform_args: String },
     Branding { freeform_args: String },
+    CrmStatus { freeform_args: String },
+    CrmMapping { freeform_args: String },
     Help,
     Unknown { verb: String, freeform_args: String },
 }
@@ -172,7 +182,13 @@ pub fn normalize_quote_command(
         _ => return Err(CommandParseError::UnsupportedCommand(payload.command)),
     };
 
-    let text = payload.text.trim().to_owned();
+    let raw_text = payload.text.trim();
+    if raw_text.len() > MAX_COMMAND_INPUT_LEN {
+        return Err(CommandParseError::UnsupportedCommand(
+            "command text exceeds maximum length".to_string(),
+        ));
+    }
+    let text = raw_text.to_owned();
     let mut parts = text.split_whitespace();
     let verb = if command == "quote" {
         normalize_quote_command_verb(parts.next().unwrap_or("help"))
@@ -198,7 +214,7 @@ pub fn normalize_quote_command(
 
 pub fn parse_quote_command(input: &str) -> QuoteCommand {
     let trimmed = input.trim();
-    if trimmed.is_empty() {
+    if trimmed.is_empty() || trimmed.len() > MAX_COMMAND_INPUT_LEN {
         return QuoteCommand::Help;
     }
 
@@ -592,6 +608,12 @@ where
             QuoteCommand::Branding { freeform_args } => {
                 self.service.manage_branding(freeform_args, &envelope)
             }
+            QuoteCommand::CrmStatus { freeform_args } => {
+                self.service.crm_sync_status(freeform_args, &envelope)
+            }
+            QuoteCommand::CrmMapping { freeform_args } => {
+                self.service.crm_field_mapping(freeform_args, &envelope)
+            }
             QuoteCommand::Help => Ok(blocks::help_message()),
             QuoteCommand::Unknown { verb, .. } => {
                 let is_quotey = envelope.command.eq_ignore_ascii_case("quotey");
@@ -719,6 +741,18 @@ pub trait QuoteCommandService: Send + Sync {
     ) -> Result<MessageTemplate, CommandRouteError>;
 
     fn manage_branding(
+        &self,
+        freeform_args: String,
+        envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError>;
+
+    fn crm_sync_status(
+        &self,
+        freeform_args: String,
+        envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError>;
+
+    fn crm_field_mapping(
         &self,
         freeform_args: String,
         envelope: &CommandEnvelope,
@@ -1042,15 +1076,67 @@ impl QuoteCommandService for NoopQuoteCommandService {
 
     fn manage_branding(
         &self,
-        _freeform_args: String,
+        freeform_args: String,
         _envelope: &CommandEnvelope,
     ) -> Result<MessageTemplate, CommandRouteError> {
+        let preview = parse_branding_preview(&freeform_args);
         Ok(blocks::branding_settings_message(&blocks::BrandingSettingsView {
-            company_name: "Quotey".to_owned(),
-            current_logo_url: None,
-            primary_color: "#2563eb".to_owned(),
-            secondary_color: "#1e40af".to_owned(),
-            accent_color: "#3b82f6".to_owned(),
+            company_name: preview.company_name,
+            current_logo_url: preview.current_logo_url,
+            primary_color: preview.primary_color,
+            secondary_color: preview.secondary_color,
+            accent_color: preview.accent_color,
+            pending_updates: preview.pending_updates,
+            validation_warnings: preview.validation_warnings,
+            status_message: if freeform_args.trim().is_empty() {
+                None
+            } else {
+                Some(
+                    "Applied branding updates from command input. Review preview and click Save Branding to stage persistence."
+                        .to_owned(),
+                )
+            },
+            request_id: _envelope.request_id.clone(),
+        }))
+    }
+
+    fn crm_sync_status(
+        &self,
+        freeform_args: String,
+        _envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError> {
+        let preview = parse_crm_status_preview(&freeform_args);
+        Ok(blocks::crm_sync_alert_summary_message(&blocks::CrmSyncAlertSummaryView {
+            failed_last_24h: preview.failed_last_24h,
+            stale_retrying: preview.stale_retrying,
+            near_retry_limit: preview.near_retry_limit,
+            request_id: _envelope.request_id.clone(),
+        }))
+    }
+
+    fn crm_field_mapping(
+        &self,
+        freeform_args: String,
+        _envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError> {
+        let preview = parse_crm_field_mapping_preview(&freeform_args);
+        Ok(blocks::crm_field_mapping_message(&blocks::CrmFieldMappingSummaryView {
+            quotey_to_crm: preview
+                .quotey_to_crm
+                .iter()
+                .map(|(quotey_field, crm_field)| blocks::CrmFieldMappingEntryView {
+                    source_field: quotey_field.clone(),
+                    target_field: crm_field.clone(),
+                })
+                .collect(),
+            crm_to_quotey: preview
+                .crm_to_quotey
+                .iter()
+                .map(|(crm_field, quotey_field)| blocks::CrmFieldMappingEntryView {
+                    source_field: crm_field.clone(),
+                    target_field: quotey_field.clone(),
+                })
+                .collect(),
             request_id: _envelope.request_id.clone(),
         }))
     }
@@ -1159,9 +1245,329 @@ fn classify_quote_command(verb: &str, freeform_args: String) -> QuoteCommand {
 fn classify_quotey_command(verb: &str, freeform_args: String) -> QuoteCommand {
     match verb {
         "branding" => QuoteCommand::Branding { freeform_args },
+        "crm-mapping" | "crm_mapping" | "crmmapping" | "mapping" | "map" => {
+            QuoteCommand::CrmMapping { freeform_args }
+        }
+        "crm" => {
+            let normalized = freeform_args.trim().to_ascii_lowercase();
+            if normalized.starts_with("mapping")
+                || normalized.starts_with("map")
+                || normalized.starts_with("field-mapping")
+                || normalized.starts_with("field_mapping")
+            {
+                QuoteCommand::CrmMapping { freeform_args }
+            } else {
+                QuoteCommand::CrmStatus { freeform_args }
+            }
+        }
+        "crm-status" | "crm_status" | "crmstatus" | "sync-status" | "sync" => {
+            QuoteCommand::CrmStatus { freeform_args }
+        }
         "help" => QuoteCommand::Help,
         _ => QuoteCommand::Unknown { verb: verb.to_owned(), freeform_args },
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct CrmStatusPreview {
+    failed_last_24h: u32,
+    stale_retrying: u32,
+    near_retry_limit: u32,
+}
+
+fn parse_crm_status_preview(args: &str) -> CrmStatusPreview {
+    let mut preview =
+        CrmStatusPreview { failed_last_24h: 0, stale_retrying: 0, near_retry_limit: 0 };
+
+    for token in args.split_whitespace() {
+        let Some((raw_key, raw_value)) = token.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim().to_ascii_lowercase();
+        let value = raw_value.trim().trim_end_matches(',').trim_end_matches('.');
+        let Some(parsed) = value.parse::<u32>().ok() else {
+            continue;
+        };
+
+        match key.as_str() {
+            "failed" | "failed24h" | "failed_last_24h" => preview.failed_last_24h = parsed,
+            "stale" | "stale_retrying" | "retrying" => preview.stale_retrying = parsed,
+            "near" | "near_limit" | "near_retry_limit" | "retry_budget" => {
+                preview.near_retry_limit = parsed
+            }
+            _ => {}
+        }
+    }
+
+    preview
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct CrmFieldMappingPreview {
+    quotey_to_crm: Vec<(String, String)>,
+    crm_to_quotey: Vec<(String, String)>,
+}
+
+fn parse_crm_mapping_pair(raw: &str) -> Option<(String, String)> {
+    let cleaned = raw.trim().trim_end_matches(',').trim_end_matches('.');
+    let split = cleaned.split_once("->").or_else(|| cleaned.split_once(':'))?;
+    let source = split.0.trim();
+    let target = split.1.trim();
+    if source.is_empty() || target.is_empty() {
+        return None;
+    }
+    Some((source.to_owned(), target.to_owned()))
+}
+
+fn parse_crm_field_mapping_preview(args: &str) -> CrmFieldMappingPreview {
+    let mut preview = CrmFieldMappingPreview {
+        quotey_to_crm: vec![
+            ("quote.total".to_owned(), "Opportunity.Amount".to_owned()),
+            ("quote.discount".to_owned(), "Opportunity.Discount".to_owned()),
+        ],
+        crm_to_quotey: vec![
+            ("Account.Industry".to_owned(), "account.industry".to_owned()),
+            ("Opportunity.StageName".to_owned(), "quote.stage".to_owned()),
+        ],
+    };
+    let mut has_q2c_override = false;
+    let mut has_c2q_override = false;
+
+    for token in args.split_whitespace() {
+        let Some((raw_key, raw_value)) = token.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim().to_ascii_lowercase();
+        let Some((source, target)) = parse_crm_mapping_pair(raw_value) else {
+            continue;
+        };
+
+        match key.as_str() {
+            "q2c" | "quotey_to_crm" | "outbound" => {
+                if !has_q2c_override {
+                    preview.quotey_to_crm.clear();
+                    has_q2c_override = true;
+                }
+                preview.quotey_to_crm.push((source, target));
+            }
+            "c2q" | "crm_to_quotey" | "inbound" => {
+                if !has_c2q_override {
+                    preview.crm_to_quotey.clear();
+                    has_c2q_override = true;
+                }
+                preview.crm_to_quotey.push((source, target));
+            }
+            _ => {}
+        }
+    }
+
+    preview
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BrandingPreview {
+    company_name: String,
+    current_logo_url: Option<String>,
+    primary_color: String,
+    secondary_color: String,
+    accent_color: String,
+    pending_updates: Vec<String>,
+    validation_warnings: Vec<String>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct BrandingPreviewState {
+    company_name: String,
+    current_logo_url: Option<String>,
+    primary_color: String,
+    secondary_color: String,
+    accent_color: String,
+    company_updated: bool,
+    logo_updated: bool,
+    primary_updated: bool,
+    secondary_updated: bool,
+    accent_updated: bool,
+    validation_warnings: Vec<String>,
+}
+
+impl Default for BrandingPreviewState {
+    fn default() -> Self {
+        Self {
+            company_name: DEFAULT_BRANDING_COMPANY_NAME.to_owned(),
+            current_logo_url: None,
+            primary_color: DEFAULT_BRANDING_PRIMARY_COLOR.to_owned(),
+            secondary_color: DEFAULT_BRANDING_SECONDARY_COLOR.to_owned(),
+            accent_color: DEFAULT_BRANDING_ACCENT_COLOR.to_owned(),
+            company_updated: false,
+            logo_updated: false,
+            primary_updated: false,
+            secondary_updated: false,
+            accent_updated: false,
+            validation_warnings: Vec::new(),
+        }
+    }
+}
+
+impl BrandingPreviewState {
+    fn apply_pair(&mut self, raw_key: &str, raw_value: &str) {
+        let key = raw_key.trim().to_ascii_lowercase();
+        let value = raw_value
+            .trim()
+            .trim_matches(|ch| ch == '"' || ch == '\'')
+            .trim_end_matches(',')
+            .trim_end_matches('.')
+            .trim();
+        if value.is_empty() {
+            return;
+        }
+
+        match key.as_str() {
+            "company" | "company_name" | "name" => {
+                self.company_name = value.to_owned();
+                self.company_updated = true;
+            }
+            "logo" | "logo_url" | "current_logo" | "current_logo_url" => {
+                let normalized = value.to_ascii_lowercase();
+                self.current_logo_url =
+                    if matches!(normalized.as_str(), "none" | "clear" | "remove") {
+                        None
+                    } else {
+                        Some(value.to_owned())
+                    };
+                self.logo_updated = true;
+            }
+            "primary" | "primary_color" => {
+                if let Some(color) = normalize_branding_color(value) {
+                    self.primary_color = color;
+                    self.primary_updated = true;
+                } else {
+                    self.validation_warnings.push(format!(
+                        "Ignored invalid primary color `{value}` (use #RRGGBB or #RGB).",
+                    ));
+                }
+            }
+            "secondary" | "secondary_color" => {
+                if let Some(color) = normalize_branding_color(value) {
+                    self.secondary_color = color;
+                    self.secondary_updated = true;
+                } else {
+                    self.validation_warnings.push(format!(
+                        "Ignored invalid secondary color `{value}` (use #RRGGBB or #RGB).",
+                    ));
+                }
+            }
+            "accent" | "accent_color" => {
+                if let Some(color) = normalize_branding_color(value) {
+                    self.accent_color = color;
+                    self.accent_updated = true;
+                } else {
+                    self.validation_warnings.push(format!(
+                        "Ignored invalid accent color `{value}` (use #RRGGBB or #RGB).",
+                    ));
+                }
+            }
+            _ => {}
+        }
+    }
+
+    fn finish(self) -> BrandingPreview {
+        let mut pending_updates = Vec::new();
+        if self.company_updated {
+            pending_updates.push(format!("Company name → {}", self.company_name));
+        }
+        if self.logo_updated {
+            let logo = self.current_logo_url.as_deref().unwrap_or("(cleared)");
+            pending_updates.push(format!("Logo URL → {logo}"));
+        }
+        if self.primary_updated {
+            pending_updates.push(format!("Primary color → {}", self.primary_color));
+        }
+        if self.secondary_updated {
+            pending_updates.push(format!("Secondary color → {}", self.secondary_color));
+        }
+        if self.accent_updated {
+            pending_updates.push(format!("Accent color → {}", self.accent_color));
+        }
+
+        BrandingPreview {
+            company_name: self.company_name,
+            current_logo_url: self.current_logo_url,
+            primary_color: self.primary_color,
+            secondary_color: self.secondary_color,
+            accent_color: self.accent_color,
+            pending_updates,
+            validation_warnings: self.validation_warnings,
+        }
+    }
+}
+
+fn parse_key_value_args(args: &str) -> Vec<(String, String)> {
+    let mut pairs = Vec::new();
+    let mut tokens = args.split_whitespace().peekable();
+
+    while let Some(token) = tokens.next() {
+        let Some((raw_key, raw_value)) = token.split_once('=') else {
+            continue;
+        };
+        let key = raw_key.trim();
+        if key.is_empty() {
+            continue;
+        }
+
+        let mut value = raw_value.trim().to_owned();
+        if let Some(quote_char) = value.chars().next().filter(|ch| *ch == '"' || *ch == '\'') {
+            while !value.ends_with(quote_char) {
+                let Some(next) = tokens.next() else {
+                    break;
+                };
+                value.push(' ');
+                value.push_str(next);
+            }
+        }
+        pairs.push((key.to_owned(), value));
+    }
+
+    pairs
+}
+
+fn normalize_branding_color(value: &str) -> Option<String> {
+    let raw = value.trim();
+    let hex = raw.strip_prefix('#').unwrap_or(raw);
+
+    if hex.len() == 3 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        let mut expanded = String::with_capacity(6);
+        for ch in hex.chars() {
+            expanded.push(ch);
+            expanded.push(ch);
+        }
+        return Some(format!("#{}", expanded.to_ascii_lowercase()));
+    }
+
+    if hex.len() == 6 && hex.chars().all(|ch| ch.is_ascii_hexdigit()) {
+        return Some(format!("#{}", hex.to_ascii_lowercase()));
+    }
+
+    None
+}
+
+fn parse_branding_preview(args: &str) -> BrandingPreview {
+    let mut state = BrandingPreviewState::default();
+    for (key, value) in parse_key_value_args(args) {
+        state.apply_pair(&key, &value);
+    }
+    state.finish()
+}
+
+fn parse_branding_preview_from_action_pairs(
+    pairs: Option<&HashMap<String, String>>,
+) -> BrandingPreview {
+    let mut state = BrandingPreviewState::default();
+    if let Some(pairs) = pairs {
+        for (key, value) in pairs {
+            state.apply_pair(key, value);
+        }
+    }
+    state.finish()
 }
 
 fn extract_account_hint(verb: &str, args: &str) -> Option<String> {
@@ -1377,16 +1783,80 @@ pub fn handle_block_action(
             let payload = raw_value.ok_or(CommandRouteError::InvalidSimulationActionPayload)?;
             handle_simulation_promotion_action(payload, request_id)
         }
-        "quotey.branding.open_modal.v1" => Ok(blocks::preview_mode_message(
-            "/quotey branding",
+        "quotey.branding.open_modal.v1" => {
+            let preview = parse_branding_preview_from_action_pairs(value_pairs.as_ref());
+            Ok(blocks::branding_settings_message(&blocks::BrandingSettingsView {
+                company_name: preview.company_name,
+                current_logo_url: preview.current_logo_url,
+                primary_color: preview.primary_color,
+                secondary_color: preview.secondary_color,
+                accent_color: preview.accent_color,
+                pending_updates: preview.pending_updates,
+                validation_warnings: preview.validation_warnings,
+                status_message: Some(
+                    "Modal preview ready: current logo, upload field, color pickers, live preview, and save control are staged."
+                        .to_owned(),
+                ),
+                request_id: request_id.to_owned(),
+            }))
+        }
+        "quotey.branding.save.v1" => {
+            let preview = parse_branding_preview_from_action_pairs(value_pairs.as_ref());
+            let status_message = if preview.pending_updates.is_empty() {
+                "No staged branding updates found. Provide values in `/quotey branding company=... logo=... primary=#... secondary=#... accent=#...` before saving."
+                    .to_owned()
+            } else {
+                format!(
+                    "Save request captured for {} branding update(s). Persist these values in your branding config source of truth.",
+                    preview.pending_updates.len()
+                )
+            };
+            Ok(blocks::branding_settings_message(&blocks::BrandingSettingsView {
+                company_name: preview.company_name,
+                current_logo_url: preview.current_logo_url,
+                primary_color: preview.primary_color,
+                secondary_color: preview.secondary_color,
+                accent_color: preview.accent_color,
+                pending_updates: preview.pending_updates,
+                validation_warnings: preview.validation_warnings,
+                status_message: Some(status_message),
+                request_id: request_id.to_owned(),
+            }))
+        }
+        "quotey.crm.events.history.v1" => Ok(blocks::preview_mode_message(
+            "/quotey crm-status",
             None,
-            "branding modal open requested; logo upload + color pickers + live preview are prepared",
+            "CRM sync history requested. Fetch `/api/v1/crm/events` with filters for provider/status/quote.",
             request_id,
         )),
-        "quotey.branding.save.v1" => Ok(blocks::preview_mode_message(
-            "/quotey branding",
+        "quotey.crm.events.stats.v1" => Ok(blocks::preview_mode_message(
+            "/quotey crm-status",
             None,
-            "branding save requested; changes will persist once runtime wiring is connected",
+            "CRM aggregate metrics requested. Fetch `/api/v1/crm/events/stats` for status/provider/direction totals.",
+            request_id,
+        )),
+        "quotey.crm.events.retry.v1" => Ok(blocks::preview_mode_message(
+            "/quotey crm-status",
+            None,
+            "CRM replay requested. Use `POST /api/v1/crm/events/{event_id}/retry` for targeted retry or `POST /api/v1/crm/sync/batch` for bounded replay.",
+            request_id,
+        )),
+        "quotey.crm.mapping.edit.v1" => Ok(blocks::preview_mode_message(
+            "/quotey crm mapping",
+            None,
+            "CRM field mapping editor requested. Persist updates via `POST /api/v1/crm/mappings` (upsert) with provider + direction + field pairs.",
+            request_id,
+        )),
+        "quotey.crm.mapping.refresh.v1" => Ok(blocks::preview_mode_message(
+            "/quotey crm mapping",
+            None,
+            "CRM mapping refresh requested. Fetch current mappings from `/api/v1/crm/mappings` and regroup by direction for Slack display.",
+            request_id,
+        )),
+        "quotey.crm.mapping.export.v1" => Ok(blocks::preview_mode_message(
+            "/quotey crm mapping",
+            None,
+            "CRM mapping export requested. Snapshot active mappings from `/api/v1/crm/mappings` for change review and approvals.",
             request_id,
         )),
         "quote.anomaly.override.v1" => Ok(blocks::quote_status_message(
@@ -1491,6 +1961,20 @@ pub fn handle_block_action(
                 ),
             ))
         }
+        value if value.starts_with("suggest.hide.") => {
+            let product_id = value_pairs
+                .as_ref()
+                .and_then(|pairs| pairs.get("product"))
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_owned());
+            Ok(blocks::quote_status_message(
+                &quote_id,
+                &format!(
+                    "suggestion hidden: `{product_id}` removed from this suggestion pass. \
+                     We recorded your feedback for future ranking updates."
+                ),
+            ))
+        }
         _ => Ok(blocks::error_message(
             &format!(
                 "I couldn't process `{action}` in this context (quote `{quote_id}`). \
@@ -1503,8 +1987,8 @@ Use `/quote help` for supported button and slash-command actions."
 
 /// Extract a suggestion feedback event from a block action, if applicable.
 ///
-/// Returns `Some(event)` when `action_id` matches a `suggest.add.*` or
-/// `suggest.details.*` pattern. The caller is responsible for persisting
+/// Returns `Some(event)` when `action_id` matches a `suggest.add.*`,
+/// `suggest.details.*`, or `suggest.hide.*` pattern. The caller is responsible for persisting
 /// the event via a `SuggestionFeedbackRepository`.
 pub fn extract_suggestion_feedback(
     action_id: &str,
@@ -1514,6 +1998,12 @@ pub fn extract_suggestion_feedback(
     use quotey_core::suggestions::SuggestionFeedbackEvent;
 
     let value_pairs = action_value_pairs(raw_value);
+    let correlated_request_id = value_pairs
+        .as_ref()
+        .and_then(|pairs| pairs.get("request"))
+        .filter(|value| !value.trim().is_empty())
+        .cloned()
+        .unwrap_or_else(|| request_id.to_owned());
 
     if action_id.starts_with("suggest.add.") {
         let product_id = value_pairs
@@ -1530,7 +2020,7 @@ pub fn extract_suggestion_feedback(
         }
 
         return Some(SuggestionFeedbackEvent::Added {
-            request_id: request_id.to_owned(),
+            request_id: correlated_request_id,
             product_id,
             product_sku,
             quote_id,
@@ -1549,7 +2039,24 @@ pub fn extract_suggestion_feedback(
         }
 
         return Some(SuggestionFeedbackEvent::Clicked {
-            request_id: request_id.to_owned(),
+            request_id: correlated_request_id,
+            product_id,
+        });
+    }
+
+    if action_id.starts_with("suggest.hide.") {
+        let product_id = value_pairs
+            .as_ref()
+            .and_then(|pairs| pairs.get("product"))
+            .cloned()
+            .unwrap_or_default();
+
+        if product_id.is_empty() {
+            return None;
+        }
+
+        return Some(SuggestionFeedbackEvent::Hidden {
+            request_id: correlated_request_id,
             product_id,
         });
     }
@@ -2037,6 +2544,96 @@ mod tests {
     }
 
     #[test]
+    fn normalize_quote_command_accepts_quotey_crm_status() {
+        let envelope = normalize_quote_command(SlashCommandPayload {
+            command: "/quotey".to_owned(),
+            text: "crm-status failed=4 stale=2 near=1".to_owned(),
+            channel_id: "C123".to_owned(),
+            user_id: "U123".to_owned(),
+            trigger_ts: "1700000000.1".to_owned(),
+            request_id: "req-quotey-crm-status".to_owned(),
+        })
+        .expect("normalized");
+
+        assert_eq!(envelope.command, "quotey");
+        assert_eq!(envelope.verb, "crm-status");
+    }
+
+    #[test]
+    fn normalize_quote_command_accepts_quotey_crm_mapping() {
+        let envelope = normalize_quote_command(SlashCommandPayload {
+            command: "/quotey".to_owned(),
+            text: "crm mapping q2c=quote.total:Opportunity.Amount".to_owned(),
+            channel_id: "C123".to_owned(),
+            user_id: "U123".to_owned(),
+            trigger_ts: "1700000000.1".to_owned(),
+            request_id: "req-quotey-crm-mapping".to_owned(),
+        })
+        .expect("normalized");
+
+        assert_eq!(envelope.command, "quotey");
+        assert_eq!(envelope.verb, "crm");
+        assert_eq!(envelope.freeform_args, "mapping q2c=quote.total:Opportunity.Amount");
+    }
+
+    #[test]
+    fn parse_crm_status_preview_extracts_supported_counter_aliases() {
+        let preview = super::parse_crm_status_preview(
+            "failed_last_24h=7 retrying=3 retry_budget=2 unknown=99 malformed=abc",
+        );
+        assert_eq!(preview.failed_last_24h, 7);
+        assert_eq!(preview.stale_retrying, 3);
+        assert_eq!(preview.near_retry_limit, 2);
+    }
+
+    #[test]
+    fn parse_crm_field_mapping_preview_extracts_directional_pairs() {
+        let preview = super::parse_crm_field_mapping_preview(
+            "q2c=quote.margin:Opportunity.Margin__c c2q=Account.Industry:account.industry",
+        );
+        assert_eq!(preview.quotey_to_crm.len(), 1);
+        assert_eq!(
+            preview.quotey_to_crm[0],
+            ("quote.margin".to_owned(), "Opportunity.Margin__c".to_owned())
+        );
+        assert_eq!(preview.crm_to_quotey.len(), 1);
+        assert_eq!(
+            preview.crm_to_quotey[0],
+            ("Account.Industry".to_owned(), "account.industry".to_owned())
+        );
+    }
+
+    #[test]
+    fn parse_branding_preview_extracts_logo_and_color_updates() {
+        let preview = super::parse_branding_preview(
+            "company=\"Acme CPQ\" logo=https://example.com/logo.svg primary=#123abc secondary=456 accent=DEF",
+        );
+
+        assert_eq!(preview.company_name, "Acme CPQ");
+        assert_eq!(preview.current_logo_url.as_deref(), Some("https://example.com/logo.svg"));
+        assert_eq!(preview.primary_color, "#123abc");
+        assert_eq!(preview.secondary_color, "#445566");
+        assert_eq!(preview.accent_color, "#ddeeff");
+        assert_eq!(preview.pending_updates.len(), 5);
+        assert!(preview.pending_updates.iter().any(|line| line.contains("Company name")));
+        assert!(preview.pending_updates.iter().any(|line| line.contains("Logo URL")));
+        assert!(preview.validation_warnings.is_empty());
+    }
+
+    #[test]
+    fn parse_branding_preview_tracks_invalid_color_inputs() {
+        let preview = super::parse_branding_preview("logo=clear primary=12z accent=#1234");
+
+        assert_eq!(preview.current_logo_url, None);
+        assert_eq!(preview.primary_color, super::DEFAULT_BRANDING_PRIMARY_COLOR);
+        assert_eq!(preview.accent_color, super::DEFAULT_BRANDING_ACCENT_COLOR);
+        assert_eq!(preview.pending_updates, vec!["Logo URL → (cleared)".to_owned()]);
+        assert_eq!(preview.validation_warnings.len(), 2);
+        assert!(preview.validation_warnings.iter().any(|line| line.contains("primary")));
+        assert!(preview.validation_warnings.iter().any(|line| line.contains("accent")));
+    }
+
+    #[test]
     fn router_unknown_command_returns_supported_command_help() {
         let router = CommandRouter::new(NoopQuoteCommandService);
         let response = router
@@ -2241,6 +2838,19 @@ mod tests {
     }
 
     #[test]
+    fn block_action_handles_hide_suggestion() {
+        let message = handle_block_action(
+            "suggest.hide.0.v1",
+            Some("request=req-1;quote=Q-2026-7003;product=prod_sso"),
+            Some("Q-2026-7003"),
+            "req-hide",
+        )
+        .expect("hide action handled");
+        assert!(message.fallback_text.contains("suggestion hidden"));
+        assert!(message.fallback_text.contains("prod_sso"));
+    }
+
+    #[test]
     fn block_action_handles_command_shortcuts() {
         let message = handle_block_action(
             "quote.help.command.status.v1",
@@ -2266,17 +2876,134 @@ mod tests {
     fn block_action_handles_branding_controls() {
         let message = handle_block_action(
             "quotey.branding.open_modal.v1",
-            None,
+            Some(
+                "company=Acme%20Corp;logo=https%3A%2F%2Fexample.com%2Flogo.png;primary=%23012345;secondary=%23654321;accent=%23ff6600",
+            ),
             None,
             "req-quotey-branding-open",
         )
         .expect("branding open handled");
-        assert!(message.fallback_text.contains("Preview mode active"));
+        assert!(message.fallback_text.contains("Branding configuration"));
+        assert!(message.blocks.iter().any(|block| {
+            matches!(
+                block,
+                crate::blocks::Block::Section {
+                    text: crate::blocks::TextObject::Mrkdwn { text },
+                    ..
+                } if text.contains("Modal preview ready")
+            )
+        }));
+        assert!(message.blocks.iter().any(|block| {
+            matches!(
+                block,
+                crate::blocks::Block::Section {
+                    text: crate::blocks::TextObject::Mrkdwn { text },
+                    ..
+                } if text.contains("Acme Corp")
+            )
+        }));
 
-        let message =
-            handle_block_action("quotey.branding.save.v1", None, None, "req-quotey-branding-save")
-                .expect("branding save handled");
-        assert!(message.fallback_text.contains("Preview mode active"));
+        let message = handle_block_action(
+            "quotey.branding.save.v1",
+            Some("company=Acme%20Corp;logo=clear;primary=%23012345;secondary=%23654321"),
+            None,
+            "req-quotey-branding-save",
+        )
+        .expect("branding save handled");
+        assert!(message.fallback_text.contains("Branding configuration"));
+        assert!(message.blocks.iter().any(|block| {
+            matches!(
+                block,
+                crate::blocks::Block::Section {
+                    text: crate::blocks::TextObject::Mrkdwn { text },
+                    ..
+                } if text.contains("Save request captured")
+            )
+        }));
+    }
+
+    #[test]
+    fn block_action_handles_crm_status_controls() {
+        let history = handle_block_action(
+            "quotey.crm.events.history.v1",
+            None,
+            None,
+            "req-quotey-crm-history",
+        )
+        .expect("crm history handled");
+        assert!(history.blocks.iter().any(|block| {
+            matches!(
+                block,
+                crate::blocks::Block::Section {
+                    text: crate::blocks::TextObject::Mrkdwn { text },
+                    ..
+                } if text.contains("/api/v1/crm/events")
+            )
+        }));
+
+        let stats =
+            handle_block_action("quotey.crm.events.stats.v1", None, None, "req-quotey-crm-stats")
+                .expect("crm stats handled");
+        assert!(stats.blocks.iter().any(|block| {
+            matches!(
+                block,
+                crate::blocks::Block::Section {
+                    text: crate::blocks::TextObject::Mrkdwn { text },
+                    ..
+                } if text.contains("/api/v1/crm/events/stats")
+            )
+        }));
+
+        let retry =
+            handle_block_action("quotey.crm.events.retry.v1", None, None, "req-quotey-crm-retry")
+                .expect("crm retry handled");
+        assert!(retry.blocks.iter().any(|block| {
+            matches!(
+                block,
+                crate::blocks::Block::Section {
+                    text: crate::blocks::TextObject::Mrkdwn { text },
+                    ..
+                } if text.contains("/api/v1/crm/events/{event_id}/retry")
+            )
+        }));
+    }
+
+    #[test]
+    fn block_action_handles_crm_mapping_controls() {
+        let edit = handle_block_action(
+            "quotey.crm.mapping.edit.v1",
+            None,
+            None,
+            "req-quotey-crm-map-edit",
+        )
+        .expect("crm mapping edit handled");
+        assert!(edit.blocks.iter().any(|block| {
+            matches!(
+                block,
+                crate::blocks::Block::Section {
+                    text: crate::blocks::TextObject::Mrkdwn { text },
+                    ..
+                } if text.contains("/api/v1/crm/mappings")
+            )
+        }));
+
+        let refresh = handle_block_action(
+            "quotey.crm.mapping.refresh.v1",
+            None,
+            None,
+            "req-quotey-crm-map-refresh",
+        )
+        .expect("crm mapping refresh handled");
+        assert!(refresh.fallback_text.contains("Preview mode active"));
+
+        let export = handle_block_action(
+            "quotey.crm.mapping.export.v1",
+            None,
+            None,
+            "req-quotey-crm-map-export",
+        )
+        .expect("crm mapping export handled");
+        assert!(export.fallback_text.contains("Preview mode active"));
     }
 
     #[test]
@@ -2517,6 +3244,24 @@ mod tests {
                 self.calls.lock().expect("lock").push("branding");
                 Ok(crate::blocks::help_message())
             }
+
+            fn crm_sync_status(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("crm-status");
+                Ok(crate::blocks::help_message())
+            }
+
+            fn crm_field_mapping(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("crm-mapping");
+                Ok(crate::blocks::help_message())
+            }
         }
 
         let router = CommandRouter::new(RecordingService::default());
@@ -2697,6 +3442,24 @@ mod tests {
                 self.calls.lock().expect("lock").push("branding");
                 Ok(crate::blocks::help_message())
             }
+
+            fn crm_sync_status(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("crm-status");
+                Ok(crate::blocks::help_message())
+            }
+
+            fn crm_field_mapping(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("crm-mapping");
+                Ok(crate::blocks::help_message())
+            }
         }
 
         let router = CommandRouter::new(BrandingRecordingService::default());
@@ -2714,6 +3477,180 @@ mod tests {
             })
             .expect("route");
         assert_eq!(*router.service.calls.lock().expect("lock"), vec!["branding"]);
+    }
+
+    #[test]
+    fn router_routes_quotey_crm_status_command() {
+        #[derive(Default)]
+        struct CrmRecordingService {
+            calls: Mutex<Vec<&'static str>>,
+        }
+
+        impl QuoteCommandService for CrmRecordingService {
+            fn new_quote(
+                &self,
+                _customer_hint: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn status_quote(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn list_quotes(
+                &self,
+                _filter: Option<String>,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn audit_quote(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn edit_quote(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn add_line(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn request_discount(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn finalize_quote(
+                &self,
+                _request: FinalizeRequest,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn send_quote(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn clone_quote(
+                &self,
+                _quote_id: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn simulate_quote(
+                &self,
+                _request: SimulationRequest,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn suggest_products(
+                &self,
+                _quote_id: Option<String>,
+                _customer_hint: Option<String>,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn parse_email(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn parse_rfp(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn manage_branding(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                Ok(crate::blocks::help_message())
+            }
+            fn crm_sync_status(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("crm-status");
+                Ok(crate::blocks::help_message())
+            }
+
+            fn crm_field_mapping(
+                &self,
+                _freeform_args: String,
+                _envelope: &CommandEnvelope,
+            ) -> Result<MessageTemplate, CommandRouteError> {
+                self.calls.lock().expect("lock").push("crm-mapping");
+                Ok(crate::blocks::help_message())
+            }
+        }
+
+        let router = CommandRouter::new(CrmRecordingService::default());
+        router
+            .route(CommandEnvelope {
+                command: "quotey".to_owned(),
+                verb: "crm-status".to_owned(),
+                quote_id: None,
+                account_hint: None,
+                freeform_args: "failed=3 stale=1 near=0".to_owned(),
+                channel_id: "C1".to_owned(),
+                user_id: "U1".to_owned(),
+                trigger_ts: "1".to_owned(),
+                request_id: "req-crm-status-route".to_owned(),
+            })
+            .expect("route");
+
+        router
+            .route(CommandEnvelope {
+                command: "quotey".to_owned(),
+                verb: "crm".to_owned(),
+                quote_id: None,
+                account_hint: None,
+                freeform_args: "mapping q2c=quote.total:Opportunity.Amount".to_owned(),
+                channel_id: "C1".to_owned(),
+                user_id: "U1".to_owned(),
+                trigger_ts: "1".to_owned(),
+                request_id: "req-crm-mapping-route".to_owned(),
+            })
+            .expect("route mapping");
+
+        assert_eq!(*router.service.calls.lock().expect("lock"), vec!["crm-status", "crm-mapping"]);
     }
 
     #[test]
@@ -2806,6 +3743,24 @@ mod tests {
     }
 
     #[test]
+    fn extract_suggestion_feedback_hide_action() {
+        use quotey_core::suggestions::SuggestionFeedbackEvent;
+
+        let value = "action=hide_suggestion;request=req-origin;product=prod_sso";
+        let event =
+            super::extract_suggestion_feedback("suggest.hide.0.v1", Some(value), "req-click")
+                .expect("should extract hide event");
+
+        assert_eq!(
+            event,
+            SuggestionFeedbackEvent::Hidden {
+                request_id: "req-origin".to_owned(),
+                product_id: "prod_sso".to_owned(),
+            }
+        );
+    }
+
+    #[test]
     fn extract_suggestion_feedback_missing_product_returns_none() {
         let result = super::extract_suggestion_feedback(
             "suggest.add.0.v1",
@@ -2813,6 +3768,26 @@ mod tests {
             "req-45",
         );
         assert!(result.is_none());
+    }
+
+    #[test]
+    fn extract_suggestion_feedback_uses_request_from_action_payload() {
+        use quotey_core::suggestions::SuggestionFeedbackEvent;
+
+        let value = "action=add_suggested;request=req-origin;quote=Q-2026-001;product=prod_sso;sku=ADDON-SSO-001";
+        let event =
+            super::extract_suggestion_feedback("suggest.add.0.v1", Some(value), "req-click")
+                .expect("should extract add event");
+
+        assert_eq!(
+            event,
+            SuggestionFeedbackEvent::Added {
+                request_id: "req-origin".to_owned(),
+                product_id: "prod_sso".to_owned(),
+                product_sku: "ADDON-SSO-001".to_owned(),
+                quote_id: Some("Q-2026-001".to_owned()),
+            }
+        );
     }
 
     #[test]

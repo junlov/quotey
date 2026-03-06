@@ -944,12 +944,16 @@ pub struct BrandingSettingsView {
     pub primary_color: String,
     pub secondary_color: String,
     pub accent_color: String,
+    pub pending_updates: Vec<String>,
+    pub validation_warnings: Vec<String>,
+    pub status_message: Option<String>,
     pub request_id: String,
 }
 
 pub fn branding_settings_message(view: &BrandingSettingsView) -> MessageTemplate {
     let logo_display = view.current_logo_url.as_deref().unwrap_or("No logo configured");
-    MessageBuilder::new("Branding configuration")
+    let logo_command_value = view.current_logo_url.as_deref().unwrap_or("clear");
+    let mut message = MessageBuilder::new("Branding configuration")
         .section("quotey.branding.header.v1", |section| {
             section.mrkdwn("🎨 *Branding Settings*");
         })
@@ -958,27 +962,222 @@ pub fn branding_settings_message(view: &BrandingSettingsView) -> MessageTemplate
                 "*Company:* {}\n*Current logo:* {}\n*Primary:* `{}` · *Secondary:* `{}` · *Accent:* `{}`",
                 view.company_name, logo_display, view.primary_color, view.secondary_color, view.accent_color
             ));
-        })
+        });
+
+    if let Some(status_message) = view.status_message.as_deref() {
+        message = message.section("quotey.branding.status.v1", |section| {
+            section.mrkdwn(format!("ℹ️ *Status*\n{status_message}"));
+        });
+    }
+
+    if !view.pending_updates.is_empty() {
+        let updates = view.pending_updates.join("\n");
+        message = message.section("quotey.branding.pending.v1", |section| {
+            section.mrkdwn(format!("*Pending updates*\n{updates}"));
+        });
+    }
+
+    message = message
         .section("quotey.branding.modal-preview.v1", |section| {
             section.mrkdwn(
-                "*Modal includes:*\n• Current logo preview\n• Upload new logo\n• Color pickers\n• Live preview\n• Save button",
+                "*Modal workflow*\n\
+1. Review current logo preview.\n\
+2. Upload a new logo URL.\n\
+3. Tune primary/secondary/accent colors.\n\
+4. Validate the live preview.\n\
+5. Click *Save Branding*.",
             );
+        })
+        .section("quotey.branding.command-preview.v1", |section| {
+            section.mrkdwn(format!(
+                "*Command fallback*\n`/quotey branding company=\"{}\" logo={} primary={} secondary={} accent={}`",
+                view.company_name,
+                logo_command_value,
+                view.primary_color,
+                view.secondary_color,
+                view.accent_color
+            ));
         })
         .actions("quotey.branding.actions.v1", |actions| {
             actions
                 .button(
                     ButtonElement::new("quotey.branding.open_modal.v1", "Open Branding Modal")
                         .style(ButtonStyle::Primary)
-                        .value("action=open_branding_modal"),
+                        .value(branding_action_value("open_branding_modal", view)),
                 )
                 .button(
                     ButtonElement::new("quotey.branding.save.v1", "Save Branding")
-                        .value("action=save_branding"),
+                        .value(branding_action_value("save_branding", view)),
                 );
-        })
+        });
+
+    if !view.validation_warnings.is_empty() {
+        let warnings = view.validation_warnings.join("\n");
+        message = message.section("quotey.branding.warnings.v1", |section| {
+            section.mrkdwn(format!("⚠️ *Input warnings*\n{warnings}"));
+        });
+    }
+
+    message
         .context("quotey.branding.context.v1", |context| {
             context.plain(format!("Request ID: {}", view.request_id));
             context.plain("Command: `/quotey branding`");
+        })
+        .build()
+}
+
+fn branding_action_value(action: &str, view: &BrandingSettingsView) -> String {
+    let mut parts = vec![
+        format!("action={}", encode_action_value_component(action)),
+        format!("request={}", encode_action_value_component(&view.request_id)),
+        format!("company={}", encode_action_value_component(&view.company_name)),
+        format!("primary={}", encode_action_value_component(&view.primary_color)),
+        format!("secondary={}", encode_action_value_component(&view.secondary_color)),
+        format!("accent={}", encode_action_value_component(&view.accent_color)),
+    ];
+
+    if let Some(logo_url) = view.current_logo_url.as_deref() {
+        parts.push(format!("logo={}", encode_action_value_component(logo_url)));
+    }
+
+    parts.join(";")
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrmSyncAlertSummaryView {
+    pub failed_last_24h: u32,
+    pub stale_retrying: u32,
+    pub near_retry_limit: u32,
+    pub request_id: String,
+}
+
+pub fn crm_sync_alert_summary_message(view: &CrmSyncAlertSummaryView) -> MessageTemplate {
+    let alert_count = view.failed_last_24h + view.stale_retrying + view.near_retry_limit;
+    let (headline, status_emoji) = if alert_count == 0 {
+        ("No active CRM sync alerts", "✅")
+    } else if view.failed_last_24h >= 10 || view.near_retry_limit >= 3 {
+        ("Critical CRM sync pressure detected", "🚨")
+    } else {
+        ("CRM sync requires operator attention", "⚠️")
+    };
+
+    MessageBuilder::new("CRM sync status summary")
+        .section("quotey.crm.summary.header.v1", |section| {
+            section.mrkdwn(format!("{status_emoji} *{headline}*"));
+        })
+        .section("quotey.crm.summary.counts.v1", |section| {
+            section.mrkdwn(format!(
+                "*Current indicators*\n\
+• Failed last 24h: `{}`\n\
+• Stale retrying events: `{}`\n\
+• Near retry budget exhaustion: `{}`",
+                view.failed_last_24h, view.stale_retrying, view.near_retry_limit
+            ));
+        })
+        .section("quotey.crm.summary.next.v1", |section| {
+            section.mrkdwn(
+                "*Recommended next actions*\n\
+1. Review event history for provider/direction hotspots.\n\
+2. Check aggregate stats for trend direction.\n\
+3. Run targeted retry before retry budget is exhausted.",
+            );
+        })
+        .actions("quotey.crm.summary.actions.v1", |actions| {
+            actions
+                .button(
+                    ButtonElement::new("quotey.crm.events.history.v1", "View History")
+                        .style(ButtonStyle::Primary)
+                        .value("action=history"),
+                )
+                .button(
+                    ButtonElement::new("quotey.crm.events.stats.v1", "View Stats")
+                        .value("action=stats"),
+                )
+                .button(
+                    ButtonElement::new("quotey.crm.events.retry.v1", "Run Retry Guidance")
+                        .style(ButtonStyle::Danger)
+                        .value("action=retry"),
+                );
+        })
+        .context("quotey.crm.summary.context.v1", |context| {
+            context.plain(format!("Request ID: {}", view.request_id));
+            context.plain(
+                "Command: `/quotey crm-status` (optional args: failed=<n> stale=<n> near=<n>)",
+            );
+        })
+        .build()
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrmFieldMappingEntryView {
+    pub source_field: String,
+    pub target_field: String,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CrmFieldMappingSummaryView {
+    pub quotey_to_crm: Vec<CrmFieldMappingEntryView>,
+    pub crm_to_quotey: Vec<CrmFieldMappingEntryView>,
+    pub request_id: String,
+}
+
+pub fn crm_field_mapping_message(view: &CrmFieldMappingSummaryView) -> MessageTemplate {
+    let render_entries = |entries: &[CrmFieldMappingEntryView]| -> String {
+        if entries.is_empty() {
+            return "• _No mappings configured_".to_owned();
+        }
+        entries
+            .iter()
+            .map(|entry| format!("• `{}` → `{}`", entry.source_field, entry.target_field))
+            .collect::<Vec<_>>()
+            .join("\n")
+    };
+
+    MessageBuilder::new("CRM field mapping summary")
+        .section("quotey.crm.mapping.header.v1", |section| {
+            section.mrkdwn("🧭 *CRM Field Mapping*");
+        })
+        .section("quotey.crm.mapping.q2c.v1", |section| {
+            section.mrkdwn(format!(
+                "*Quotey → CRM*\n{}",
+                render_entries(&view.quotey_to_crm)
+            ));
+        })
+        .section("quotey.crm.mapping.c2q.v1", |section| {
+            section.mrkdwn(format!(
+                "*CRM → Quotey*\n{}",
+                render_entries(&view.crm_to_quotey)
+            ));
+        })
+        .section("quotey.crm.mapping.next.v1", |section| {
+            section.mrkdwn(
+                "*Recommended next actions*\n\
+1. Edit mappings for provider-specific fields.\n\
+2. Refresh from current API state before rollout.\n\
+3. Export mapping snapshot for change approval.",
+            );
+        })
+        .actions("quotey.crm.mapping.actions.v1", |actions| {
+            actions
+                .button(
+                    ButtonElement::new("quotey.crm.mapping.edit.v1", "Edit Mappings")
+                        .style(ButtonStyle::Primary)
+                        .value("action=edit_mappings"),
+                )
+                .button(
+                    ButtonElement::new("quotey.crm.mapping.refresh.v1", "Refresh")
+                        .value("action=refresh_mappings"),
+                )
+                .button(
+                    ButtonElement::new("quotey.crm.mapping.export.v1", "Export Snapshot")
+                        .value("action=export_mappings"),
+                );
+        })
+        .context("quotey.crm.mapping.context.v1", |context| {
+            context.plain(format!("Request ID: {}", view.request_id));
+            context.plain(
+                "Command: `/quotey crm mapping` (optional args: q2c=<source>:<target> c2q=<source>:<target>)",
+            );
         })
         .build()
 }
@@ -1085,6 +1284,13 @@ Use these in active quote threads for fast intent capture:\n\
 • Deterministic state transitions per quote.\n\
 • Replayable audit trail for every action.\n\
 • Thread-specific context (`quote_id` + `request_id`) is included in operational messages."
+            );
+        })
+        .section("quote.help.ops.v1", |section| {
+            section.mrkdwn(
+                "*Operator command*\n\
+• `/quotey crm-status` → compact CRM sync alert summary for monitoring and recovery guidance.\n\
+• `/quotey crm mapping` → review and adjust CRM field mapping directionality."
             );
         })
         .section("quote.help.experiment-tips.v1", |section| {
@@ -1596,19 +1802,66 @@ pub struct SuggestionCardView {
 }
 
 /// Encode a suggestion action value for button payloads
+#[allow(clippy::too_many_arguments)]
 pub fn suggestion_action_value(
+    request_id: &str,
     quote_id: Option<&str>,
+    customer_hint: &str,
     product_id: &str,
     product_sku: &str,
+    score: f64,
+    confidence: &str,
+    category_description: &str,
 ) -> String {
+    let request_part = format!("request={};", encode_action_value_component(request_id));
     let quote_part = quote_id
         .map(|q| format!("quote={};", encode_action_value_component(q)))
         .unwrap_or_default();
     format!(
-        "action=add_suggested;{}product={};sku={}",
+        "action=add_suggested;{}{}customer={};product={};sku={};score={score:.6};confidence={};category={}",
+        request_part,
         quote_part,
+        encode_action_value_component(customer_hint),
         encode_action_value_component(product_id),
         encode_action_value_component(product_sku),
+        encode_action_value_component(confidence),
+        encode_action_value_component(category_description),
+    )
+}
+
+/// Encode payload for the "View Details" suggestion action.
+pub fn suggestion_details_action_value(
+    request_id: &str,
+    quote_id: Option<&str>,
+    product_id: &str,
+) -> String {
+    let request_part = format!("request={};", encode_action_value_component(request_id));
+    let quote_part = quote_id
+        .map(|q| format!("quote={};", encode_action_value_component(q)))
+        .unwrap_or_default();
+    format!(
+        "action=view_product;{}{}product={}",
+        request_part,
+        quote_part,
+        encode_action_value_component(product_id),
+    )
+}
+
+/// Encode payload for the "Hide" suggestion action.
+pub fn suggestion_hide_action_value(
+    request_id: &str,
+    quote_id: Option<&str>,
+    product_id: &str,
+) -> String {
+    let request_part = format!("request={};", encode_action_value_component(request_id));
+    let quote_part = quote_id
+        .map(|q| format!("quote={};", encode_action_value_component(q)))
+        .unwrap_or_default();
+    format!(
+        "action=hide_suggestion;{}{}product={}",
+        request_part,
+        quote_part,
+        encode_action_value_component(product_id),
     )
 }
 
@@ -1703,16 +1956,31 @@ pub fn suggestion_message(view: &SuggestionCardView) -> MessageTemplate {
                         ButtonElement::new(format!("suggest.add.{index}.v1"), "Add to Quote")
                             .style(ButtonStyle::Primary)
                             .value(suggestion_action_value(
+                                &view.request_id,
                                 view.quote_id.as_deref(),
+                                &view.customer_hint,
                                 &item.product_id,
                                 &item.product_sku,
+                                item.score,
+                                &item.confidence,
+                                &item.category_description,
                             )),
                     )
                     .button(
                         ButtonElement::new(format!("suggest.details.{index}.v1"), "View Details")
-                            .value(format!(
-                                "action=view_product;product={}",
-                                encode_action_value_component(&item.product_id)
+                            .value(suggestion_details_action_value(
+                                &view.request_id,
+                                view.quote_id.as_deref(),
+                                &item.product_id,
+                            )),
+                    )
+                    .button(
+                        ButtonElement::new(format!("suggest.hide.{index}.v1"), "Hide")
+                            .style(ButtonStyle::Danger)
+                            .value(suggestion_hide_action_value(
+                                &view.request_id,
+                                view.quote_id.as_deref(),
+                                &item.product_id,
                             )),
                     );
             });
@@ -2711,9 +2979,10 @@ mod tests {
         });
         assert!(actions_0.is_some(), "expected actions for first suggestion");
         let actions = actions_0.expect("actions asserted above");
-        assert_eq!(actions.len(), 2);
+        assert_eq!(actions.len(), 3);
         assert!(actions[0].action_id.starts_with("suggest.add."));
         assert!(actions[1].action_id.starts_with("suggest.details."));
+        assert!(actions[2].action_id.starts_with("suggest.hide."));
 
         // Context block should exist
         let context = message.blocks.iter().find(|block| {
@@ -2782,19 +3051,66 @@ mod tests {
 
     #[test]
     fn suggestion_action_value_encodes_correctly() {
-        let value = super::suggestion_action_value(Some("Q-2026-001"), "prod_sso", "ADDON-SSO-001");
+        let value = super::suggestion_action_value(
+            "req-suggest-1",
+            Some("Q-2026-001"),
+            "Acme Corp",
+            "prod_sso",
+            "ADDON-SSO-001",
+            0.85,
+            "High",
+            "Complements your current selection",
+        );
         assert!(value.contains("action=add_suggested"));
+        assert!(value.contains("request=req-suggest-1"));
+        assert!(value.contains("customer=Acme%20Corp"));
         assert!(value.contains("product=prod_sso"));
         assert!(value.contains("sku=ADDON-SSO-001"));
+        assert!(value.contains("score=0.850000"));
+        assert!(value.contains("confidence=High"));
+        assert!(value.contains("category=Complements%20your%20current%20selection"));
         assert!(value.contains("quote=Q-2026-001"));
     }
 
     #[test]
     fn suggestion_action_value_without_quote() {
-        let value = super::suggestion_action_value(None, "prod_sso", "ADDON-SSO-001");
+        let value = super::suggestion_action_value(
+            "req-suggest-2",
+            None,
+            "New Customer",
+            "prod_sso",
+            "ADDON-SSO-001",
+            0.62,
+            "Medium",
+            "Frequently purchased together",
+        );
         assert!(value.contains("action=add_suggested"));
+        assert!(value.contains("request=req-suggest-2"));
         assert!(value.contains("product=prod_sso"));
         assert!(!value.contains("quote="));
+    }
+
+    #[test]
+    fn suggestion_details_action_value_encodes_correctly() {
+        let value = super::suggestion_details_action_value(
+            "req-suggest-3",
+            Some("Q-2026-0999"),
+            "prod_support",
+        );
+        assert!(value.contains("action=view_product"));
+        assert!(value.contains("request=req-suggest-3"));
+        assert!(value.contains("quote=Q-2026-0999"));
+        assert!(value.contains("product=prod_support"));
+    }
+
+    #[test]
+    fn suggestion_hide_action_value_encodes_correctly() {
+        let value =
+            super::suggestion_hide_action_value("req-suggest-4", Some("Q-2026-0100"), "prod_sso");
+        assert!(value.contains("action=hide_suggestion"));
+        assert!(value.contains("request=req-suggest-4"));
+        assert!(value.contains("quote=Q-2026-0100"));
+        assert!(value.contains("product=prod_sso"));
     }
 
     #[test]
@@ -2807,11 +3123,14 @@ mod tests {
     #[test]
     fn branding_settings_message_renders_modal_actions() {
         let message = super::branding_settings_message(&super::BrandingSettingsView {
-            company_name: "Acme".to_owned(),
+            company_name: "Acme Cloud".to_owned(),
             current_logo_url: Some("https://example.com/logo.png".to_owned()),
             primary_color: "#111111".to_owned(),
             secondary_color: "#222222".to_owned(),
             accent_color: "#333333".to_owned(),
+            pending_updates: vec!["Primary color → #111111".to_owned()],
+            validation_warnings: vec!["Ignored invalid accent color `zzz`".to_owned()],
+            status_message: Some("Save request captured".to_owned()),
             request_id: "req-branding-ui".to_owned(),
         });
 
@@ -2826,6 +3145,102 @@ mod tests {
         assert_eq!(actions.len(), 2);
         assert_eq!(actions[0].action_id, "quotey.branding.open_modal.v1");
         assert_eq!(actions[1].action_id, "quotey.branding.save.v1");
+        assert!(actions[0]
+            .value
+            .as_deref()
+            .expect("expected open value")
+            .contains("company=Acme%20Cloud"));
+        assert!(actions[1]
+            .value
+            .as_deref()
+            .expect("expected save value")
+            .contains("logo=https%3A%2F%2Fexample.com%2Flogo.png"));
+    }
+
+    #[test]
+    fn branding_settings_message_command_fallback_uses_clear_when_logo_missing() {
+        let message = super::branding_settings_message(&super::BrandingSettingsView {
+            company_name: "Acme".to_owned(),
+            current_logo_url: None,
+            primary_color: "#111111".to_owned(),
+            secondary_color: "#222222".to_owned(),
+            accent_color: "#333333".to_owned(),
+            pending_updates: vec![],
+            validation_warnings: vec![],
+            status_message: None,
+            request_id: "req-branding-no-logo".to_owned(),
+        });
+
+        assert!(message.blocks.iter().any(|block| {
+            matches!(
+                block,
+                Block::Section {
+                    block_id,
+                    text: TextObject::Mrkdwn { text }
+                } if block_id == "quotey.branding.command-preview.v1" && text.contains("logo=clear")
+            )
+        }));
+    }
+
+    #[test]
+    fn crm_sync_alert_summary_message_renders_action_buttons() {
+        let message = super::crm_sync_alert_summary_message(&super::CrmSyncAlertSummaryView {
+            failed_last_24h: 4,
+            stale_retrying: 2,
+            near_retry_limit: 1,
+            request_id: "req-crm-summary".to_owned(),
+        });
+
+        assert!(message.fallback_text.contains("CRM sync"));
+        let actions = message.blocks.iter().find_map(|block| match block {
+            Block::Actions { block_id, elements }
+                if block_id == "quotey.crm.summary.actions.v1" =>
+            {
+                Some(elements)
+            }
+            _ => None,
+        });
+        let actions = actions.expect("expected crm summary actions block");
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].action_id, "quotey.crm.events.history.v1");
+        assert_eq!(actions[1].action_id, "quotey.crm.events.stats.v1");
+        assert_eq!(actions[2].action_id, "quotey.crm.events.retry.v1");
+    }
+
+    #[test]
+    fn crm_field_mapping_message_renders_directional_sections_and_actions() {
+        let message = super::crm_field_mapping_message(&super::CrmFieldMappingSummaryView {
+            quotey_to_crm: vec![
+                super::CrmFieldMappingEntryView {
+                    source_field: "quote.total".to_owned(),
+                    target_field: "Opportunity.Amount".to_owned(),
+                },
+                super::CrmFieldMappingEntryView {
+                    source_field: "quote.discount".to_owned(),
+                    target_field: "Opportunity.Discount".to_owned(),
+                },
+            ],
+            crm_to_quotey: vec![super::CrmFieldMappingEntryView {
+                source_field: "Account.Industry".to_owned(),
+                target_field: "account.industry".to_owned(),
+            }],
+            request_id: "req-crm-mapping".to_owned(),
+        });
+
+        assert!(message.fallback_text.contains("CRM field mapping"));
+        let actions = message.blocks.iter().find_map(|block| match block {
+            Block::Actions { block_id, elements }
+                if block_id == "quotey.crm.mapping.actions.v1" =>
+            {
+                Some(elements)
+            }
+            _ => None,
+        });
+        let actions = actions.expect("expected crm mapping actions block");
+        assert_eq!(actions.len(), 3);
+        assert_eq!(actions[0].action_id, "quotey.crm.mapping.edit.v1");
+        assert_eq!(actions[1].action_id, "quotey.crm.mapping.refresh.v1");
+        assert_eq!(actions[2].action_id, "quotey.crm.mapping.export.v1");
     }
 
     #[test]

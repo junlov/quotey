@@ -14,19 +14,100 @@
 ///   B4-006  Finalize flow with anomaly detection context
 ///   B4-007  Parse-email/parse-rfp command routing with freeform args
 ///   B4-008  Event dispatcher routes slash commands correctly
+use async_trait::async_trait;
+use chrono::Utc;
 use quotey_core::domain::product::ProductId;
 use quotey_core::domain::quote::{Quote, QuoteId, QuoteLine, QuoteStatus};
+use quotey_core::suggestions::{SuggestionFeedback, SuggestionFeedbackEvent};
 use quotey_db::repositories::{
     ProductRepository, QuoteRepository, SqlProductRepository, SqlQuoteRepository,
+    SqlSuggestionFeedbackRepository, SuggestionFeedbackRepository,
 };
 use quotey_slack::blocks::MessageTemplate;
 use quotey_slack::commands::{
     infer_thread_quote_command, normalize_quote_command, parse_quote_command, CommandEnvelope,
-    CommandRouteError, CommandRouter, QuoteCommand, QuoteCommandService, SlashCommandPayload,
+    CommandRouteError, CommandRouter, NoopQuoteCommandService, QuoteCommand, QuoteCommandService,
+    SlashCommandPayload,
+};
+use quotey_slack::events::{
+    BlockActionEvent, BlockActionService, EventContext, EventHandler, EventHandlerError,
+    HandlerResult, NoopBlockActionService, SlackEnvelope, SlackEvent, SlashCommandHandler,
+    SuggestionFeedbackRecorder, SuggestionShownRecord, SuggestionShownRecorder,
 };
 use rust_decimal::Decimal;
+use std::sync::Arc;
 
 type TestResult<T = ()> = Result<T, String>;
+
+#[derive(Clone)]
+struct DbSuggestionFeedbackRecorder {
+    repo: Arc<SqlSuggestionFeedbackRepository>,
+}
+
+impl DbSuggestionFeedbackRecorder {
+    fn new(pool: quotey_db::DbPool) -> Self {
+        Self { repo: Arc::new(SqlSuggestionFeedbackRepository::new(pool)) }
+    }
+}
+
+#[async_trait]
+impl SuggestionShownRecorder for DbSuggestionFeedbackRecorder {
+    async fn record_shown(
+        &self,
+        records: Vec<SuggestionShownRecord>,
+    ) -> Result<(), EventHandlerError> {
+        let mut feedbacks = Vec::with_capacity(records.len());
+        for (index, record) in records.into_iter().enumerate() {
+            let id = format!("shown-{}-{}-{index}", record.request_id, record.product_id);
+            feedbacks.push(SuggestionFeedback {
+                id,
+                request_id: record.request_id,
+                customer_id: record.customer_hint,
+                product_id: record.product_id,
+                product_sku: record.product_sku,
+                score: record.score.unwrap_or_default(),
+                confidence: record.confidence.unwrap_or_else(|| "unknown".to_string()),
+                category: record.category_description.unwrap_or_else(|| "unknown".to_string()),
+                quote_id: record.quote_id,
+                suggested_at: Utc::now(),
+                was_shown: true,
+                was_clicked: false,
+                was_added_to_quote: false,
+                was_hidden: false,
+                context: None,
+            });
+        }
+        self.repo.record_shown(feedbacks).await.map_err(|error| {
+            EventHandlerError::BlockAction(format!("record shown feedback failed: {error}"))
+        })
+    }
+}
+
+#[async_trait]
+impl SuggestionFeedbackRecorder for DbSuggestionFeedbackRecorder {
+    async fn record_feedback(
+        &self,
+        event: SuggestionFeedbackEvent,
+    ) -> Result<(), EventHandlerError> {
+        match event {
+            SuggestionFeedbackEvent::Added { request_id, product_id, .. } => {
+                self.repo.record_added(&request_id, &product_id).await.map_err(|error| {
+                    EventHandlerError::BlockAction(format!("record add feedback failed: {error}"))
+                })
+            }
+            SuggestionFeedbackEvent::Clicked { request_id, product_id } => {
+                self.repo.record_clicked(&request_id, &product_id).await.map_err(|error| {
+                    EventHandlerError::BlockAction(format!("record click feedback failed: {error}"))
+                })
+            }
+            SuggestionFeedbackEvent::Hidden { request_id, product_id } => {
+                self.repo.record_hidden(&request_id, &product_id).await.map_err(|error| {
+                    EventHandlerError::BlockAction(format!("record hide feedback failed: {error}"))
+                })
+            }
+        }
+    }
+}
 
 // ── Helpers ─────────────────────────────────────────────────────────────
 
@@ -296,10 +377,29 @@ impl QuoteCommandService for DbBackedQuoteCommandService {
 
     fn manage_branding(
         &self,
+        freeform_args: String,
+        _envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError> {
+        Ok(MessageTemplate {
+            fallback_text: format!("db:manage_branding:args={freeform_args}"),
+            blocks: vec![],
+        })
+    }
+
+    fn crm_sync_status(
+        &self,
         _freeform_args: String,
         _envelope: &CommandEnvelope,
     ) -> Result<MessageTemplate, CommandRouteError> {
-        Ok(MessageTemplate { fallback_text: "db:manage_branding".to_string(), blocks: vec![] })
+        Ok(MessageTemplate { fallback_text: "db:crm_sync_status".to_string(), blocks: vec![] })
+    }
+
+    fn crm_field_mapping(
+        &self,
+        _freeform_args: String,
+        _envelope: &CommandEnvelope,
+    ) -> Result<MessageTemplate, CommandRouteError> {
+        Ok(MessageTemplate { fallback_text: "db:crm_field_mapping".to_string(), blocks: vec![] })
     }
 }
 
@@ -473,26 +573,21 @@ fn b4_004_thread_message_infers_correct_commands() {
 #[test]
 fn b4_005_unknown_command_routes_to_unknown_variant() {
     let parsed = parse_quote_command("xstatus Q-2026-0001");
-    // "xstatus" is close to "status" but not a recognized verb
-    match &parsed {
-        QuoteCommand::Unknown { verb, .. } => {
-            assert!(!verb.is_empty(), "unknown verb should preserve input");
-        }
-        QuoteCommand::Status { .. } => {
-            // Fuzzy-matched to "status" — also acceptable
-        }
-        other => panic!("expected Unknown or fuzzy Status, got: {:?}", other),
+    assert!(
+        matches!(parsed, QuoteCommand::Unknown { .. } | QuoteCommand::Status { .. }),
+        "expected Unknown or fuzzy Status route"
+    );
+    if let QuoteCommand::Unknown { ref verb, .. } = parsed {
+        assert!(!verb.is_empty(), "unknown verb should preserve input");
     }
 }
 
 #[test]
 fn b4_005b_completely_invalid_command_is_unknown() {
     let parsed = parse_quote_command("zzzfoobar");
-    match parsed {
-        QuoteCommand::Unknown { verb, .. } => {
-            assert!(!verb.is_empty());
-        }
-        other => panic!("expected Unknown for 'zzzfoobar', got: {:?}", other),
+    assert!(matches!(parsed, QuoteCommand::Unknown { .. }), "expected Unknown for invalid verb");
+    if let QuoteCommand::Unknown { ref verb, .. } = parsed {
+        assert!(!verb.is_empty());
     }
 }
 
@@ -719,7 +814,10 @@ async fn b4_012_quotey_branding_command_routes_correctly() -> TestResult {
     let service = DbBackedQuoteCommandService::new(pool);
     let router = CommandRouter::new(service);
 
-    let payload = make_payload("/quotey", "branding");
+    let payload = make_payload(
+        "/quotey",
+        "branding company=Acme logo=https://example.com/logo.png primary=#123abc",
+    );
     let envelope = normalize_quote_command(payload).map_err(|e| format!("normalize: {e}"))?;
 
     assert_eq!(envelope.command, "quotey");
@@ -729,6 +827,31 @@ async fn b4_012_quotey_branding_command_routes_correctly() -> TestResult {
     assert!(
         result.fallback_text.contains("manage_branding"),
         "branding command must route to branding handler"
+    );
+    assert!(
+        result.fallback_text.contains("company=Acme"),
+        "branding handler should receive parsed freeform args"
+    );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn b4_012b_quotey_crm_mapping_command_routes_correctly() -> TestResult {
+    let pool = setup_pool().await?;
+    let service = DbBackedQuoteCommandService::new(pool);
+    let router = CommandRouter::new(service);
+
+    let payload = make_payload("/quotey", "crm mapping q2c=quote.total:Opportunity.Amount");
+    let envelope = normalize_quote_command(payload).map_err(|e| format!("normalize: {e}"))?;
+
+    assert_eq!(envelope.command, "quotey");
+    assert_eq!(envelope.verb, "crm");
+
+    let result = router.route(envelope).map_err(|e| format!("route: {e}"))?;
+    assert!(
+        result.fallback_text.contains("crm_field_mapping"),
+        "crm mapping command must route to crm_field_mapping handler"
     );
 
     Ok(())
@@ -768,6 +891,124 @@ async fn b4_014_suggest_command_routes_with_customer_hint() -> TestResult {
         result.fallback_text.contains("db:suggest"),
         "suggest command must route to suggest handler"
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn b4_015_suggestion_feedback_persists_across_shown_clicked_and_added() -> TestResult {
+    let pool = setup_pool().await?;
+    let recorder = DbSuggestionFeedbackRecorder::new(pool.clone());
+    let repo = recorder.repo.clone();
+
+    let slash_handler =
+        SlashCommandHandler::with_shown_recorder(NoopQuoteCommandService, recorder.clone());
+    let slash_envelope = SlackEnvelope {
+        envelope_id: "env-suggest-feedback-1".to_owned(),
+        event: SlackEvent::SlashCommand(SlashCommandPayload {
+            command: "/quote".to_owned(),
+            text: "suggest Q-2026-7777 for Acme Corp".to_owned(),
+            channel_id: "C-test".to_owned(),
+            user_id: "U-test".to_owned(),
+            trigger_ts: "1709500000.000000".to_owned(),
+            request_id: "req-suggest-feedback".to_owned(),
+        }),
+    };
+
+    let slash_result = slash_handler
+        .handle(&slash_envelope, &EventContext::default())
+        .await
+        .map_err(|e| format!("slash dispatch: {e}"))?;
+    assert!(
+        matches!(slash_result, HandlerResult::Responded(_)),
+        "slash suggest should respond with suggestion UI"
+    );
+
+    let shown =
+        repo.find_by_product("prod_sso", 20).await.map_err(|e| format!("shown lookup: {e}"))?;
+    let shown_row =
+        shown.iter().find(|row| row.request_id == "req-suggest-feedback").ok_or_else(|| {
+            "expected shown feedback row for req-suggest-feedback/prod_sso".to_string()
+        })?;
+    assert!(shown_row.was_shown, "shown flag must be true after slash suggest");
+    assert!(!shown_row.was_clicked, "clicked should be false before click action");
+    assert!(!shown_row.was_added_to_quote, "added should be false before add action");
+    assert!(!shown_row.was_hidden, "hidden should be false before hide action");
+
+    let block_service = NoopBlockActionService::with_feedback_recorder(recorder.clone());
+
+    let hide_event = BlockActionEvent {
+        channel_id: "C-test".to_owned(),
+        message_ts: "1709500001.000000".to_owned(),
+        thread_ts: Some("1709500000.000000".to_owned()),
+        user_id: "U-test".to_owned(),
+        action_id: "suggest.hide.0.v1".to_owned(),
+        value: Some("request=req-suggest-feedback;product=prod_sso".to_owned()),
+        quote_id: Some("Q-2026-7777".to_owned()),
+        request_id: Some("req-hide-event".to_owned()),
+    };
+    block_service
+        .handle_block_action(&hide_event, &EventContext::default())
+        .await
+        .map_err(|e| format!("hide action: {e}"))?;
+
+    let hidden =
+        repo.find_by_product("prod_sso", 20).await.map_err(|e| format!("hidden lookup: {e}"))?;
+    let hidden_row =
+        hidden.iter().find(|row| row.request_id == "req-suggest-feedback").ok_or_else(|| {
+            "expected hidden feedback row for req-suggest-feedback/prod_sso".to_string()
+        })?;
+    assert!(hidden_row.was_hidden, "hidden flag must be true after hide action");
+
+    let details_event = BlockActionEvent {
+        channel_id: "C-test".to_owned(),
+        message_ts: "1709500001.000001".to_owned(),
+        thread_ts: Some("1709500000.000000".to_owned()),
+        user_id: "U-test".to_owned(),
+        action_id: "suggest.details.0.v1".to_owned(),
+        value: Some("request=req-suggest-feedback;product=prod_sso".to_owned()),
+        quote_id: Some("Q-2026-7777".to_owned()),
+        request_id: Some("req-click-event".to_owned()),
+    };
+    block_service
+        .handle_block_action(&details_event, &EventContext::default())
+        .await
+        .map_err(|e| format!("details action: {e}"))?;
+
+    let clicked =
+        repo.find_by_product("prod_sso", 20).await.map_err(|e| format!("clicked lookup: {e}"))?;
+    let clicked_row =
+        clicked.iter().find(|row| row.request_id == "req-suggest-feedback").ok_or_else(|| {
+            "expected clicked feedback row for req-suggest-feedback/prod_sso".to_string()
+        })?;
+    assert!(clicked_row.was_clicked, "clicked flag must be true after details action");
+    assert!(!clicked_row.was_added_to_quote, "added should still be false before add action");
+
+    let add_event = BlockActionEvent {
+        channel_id: "C-test".to_owned(),
+        message_ts: "1709500001.000002".to_owned(),
+        thread_ts: Some("1709500000.000000".to_owned()),
+        user_id: "U-test".to_owned(),
+        action_id: "suggest.add.0.v1".to_owned(),
+        value: Some(
+            "request=req-suggest-feedback;quote=Q-2026-7777;product=prod_sso;sku=ADDON-SSO-001"
+                .to_owned(),
+        ),
+        quote_id: Some("Q-2026-7777".to_owned()),
+        request_id: Some("req-add-event".to_owned()),
+    };
+    block_service
+        .handle_block_action(&add_event, &EventContext::default())
+        .await
+        .map_err(|e| format!("add action: {e}"))?;
+
+    let added =
+        repo.find_by_product("prod_sso", 20).await.map_err(|e| format!("added lookup: {e}"))?;
+    let added_row =
+        added.iter().find(|row| row.request_id == "req-suggest-feedback").ok_or_else(|| {
+            "expected added feedback row for req-suggest-feedback/prod_sso".to_string()
+        })?;
+    assert!(added_row.was_added_to_quote, "added flag must be true after add action");
 
     Ok(())
 }
