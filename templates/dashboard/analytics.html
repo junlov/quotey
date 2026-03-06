@@ -334,7 +334,15 @@
             display: flex;
             align-items: center;
             justify-content: center;
-            font-size: 18px;
+        }
+
+        .summary-icon svg {
+            width: 20px;
+            height: 20px;
+        }
+
+        .icon {
+            flex-shrink: 0;
         }
 
         .summary-icon.primary { background: #dbeafe; }
@@ -557,6 +565,11 @@
             100% { background-position: -200% 0; }
         }
 
+        @keyframes spin {
+            from { transform: rotate(0deg); }
+            to { transform: rotate(360deg); }
+        }
+
         .skeleton-text {
             height: 16px;
             margin-bottom: 8px;
@@ -602,15 +615,15 @@
     <header class="dashboard-header">
         <div class="header-content">
             <div class="header-brand">
-                <h1>📊 Analytics Dashboard</h1>
+                <h1><svg class="icon" width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg> Analytics Dashboard</h1>
                 <span class="badge">Live</span>
             </div>
             <div class="header-actions">
                 <button class="btn btn-secondary btn-sm" id="refreshBtn" onclick="refreshData(event)">
-                    🔄 Refresh
+                    <svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="m3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> Refresh
                 </button>
                 <button class="btn btn-primary btn-sm" onclick="exportData()">
-                    📥 Export CSV
+                    <svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"></path><polyline points="7 10 12 15 17 10"></polyline><line x1="12" y1="15" x2="12" y2="3"></line></svg> Export CSV
                 </button>
             </div>
         </div>
@@ -681,7 +694,7 @@
             <div class="summary-card success">
                 <div class="summary-header">
                     <span class="summary-label">Total Quotes</span>
-                    <div class="summary-icon success">📄</div>
+                    <div class="summary-icon success"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"></path><polyline points="14 2 14 8 20 8"></polyline><line x1="16" y1="13" x2="8" y2="13"></line><line x1="16" y1="17" x2="8" y2="17"></line></svg></div>
                 </div>
                 <div class="summary-value" id="totalQuotes">{{ metrics.total_quotes | default(value="0") }}</div>
                 <span class="summary-change positive">
@@ -692,7 +705,7 @@
             <div class="summary-card info">
                 <div class="summary-header">
                     <span class="summary-label">Total Revenue</span>
-                    <div class="summary-icon info">💰</div>
+                    <div class="summary-icon info"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#0891b2" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="1" x2="12" y2="23"></line><path d="M17 5H9.5a3.5 3.5 0 0 0 0 7h5a3.5 3.5 0 0 1 0 7H6"></path></svg></div>
                 </div>
                 <div class="summary-value" id="totalRevenue">${{ metrics.total_revenue | default(value="0") }}</div>
                 <span class="summary-change positive">
@@ -703,7 +716,7 @@
             <div class="summary-card warning">
                 <div class="summary-header">
                     <span class="summary-label">Avg Discount</span>
-                    <div class="summary-icon warning">🏷️</div>
+                    <div class="summary-icon warning"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#d97706" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M20.59 13.41l-7.17 7.17a2 2 0 0 1-2.83 0L2 12V2h10l8.59 8.59a2 2 0 0 1 0 2.82z"></path><line x1="7" y1="7" x2="7.01" y2="7"></line></svg></div>
                 </div>
                 <div class="summary-value" id="avgDiscount">{{ metrics.avg_discount | default(value="0") }}%</div>
                 <span class="summary-change {% if metrics.discount_change > 0 %}negative{% else %}positive{% endif %}">
@@ -714,7 +727,7 @@
             <div class="summary-card success">
                 <div class="summary-header">
                     <span class="summary-label">Win Rate</span>
-                    <div class="summary-icon success">🎯</div>
+                    <div class="summary-icon success"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#059669" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><circle cx="12" cy="12" r="6"></circle><circle cx="12" cy="12" r="2"></circle></svg></div>
                 </div>
                 <div class="summary-value" id="winRate">{{ metrics.win_rate | default(value="0") }}%</div>
                 <span class="summary-change positive">
@@ -725,7 +738,7 @@
             <div class="summary-card danger">
                 <div class="summary-header">
                     <span class="summary-label">Avg Time to Close</span>
-                    <div class="summary-icon danger">⏱️</div>
+                    <div class="summary-icon danger"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#dc2626" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg></div>
                 </div>
                 <div class="summary-value" id="avgCloseTime">{{ metrics.avg_close_days | default(value="0") }}d</div>
                 <span class="summary-change {% if metrics.close_time_change > 0 %}negative{% else %}positive{% endif %}">
@@ -736,7 +749,7 @@
             <div class="summary-card primary">
                 <div class="summary-header">
                     <span class="summary-label">Pending Approvals</span>
-                    <div class="summary-icon primary">⏳</div>
+                    <div class="summary-icon primary"><svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"></circle><polyline points="12 6 12 12 16 14"></polyline></svg></div>
                 </div>
                 <div class="summary-value" id="pendingApprovals">{{ metrics.pending_approvals | default(value="0") }}</div>
                 <span class="summary-change negative">
@@ -755,7 +768,7 @@
                         <p class="section-subtitle">Discount trends and margin analysis</p>
                     </div>
                     <div class="section-actions">
-                        <button class="btn btn-secondary btn-sm" onclick="toggleChartType('pricingChart')">📊</button>
+                        <button class="btn btn-secondary btn-sm" onclick="toggleChartType('pricingChart')"><svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><line x1="18" y1="20" x2="18" y2="10"></line><line x1="12" y1="20" x2="12" y2="4"></line><line x1="6" y1="20" x2="6" y2="14"></line></svg></button>
                     </div>
                 </div>
                 <div class="section-content">
@@ -1136,7 +1149,7 @@
             document.querySelector('.dashboard-main').classList.toggle('loading', isLoading);
             const refreshBtn = document.getElementById('refreshBtn');
             refreshBtn.disabled = isLoading;
-            refreshBtn.textContent = isLoading ? '🔄 Loading...' : '🔄 Refresh';
+            refreshBtn.innerHTML = isLoading ? '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round" style="animation: spin 1s linear infinite;"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="m3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> Loading...' : '<svg class="icon" width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polyline points="23 4 23 10 17 10"></polyline><polyline points="1 20 1 14 7 14"></polyline><path d="m3.51 9a9 9 0 0 1 14.85-3.36L23 10M1 14l4.64 4.36A9 9 0 0 0 20.49 15"></path></svg> Refresh';
             document.getElementById('dashboardLoading').hidden = !isLoading;
         }
 
