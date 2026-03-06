@@ -4656,8 +4656,12 @@ mod tests {
             axum::extract::Query(ViewQuoteParams {
                 from: Some("slack".to_string()),
                 action: Some("review".to_string()),
-                context_summary: Some("Customer asked to confirm annual commitment scope".to_string()),
-                assumptions_summary: Some("Tax remains assumed at 0% until billing country confirmed".to_string()),
+                context_summary: Some(
+                    "Customer asked to confirm annual commitment scope".to_string(),
+                ),
+                assumptions_summary: Some(
+                    "Tax remains assumed at 0% until billing country confirmed".to_string(),
+                ),
                 next_action: Some("comment".to_string()),
             }),
             state_with_real_templates(pool),
@@ -4802,7 +4806,9 @@ mod tests {
                 from: Some(" Slack ".to_string()),
                 action: Some("Review".to_string()),
                 context_summary: Some("Customer asked for annual prepay options.".to_string()),
-                assumptions_summary: Some("Tax is assumed 0% until billing country is set.".to_string()),
+                assumptions_summary: Some(
+                    "Tax is assumed 0% until billing country is set.".to_string(),
+                ),
                 next_action: Some("Approve".to_string()),
             }),
         )
@@ -4812,8 +4818,10 @@ mod tests {
         let resp = result.0;
         let parsed = reqwest::Url::parse(&format!("https://portal.local{}", resp.share_url))
             .expect("parse share URL");
-        let pairs =
-            parsed.query_pairs().into_owned().collect::<std::collections::HashMap<String, String>>();
+        let pairs = parsed
+            .query_pairs()
+            .into_owned()
+            .collect::<std::collections::HashMap<String, String>>();
 
         assert_eq!(parsed.path(), format!("/quote/{}", resp.token));
         assert_eq!(pairs.get("from").map(String::as_str), Some("slack"));

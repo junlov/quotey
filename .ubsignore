@@ -17,12 +17,14 @@ build/
 out/
 target/
 *.egg-info/
+.beads/
 
 # Local scratch/build artifacts used by iterative agent/test workflows
 .tmp/
+.tmp_*
+.tmp-*
 .tmp-target/
 .tmp-rustc/
-.tmp-*/
 
 # Test artifacts
 coverage/

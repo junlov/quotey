@@ -1,4 +1,4 @@
 key_test: foo
-db: '.beads/beads_working.db'
+db: '.beads/beads_rebuild2.db'
 issue-prefix: quotey
 issue_prefix: quotey
