@@ -50,6 +50,7 @@ venv/
 
 # Rust build artifacts
 target/
+.tmp-target/
 .sqlx/
 quotey_migration_check.db
 quotey_migration_check.db-shm

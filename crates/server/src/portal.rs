@@ -4,6 +4,11 @@
 //! - `GET  /quote/{token}`                      — view quote details (HTML)
 //! - `GET  /quote/{token}/download`             — download quote PDF
 //! - `GET  /portal`                             — portal homepage (quote list)
+//! - `GET  /approvals`                          — mobile-first approvals list (PWA entry)
+//! - `GET  /approvals/{id}`                     — approval detail route (manager decision view)
+//! - `GET  /settings`                           — PWA settings (notifications/cache)
+//! - `GET  /manifest.webmanifest`               — PWA manifest alias
+//! - `GET  /sw.js`                              — service worker alias
 //! - `GET  /portal/manifest.webmanifest`        — PWA manifest
 //! - `GET  /portal/sw.js`                       — service worker script
 //!
@@ -253,6 +258,18 @@ fn init_templates() -> Arc<Tera> {
     )
     .ok();
     tera.add_raw_template("index.html", include_str!("../../../templates/portal/index.html")).ok();
+    tera.add_raw_template(
+        "approvals.html",
+        include_str!("../../../templates/portal/approvals.html"),
+    )
+    .ok();
+    tera.add_raw_template("settings.html", include_str!("../../../templates/portal/settings.html"))
+        .ok();
+    tera.add_raw_template(
+        "approval_detail.html",
+        include_str!("../../../templates/portal/approval_detail.html"),
+    )
+    .ok();
 
     Arc::new(tera)
 }
@@ -277,6 +294,11 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/quote/{token}", get(view_quote_page))
         .route("/quote/{token}/download", get(download_quote_pdf))
         .route("/portal", get(portal_index_page))
+        .route("/approvals", get(approvals_index_page))
+        .route("/approvals/{id}", get(approval_detail_page))
+        .route("/settings", get(approvals_settings_page))
+        .route("/manifest.webmanifest", get(portal_manifest))
+        .route("/sw.js", get(portal_service_worker))
         .route("/portal/manifest.webmanifest", get(portal_manifest))
         .route("/portal/sw.js", get(portal_service_worker))
         // JSON API routes
@@ -788,6 +810,17 @@ async fn view_quote_page(
         )
     })?;
 
+    // Funnel telemetry: pricing rendered (quote viewed with pricing)
+    record_funnel_event(
+        &state.db_pool,
+        quotey_core::audit::funnel::PRICING_RENDERED,
+        Some(&quote_id),
+        "portal:viewer",
+        "success",
+        &[("has_snapshot", if has_snapshot { "true" } else { "false" })],
+    )
+    .await;
+
     Ok(Html(html))
 }
 
@@ -824,6 +857,16 @@ async fn download_quote_pdf(
                 filename = %filename,
                 "PDF generated successfully"
             );
+            // Funnel telemetry: PDF download
+            record_funnel_event(
+                &state.db_pool,
+                quotey_core::audit::funnel::PDF_DOWNLOAD,
+                Some(&quote_id),
+                "portal:viewer",
+                "success",
+                &[],
+            )
+            .await;
             Ok(result.into_response(&filename))
         }
         Err(e) => {
@@ -971,6 +1014,7 @@ async fn portal_index_page(
     let search_pattern =
         if search_pattern.is_empty() { None } else { Some(format!("%{}%", search_pattern)) };
 
+    let now = Utc::now().to_rfc3339();
     let mut query_builder = QueryBuilder::new(
         r#"
         SELECT q.id, q.status, q.created_at, q.valid_until,
@@ -983,7 +1027,11 @@ async fn portal_index_page(
                 FROM portal_link pl
                 WHERE pl.quote_id = q.id
                   AND pl.revoked = 0
-                  AND pl.expires_at > datetime('now')
+                  AND pl.expires_at > "#,
+    );
+    query_builder.push_bind(now.as_str());
+    query_builder.push(
+        r#"
                 ORDER BY pl.created_at DESC
                 LIMIT 1
             ) AS token
@@ -1111,6 +1159,305 @@ async fn portal_index_page(
     );
 
     let html = state.templates.render("index.html", &context).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
+        )
+    })?;
+
+    Ok(Html(html))
+}
+
+/// Render the PWA approvals list route.
+///
+/// This route is purpose-built for manager mobile approvals.
+async fn approvals_index_page(
+    State(state): State<PortalState>,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    let now = Utc::now().to_rfc3339();
+    let rows = sqlx::query(
+        r#"
+        SELECT
+            ar.id AS approval_id,
+            ar.quote_id AS quote_id,
+            ar.approver_role AS approver_role,
+            ar.reason AS reason,
+            ar.created_at AS requested_at,
+            COALESCE(NULLIF(q.account_id, ''), 'Unknown Customer') AS customer_name,
+            COALESCE(
+                (
+                    SELECT s.total
+                    FROM quote_pricing_snapshot s
+                    WHERE s.quote_id = q.id
+                    ORDER BY s.version DESC
+                    LIMIT 1
+                ),
+                SUM(
+                    COALESCE(ql.subtotal, COALESCE(ql.unit_price, 0.0) * COALESCE(ql.quantity, 0))
+                    * (1.0 - (MAX(0.0, MIN(COALESCE(ql.discount_pct, 0.0), 100.0)) / 100.0))
+                ),
+                0.0
+            ) AS total_amount,
+            COALESCE(
+                (
+                    SELECT CASE
+                        WHEN s.subtotal > 0 THEN ROUND((s.discount_total / s.subtotal) * 100.0, 1)
+                        ELSE 0.0
+                    END
+                    FROM quote_pricing_snapshot s
+                    WHERE s.quote_id = q.id
+                    ORDER BY s.version DESC
+                    LIMIT 1
+                ),
+                AVG(COALESCE(ql.discount_pct, 0.0)),
+                0.0
+            ) AS discount_pct
+        FROM approval_request ar
+        JOIN quote q ON q.id = ar.quote_id
+        LEFT JOIN quote_line ql ON ql.quote_id = q.id
+        WHERE ar.status = 'pending'
+          AND EXISTS (
+              SELECT 1
+              FROM portal_link pl
+              WHERE pl.quote_id = q.id
+                AND pl.revoked = 0
+                AND pl.expires_at > ?
+          )
+        GROUP BY ar.id, ar.quote_id, ar.approver_role, ar.reason, ar.created_at, q.id, q.account_id
+        ORDER BY ar.created_at DESC
+        LIMIT 100
+        "#,
+    )
+    .bind(now.as_str())
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))),
+        )
+    })?;
+
+    let approvals: Vec<serde_json::Value> = rows
+        .iter()
+        .map(|row: &sqlx::sqlite::SqliteRow| {
+            let approval_id = row.try_get::<String, _>("approval_id").unwrap_or_default();
+            let quote_id = row.try_get::<String, _>("quote_id").unwrap_or_default();
+            let customer_name = row.try_get::<String, _>("customer_name").unwrap_or_default();
+            let approver_role = row.try_get::<String, _>("approver_role").unwrap_or_default();
+            let reason = row.try_get::<String, _>("reason").unwrap_or_default();
+            let requested_at = row.try_get::<String, _>("requested_at").unwrap_or_default();
+            let total_amount = row.try_get::<f64, _>("total_amount").unwrap_or(0.0);
+            let discount_pct = row.try_get::<f64, _>("discount_pct").unwrap_or(0.0);
+
+            serde_json::json!({
+                "approval_id": approval_id,
+                "quote_id": quote_id,
+                "customer_name": customer_name,
+                "approver_role": approver_role,
+                "reason": reason,
+                "requested_at": requested_at,
+                "total_amount": format_price(total_amount),
+                "discount_pct": format!("{discount_pct:.1}%"),
+                "detail_href": format!("/approvals/{approval_id}"),
+            })
+        })
+        .collect();
+
+    let mut context = Context::new();
+    context.insert("approvals", &approvals);
+    context.insert("count", &approvals.len());
+    context.insert(
+        "branding",
+        &serde_json::json!({
+            "company_name": "Quotey",
+            "logo_url": Option::<String>::None,
+        }),
+    );
+
+    let html = state.templates.render("approvals.html", &context).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
+        )
+    })?;
+
+    Ok(Html(html))
+}
+
+/// Render a full approval detail view with quote context, discount impact,
+/// and approve/reject/need-info/snooze actions.
+async fn approval_detail_page(
+    Path(approval_id): Path<String>,
+    State(state): State<PortalState>,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    let db_err = |e: sqlx::Error| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))),
+        )
+    };
+
+    // Fetch approval request
+    let approval_row = sqlx::query(
+        "SELECT id, quote_id, approver_role, reason, justification, status,
+                requested_by, expires_at, created_at
+         FROM approval_request WHERE id = ?",
+    )
+    .bind(&approval_id)
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(db_err)?;
+
+    let approval_row = approval_row.ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Html("<h1>Approval Not Found</h1><p>Approval request was not found.</p>".to_string()),
+        )
+    })?;
+
+    let quote_id: String = approval_row.try_get("quote_id").unwrap_or_default();
+
+    // Fetch active portal link token for action endpoints
+    let now = Utc::now().to_rfc3339();
+    let token: String = sqlx::query_scalar(
+        "SELECT token FROM portal_link
+         WHERE quote_id = ? AND revoked = 0 AND expires_at > ?
+         ORDER BY created_at DESC LIMIT 1",
+    )
+    .bind(&quote_id)
+    .bind(&now)
+    .fetch_optional(&state.db_pool)
+    .await
+    .map_err(db_err)?
+    .ok_or_else(|| {
+        (
+            StatusCode::NOT_FOUND,
+            Html(
+                "<h1>Link Unavailable</h1><p>No active portal link is available for this approval.</p>"
+                    .to_string(),
+            ),
+        )
+    })?;
+
+    // Fetch quote details
+    let quote_row =
+        sqlx::query("SELECT id, status, currency, account_id, created_at FROM quote WHERE id = ?")
+            .bind(&quote_id)
+            .fetch_optional(&state.db_pool)
+            .await
+            .map_err(db_err)?;
+
+    let quote_row = match quote_row {
+        Some(r) => r,
+        None => {
+            return Err((StatusCode::NOT_FOUND, Html("<h1>Quote Not Found</h1>".to_string())));
+        }
+    };
+
+    // Fetch quote lines with product names
+    let line_rows = sqlx::query(
+        r#"SELECT ql.quantity, ql.unit_price, ql.subtotal, ql.discount_pct,
+                  p.name AS product_name, p.sku AS product_sku
+           FROM quote_line ql
+           LEFT JOIN product p ON p.id = ql.product_id
+           WHERE ql.quote_id = ?
+           ORDER BY ql.id"#,
+    )
+    .bind(&quote_id)
+    .fetch_all(&state.db_pool)
+    .await
+    .map_err(db_err)?;
+
+    // Build line items and compute totals
+    let mut subtotal = 0.0_f64;
+    let mut discount_total = 0.0_f64;
+    let lines: Vec<serde_json::Value> = line_rows
+        .iter()
+        .map(|r| {
+            let qty: i64 = r.try_get("quantity").unwrap_or(0);
+            let unit_price: f64 = r.try_get("unit_price").unwrap_or(0.0);
+            let base_subtotal = match r.try_get::<Option<f64>, _>("subtotal") {
+                Ok(Some(v)) => v,
+                _ => unit_price * qty as f64,
+            };
+            let discount_pct: f64 =
+                r.try_get::<f64, _>("discount_pct").unwrap_or(0.0).clamp(0.0, 100.0);
+            let discount_amount = base_subtotal * discount_pct / 100.0;
+            let total_price = base_subtotal - discount_amount;
+
+            subtotal += base_subtotal;
+            discount_total += discount_amount;
+
+            serde_json::json!({
+                "product_name": r.try_get::<String, _>("product_name").unwrap_or_default(),
+                "sku": r.try_get::<String, _>("product_sku").unwrap_or_default(),
+                "quantity": qty,
+                "unit_price": format_price(unit_price),
+                "discount_pct": discount_pct,
+                "total_price": format_price(total_price),
+            })
+        })
+        .collect();
+
+    let total = subtotal - discount_total;
+    let discount_pct =
+        if subtotal > 0.0 { ((discount_total / subtotal) * 100.0).clamp(0.0, 100.0) } else { 0.0 };
+
+    // Build template context
+    let mut context = Context::new();
+
+    context.insert(
+        "approval",
+        &serde_json::json!({
+            "id": approval_id,
+            "approver_role": approval_row.try_get::<String, _>("approver_role").unwrap_or_default(),
+            "reason": approval_row.try_get::<String, _>("reason").unwrap_or_default(),
+            "justification": approval_row.try_get::<String, _>("justification").unwrap_or_default(),
+            "status": approval_row.try_get::<String, _>("status").unwrap_or_else(|_| "pending".to_string()),
+            "requested_by": approval_row.try_get::<String, _>("requested_by").unwrap_or_default(),
+            "created_at": approval_row.try_get::<String, _>("created_at").unwrap_or_default(),
+        }),
+    );
+
+    let customer = quote_row
+        .try_get::<Option<String>, _>("account_id")
+        .unwrap_or(None)
+        .unwrap_or_else(|| "Unknown Customer".to_string());
+
+    context.insert(
+        "quote",
+        &serde_json::json!({
+            "quote_id": quote_id,
+            "token": token,
+            "status": canonical_quote_status(&quote_row.try_get::<String, _>("status").unwrap_or_default()),
+            "currency": quote_row.try_get::<String, _>("currency").unwrap_or_else(|_| "USD".to_string()),
+            "customer": customer,
+            "created_at": quote_row.try_get::<String, _>("created_at").unwrap_or_default(),
+            "subtotal": format_price(subtotal),
+            "discount_total": format_price(discount_total),
+            "discount_pct": (discount_pct * 10.0).round() / 10.0,
+            "total": format_price(total),
+        }),
+    );
+
+    context.insert("lines", &lines);
+
+    let html = state.templates.render("approval_detail.html", &context).map_err(|e| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
+        )
+    })?;
+
+    Ok(Html(html))
+}
+
+/// Render lightweight PWA settings for notifications and cache maintenance.
+async fn approvals_settings_page(
+    State(state): State<PortalState>,
+) -> Result<Html<String>, (StatusCode, Html<String>)> {
+    let html = state.templates.render("settings.html", &Context::new()).map_err(|e| {
         (
             StatusCode::INTERNAL_SERVER_ERROR,
             Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
@@ -1463,6 +1810,17 @@ async fn approve_quote(
     )
     .await;
 
+    // Funnel telemetry: approval action
+    record_funnel_event(
+        &state.db_pool,
+        quotey_core::audit::funnel::APPROVAL_ACTION,
+        Some(&quote_id),
+        &format!("portal:{approver_email}"),
+        "success",
+        &[("action", "approved")],
+    )
+    .await;
+
     info!(
         event_name = "portal.quote.approved",
         correlation_id = %approval_id,
@@ -1533,6 +1891,17 @@ async fn reject_quote(
     )
     .await;
 
+    // Funnel telemetry: rejection action
+    record_funnel_event(
+        &state.db_pool,
+        quotey_core::audit::funnel::APPROVAL_ACTION,
+        Some(&quote_id),
+        "portal:customer",
+        "rejected",
+        &[("action", "rejected")],
+    )
+    .await;
+
     info!(
         event_name = "portal.quote.rejected",
         correlation_id = %rejection_id,
@@ -1600,6 +1969,17 @@ async fn add_comment(
         Some(&quote_id),
         "portal.comment",
         &format!("Customer comment: {text}"),
+    )
+    .await;
+
+    // Funnel telemetry: comment added
+    record_funnel_event(
+        &state.db_pool,
+        quotey_core::audit::funnel::COMMENT_ADDED,
+        Some(&quote_id),
+        &format!("portal:{author_email}"),
+        "success",
+        &[("comment_type", "overall")],
     )
     .await;
 
@@ -1734,6 +2114,17 @@ async fn add_line_comment(
         Some(&quote_id),
         "portal.comment.line",
         &format!("Customer comment on line {line_id}: {text}"),
+    )
+    .await;
+
+    // Funnel telemetry: line comment added
+    record_funnel_event(
+        &state.db_pool,
+        quotey_core::audit::funnel::COMMENT_ADDED,
+        Some(&quote_id),
+        &format!("portal:{author_email}"),
+        "success",
+        &[("comment_type", "line_item"), ("line_id", &line_id)],
     )
     .await;
 
@@ -1914,6 +2305,17 @@ async fn update_assumptions(
     )
     .await;
 
+    // Funnel telemetry: assumption review
+    record_funnel_event(
+        &state.db_pool,
+        quotey_core::audit::funnel::ASSUMPTION_REVIEW,
+        Some(&quote_id),
+        "portal:customer",
+        "success",
+        &[],
+    )
+    .await;
+
     info!(
         event_name = "portal.assumptions.updated",
         quote_id = %quote_id,
@@ -2031,6 +2433,17 @@ async fn create_link(
         Some(quote_id),
         "portal.link_created",
         &format!("Portal link generated (expires in {expires_in_days} days)"),
+    )
+    .await;
+
+    // Funnel telemetry: session start (link creation initiates customer funnel)
+    record_funnel_event(
+        &state.db_pool,
+        quotey_core::audit::funnel::SESSION_START,
+        Some(quote_id),
+        &format!("portal:{created_by}"),
+        "success",
+        &[],
     )
     .await;
 
@@ -2222,6 +2635,64 @@ async fn record_audit_event(pool: &DbPool, quote_id: Option<&str>, event_type: &
     }
 }
 
+/// Persist a funnel telemetry event to the audit_event table.
+///
+/// Funnel events track UX transitions (view, approve, comment, etc.)
+/// with schema-versioned metadata so drop-off can be measured per step.
+async fn record_funnel_event(
+    pool: &DbPool,
+    event_type: &str,
+    quote_id: Option<&str>,
+    actor: &str,
+    outcome: &str,
+    extra: &[(&str, &str)],
+) {
+    use quotey_core::audit::{funnel, FUNNEL_SCHEMA_VERSION};
+
+    let now = Utc::now();
+    let audit_id = format!("PFUN-{}", &uuid_v4()[..12]);
+
+    let mut metadata = serde_json::Map::new();
+    metadata.insert("schema_version".into(), FUNNEL_SCHEMA_VERSION.into());
+    metadata.insert("funnel_step".into(), event_type.into());
+    metadata.insert(
+        "funnel_ordinal".into(),
+        serde_json::Value::Number(funnel::step_ordinal(event_type).into()),
+    );
+    metadata.insert("channel".into(), "portal".into());
+    metadata.insert("outcome".into(), outcome.into());
+    for (k, v) in extra {
+        metadata.insert((*k).to_string(), (*v).into());
+    }
+
+    let payload = serde_json::Value::Object(metadata).to_string();
+
+    let result = sqlx::query(
+        "INSERT INTO audit_event
+            (id, timestamp, actor, actor_type, quote_id, event_type, event_category, payload_json, metadata_json)
+         VALUES (?, ?, ?, 'portal', ?, ?, 'funnel', ?, ?)",
+    )
+    .bind(&audit_id)
+    .bind(now.to_rfc3339())
+    .bind(actor)
+    .bind(quote_id)
+    .bind(event_type)
+    .bind(&payload)
+    .bind(&payload)
+    .execute(pool)
+    .await;
+
+    if let Err(e) = result {
+        warn!(
+            event_name = "portal.funnel.write_failed",
+            funnel_step = event_type,
+            quote_id = ?quote_id,
+            error = %e,
+            "failed to write funnel telemetry event"
+        );
+    }
+}
+
 fn redact_token(token: &str) -> String {
     let keep = token.len().min(8);
     format!("{}***", &token[..keep])
@@ -2348,6 +2819,13 @@ mod tests {
         )
         .ok();
         tera.add_raw_template("index.html", "<html><body>Portal</body></html>").ok();
+        tera.add_raw_template("approvals.html", "<html><body>Approvals</body></html>").ok();
+        tera.add_raw_template("settings.html", "<html><body>Settings</body></html>").ok();
+        tera.add_raw_template(
+            "approval_detail.html",
+            "<html><body>Approval {{ approval.id }}</body></html>",
+        )
+        .ok();
 
         State(PortalState { db_pool: pool, templates: Arc::new(tera), pdf_generator: None })
     }
@@ -3523,6 +4001,185 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approvals_index_route_renders_pending_quotes_view() {
+        let (pool, quote_id, _) = setup().await;
+        sqlx::query("UPDATE quote SET status = 'pending', account_id = 'Acme Corp' WHERE id = ?")
+            .bind(&quote_id)
+            .execute(&pool)
+            .await
+            .expect("mark quote pending");
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO approval_request
+                (id, quote_id, approver_role, reason, justification, status, requested_by, expires_at, created_at, updated_at)
+             VALUES ('APR-LIST-001', ?, 'sales_manager', 'Discount exceeds cap', '{}', 'pending', 'agent:test', NULL, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed approval list row");
+
+        let html = approvals_index_page(state_with_real_templates(pool))
+            .await
+            .expect("render approvals page")
+            .0;
+
+        assert!(
+            html.contains("Pending Approvals"),
+            "approvals page should show the pending approvals section"
+        );
+        assert!(
+            html.contains("APR-LIST-001"),
+            "approvals page should show pending approval identifiers"
+        );
+    }
+
+    #[tokio::test]
+    async fn approvals_index_route_excludes_expired_links() {
+        let (pool, quote_id, _) = setup().await;
+        let expired = (Utc::now() - chrono::Duration::minutes(5)).to_rfc3339();
+        sqlx::query("UPDATE portal_link SET expires_at = ? WHERE quote_id = ?")
+            .bind(&expired)
+            .bind(&quote_id)
+            .execute(&pool)
+            .await
+            .expect("expire seeded portal link");
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO approval_request
+                (id, quote_id, approver_role, reason, justification, status, requested_by, expires_at, created_at, updated_at)
+             VALUES ('APR-EXPIRED-LINK', ?, 'sales_manager', 'Discount exceeds cap', '{}', 'pending', 'agent:test', NULL, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed pending approval");
+
+        let html = approvals_index_page(state_with_real_templates(pool))
+            .await
+            .expect("render approvals page")
+            .0;
+
+        assert!(
+            !html.contains("APR-EXPIRED-LINK"),
+            "approvals linked only to expired tokens must be excluded"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_detail_route_renders_approval_context() {
+        let (pool, quote_id, _token) = setup().await;
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO approval_request
+                (id, quote_id, approver_role, reason, justification, status, requested_by, expires_at, created_at, updated_at)
+             VALUES ('APR-ROUTE-001', ?, 'sales_manager', 'discount cap', '{}', 'pending', 'agent:test', NULL, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed approval request");
+
+        let html =
+            approval_detail_page(axum::extract::Path("APR-ROUTE-001".to_string()), state(pool))
+                .await
+                .expect("approval detail render");
+
+        assert!(
+            html.0.contains("APR-ROUTE-001"),
+            "approval detail page should contain the approval ID"
+        );
+    }
+
+    #[tokio::test]
+    async fn approval_detail_renders_quote_context_with_lines() {
+        let (pool, quote_id, _) = setup().await;
+        let now = Utc::now().to_rfc3339();
+
+        // Seed product and quote line
+        sqlx::query(
+            "INSERT INTO product (id, name, sku, base_price, currency, active, created_at, updated_at)
+             VALUES ('PROD-APR', 'Enterprise License', 'ENT-001', '500.0', 'USD', 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed product");
+
+        sqlx::query(
+            "INSERT INTO quote_line (id, quote_id, product_id, quantity, unit_price, subtotal, discount_pct, created_at, updated_at)
+             VALUES ('QL-APR', ?, 'PROD-APR', 10, 500.0, 5000.0, 20.0, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed quote line");
+
+        sqlx::query(
+            "INSERT INTO approval_request
+                (id, quote_id, approver_role, reason, justification, status, requested_by, expires_at, created_at, updated_at)
+             VALUES ('APR-CTX-001', ?, 'sales_director', 'Discount exceeds 15% cap', 'Strategic account expansion', 'pending', 'rep@company.com', NULL, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed approval");
+
+        let html = approval_detail_page(
+            axum::extract::Path("APR-CTX-001".to_string()),
+            state_with_real_templates(pool),
+        )
+        .await
+        .expect("render approval detail with real templates");
+
+        let body = &html.0;
+        // Approval context
+        assert!(body.contains("APR-CTX-001"), "should contain approval ID");
+        assert!(body.contains("sales_director"), "should contain approver role");
+        assert!(body.contains("Discount exceeds 15% cap"), "should contain approval reason");
+        // Quote line context
+        assert!(body.contains("Enterprise License"), "should contain product name");
+        assert!(body.contains("20"), "should contain discount percentage");
+        // Actions
+        assert!(body.contains("Approve"), "should contain approve action");
+        assert!(body.contains("Reject"), "should contain reject action");
+    }
+
+    #[tokio::test]
+    async fn approval_detail_route_returns_not_found_for_unknown_approval() {
+        let (pool, _, _) = setup().await;
+        let result =
+            approval_detail_page(axum::extract::Path("APR-MISSING".to_string()), state(pool)).await;
+
+        assert!(result.is_err());
+        let (status, body) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+        assert!(body.0.contains("Approval Not Found"));
+    }
+
+    #[tokio::test]
+    async fn approvals_settings_route_renders_settings_template() {
+        let (pool, _, _) = setup().await;
+        let html = approvals_settings_page(state_with_real_templates(pool))
+            .await
+            .expect("render settings page")
+            .0;
+
+        assert!(html.contains("Notification Settings"));
+        assert!(html.contains("/api/v1/portal/push/subscribe"));
+    }
+
+    #[tokio::test]
     async fn portal_manifest_route_returns_manifest_json() {
         let response = portal_manifest().await.into_response();
         let content_type = response
@@ -3542,5 +4199,316 @@ mod tests {
             .and_then(|value| value.to_str().ok())
             .unwrap_or("");
         assert!(content_type.contains("application/javascript"));
+    }
+
+    // -----------------------------------------------------------------------
+    // UX regression pack (quotey-ux-001-18)
+    //
+    // Covers critical UX and correctness scenarios for the subtotal
+    // accumulation fix (quotey-ux-001-10) and the token hardening fix
+    // (quotey-ux-001-11). Six scenarios total.
+    // -----------------------------------------------------------------------
+
+    /// R-001: Subtotal fallback when `subtotal` column is NULL.
+    ///
+    /// Exercises the COALESCE(subtotal, unit_price * quantity) fallback path
+    /// in `fetch_quote_for_pdf`. The pre-discount invariant must hold even when
+    /// the DB column is absent.
+    #[tokio::test]
+    async fn regression_subtotal_null_column_uses_unit_price_times_qty() {
+        let (pool, quote_id, _) = setup().await;
+
+        sqlx::query(
+            "INSERT INTO product (id, name, sku, base_price, currency, active, created_at, updated_at)
+             VALUES ('PROD-R1', 'Gadget', 'SKU-R1', '75.0', 'USD', 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed product");
+
+        let now_str = Utc::now().to_rfc3339();
+        // Insert a line without explicit subtotal (NULL)
+        sqlx::query(
+            "INSERT INTO quote_line (id, quote_id, product_id, quantity, unit_price, subtotal, discount_pct, created_at, updated_at)
+             VALUES ('QL-R1', ?, 'PROD-R1', 4, 75.0, NULL, 15.0, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now_str)
+        .bind(&now_str)
+        .execute(&pool)
+        .await
+        .expect("seed line with NULL subtotal");
+
+        let payload = fetch_quote_for_pdf(&pool, &quote_id).await.expect("fetch pdf");
+        let lines = payload["lines"].as_array().expect("lines array");
+        assert_eq!(lines.len(), 1);
+
+        // Fallback: subtotal = unit_price * qty = 75 * 4 = 300 (pre-discount)
+        let line_subtotal = lines[0]["subtotal"].as_f64().expect("subtotal");
+        assert!(
+            (line_subtotal - 300.0).abs() < 0.01,
+            "NULL subtotal should fall back to unit_price * qty = 300, got {line_subtotal}"
+        );
+
+        // Discount should be 15% of 300 = 45
+        let discount_amount = lines[0]["discount_amount"].as_f64().expect("discount_amount");
+        assert!(
+            (discount_amount - 45.0).abs() < 0.01,
+            "discount_amount should be 45, got {discount_amount}"
+        );
+
+        // Pricing.subtotal must match line subtotal sum
+        let pricing_subtotal = payload["pricing"]["subtotal"].as_f64().expect("pricing subtotal");
+        assert!(
+            (pricing_subtotal - line_subtotal).abs() < 0.01,
+            "pricing.subtotal should equal single-line subtotal"
+        );
+    }
+
+    /// R-002: Subtotal with zero-discount and 100%-discount lines.
+    ///
+    /// Edge case: mixing 0% and 100% discounts. The pre-discount subtotal must
+    /// still accumulate correctly; total_price for the 100%-off line should be 0.
+    #[tokio::test]
+    async fn regression_subtotal_zero_and_full_discount_lines() {
+        let (pool, quote_id, _) = setup().await;
+
+        sqlx::query(
+            "INSERT INTO product (id, name, sku, base_price, currency, active, created_at, updated_at)
+             VALUES ('PROD-R2', 'Service', 'SKU-R2', '50.0', 'USD', 1, datetime('now'), datetime('now'))",
+        )
+        .execute(&pool)
+        .await
+        .expect("seed product");
+
+        let now_str = Utc::now().to_rfc3339();
+        // Line A: no discount
+        sqlx::query(
+            "INSERT INTO quote_line (id, quote_id, product_id, quantity, unit_price, subtotal, discount_pct, created_at, updated_at)
+             VALUES ('QL-R2A', ?, 'PROD-R2', 2, 100.0, 200.0, 0.0, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now_str)
+        .bind(&now_str)
+        .execute(&pool)
+        .await
+        .expect("seed line A (0% discount)");
+
+        // Line B: 100% discount (free add-on)
+        sqlx::query(
+            "INSERT INTO quote_line (id, quote_id, product_id, quantity, unit_price, subtotal, discount_pct, created_at, updated_at)
+             VALUES ('QL-R2B', ?, 'PROD-R2', 1, 50.0, 50.0, 100.0, ?, ?)",
+        )
+        .bind(&quote_id)
+        .bind(&now_str)
+        .bind(&now_str)
+        .execute(&pool)
+        .await
+        .expect("seed line B (100% discount)");
+
+        let payload = fetch_quote_for_pdf(&pool, &quote_id).await.expect("fetch pdf");
+        let lines = payload["lines"].as_array().expect("lines array");
+        assert_eq!(lines.len(), 2);
+
+        // Line A: subtotal=200, total_price=200
+        let a_subtotal = lines[0]["subtotal"].as_f64().unwrap();
+        let a_total = lines[0]["total_price"].as_f64().unwrap();
+        assert!((a_subtotal - 200.0).abs() < 0.01);
+        assert!((a_total - 200.0).abs() < 0.01);
+
+        // Line B: subtotal=50, total_price=0 (100% off)
+        let b_subtotal = lines[1]["subtotal"].as_f64().unwrap();
+        let b_total = lines[1]["total_price"].as_f64().unwrap();
+        assert!((b_subtotal - 50.0).abs() < 0.01);
+        assert!(b_total.abs() < 0.01, "100% discount should yield total_price=0, got {b_total}");
+
+        // Pricing subtotal = 200 + 50 = 250 (pre-discount)
+        let pricing_subtotal = payload["pricing"]["subtotal"].as_f64().unwrap();
+        assert!(
+            (pricing_subtotal - 250.0).abs() < 0.01,
+            "pricing.subtotal should be 250 (pre-discount sum), got {pricing_subtotal}"
+        );
+
+        // Total = 200 + 0 = 200 (post-discount)
+        let pricing_total = payload["pricing"]["total"].as_f64().unwrap();
+        assert!(
+            (pricing_total - 200.0).abs() < 0.01,
+            "pricing.total should be 200 (post-discount), got {pricing_total}"
+        );
+    }
+
+    /// R-003: Portal index excludes quotes without valid portal tokens.
+    ///
+    /// Verifies the filter_map fix: a quote without any portal_link must NOT
+    /// appear in the rendered index, even though it exists in the database.
+    #[tokio::test]
+    async fn regression_portal_index_excludes_quotes_without_token() {
+        let (pool, _existing_qid, _existing_tok) = setup().await;
+
+        // Insert a second quote that has NO portal_link
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO quote (id, status, currency, created_by, created_at, updated_at)
+             VALUES ('Q-NO-LINK', 'sent', 'USD', 'test', ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed linkless quote");
+
+        let html = portal_index_page(
+            Query(PortalIndexQuery { status: None, search: None }),
+            state_with_real_templates(pool),
+        )
+        .await
+        .expect("render index")
+        .0;
+
+        // The existing quote (Q-TEST-001) has a portal_link and should appear
+        assert!(html.contains("Q-TEST-001"), "linked quote should appear in index");
+
+        // The linkless quote should NOT appear
+        assert!(
+            !html.contains("Q-NO-LINK"),
+            "quotes without valid portal_link tokens must not appear in the portal index"
+        );
+    }
+
+    /// R-004: Token from one quote cannot access another quote.
+    ///
+    /// Verifies that `resolve_quote_by_token` returns the correct quote_id
+    /// for its token, and that swapping tokens across quotes is impossible.
+    #[tokio::test]
+    async fn regression_token_isolation_across_quotes() {
+        let (pool, quote_id_a, token_a) = setup().await;
+
+        // Create a second quote with its own token
+        let now = Utc::now().to_rfc3339();
+        let expires = (Utc::now() + chrono::Duration::days(7)).to_rfc3339();
+        sqlx::query(
+            "INSERT INTO quote (id, status, currency, created_by, created_at, updated_at)
+             VALUES ('Q-OTHER', 'sent', 'USD', 'test', ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed second quote");
+
+        let token_b = generate_token();
+        sqlx::query(
+            "INSERT INTO portal_link (id, quote_id, token, expires_at, created_by, created_at)
+             VALUES ('PL-OTHER', 'Q-OTHER', ?, ?, 'test', ?)",
+        )
+        .bind(&token_b)
+        .bind(&expires)
+        .bind(&now)
+        .execute(&pool)
+        .await
+        .expect("seed second link");
+
+        // Token A resolves to quote A
+        let resolved_a = resolve_quote_by_token(&pool, &token_a).await.expect("resolve A");
+        assert_eq!(resolved_a, quote_id_a);
+
+        // Token B resolves to quote B
+        let resolved_b = resolve_quote_by_token(&pool, &token_b).await.expect("resolve B");
+        assert_eq!(resolved_b, "Q-OTHER");
+
+        // They must not cross
+        assert_ne!(resolved_a, resolved_b, "tokens must resolve to different quotes");
+    }
+
+    /// R-005: Raw quote ID is rejected by resolve_quote_by_token.
+    ///
+    /// Confirms the security hardening: passing a raw quote_id (e.g. "Q-TEST-001")
+    /// instead of a portal_link token must return NOT_FOUND with an audit trail.
+    #[tokio::test]
+    async fn regression_raw_quote_id_rejected_with_audit() {
+        let (pool, quote_id, _token) = setup().await;
+
+        // Attempt to use the raw quote_id as a token
+        let result = resolve_quote_by_token(&pool, &quote_id).await;
+        assert!(result.is_err(), "raw quote ID must not resolve as a token");
+        let (status, _) = result.unwrap_err();
+        assert_eq!(status, StatusCode::NOT_FOUND);
+
+        // Verify an audit trail was left for the denied access
+        let audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event WHERE event_type = 'portal.token_denied'",
+        )
+        .fetch_one(&pool)
+        .await
+        .expect("count denials");
+        assert!(
+            audit_count >= 1,
+            "raw ID rejection should leave an audit trail, got {audit_count} events"
+        );
+    }
+
+    /// R-006: End-to-end portal flow emits funnel telemetry events.
+    ///
+    /// Exercises the full success path — create_link → view_quote → approve —
+    /// and verifies that funnel telemetry events are recorded in the audit trail
+    /// for each step. This is a cross-cutting regression across both correctness
+    /// fixes and the funnel instrumentation (quotey-ux-001-17).
+    #[tokio::test]
+    async fn regression_e2e_flow_emits_funnel_events() {
+        let (pool, quote_id, token) = setup().await;
+
+        // Step 1: View quote page (triggers PRICING_RENDERED funnel event)
+        let _ = view_quote_page(
+            axum::extract::Path(token.clone()),
+            state_with_real_templates(pool.clone()),
+        )
+        .await;
+
+        // Step 2: Approve (triggers APPROVAL_ACTION funnel event)
+        let _ = approve_quote(
+            axum::extract::Path(token.clone()),
+            state(pool.clone()),
+            HeaderMap::new(),
+            Json(ApproveRequest {
+                approver_name: "Regression Tester".to_string(),
+                approver_email: "regtest@example.com".to_string(),
+                comments: Some("LGTM".to_string()),
+            }),
+        )
+        .await;
+
+        // Verify funnel events were recorded
+        let funnel_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event WHERE event_category = 'funnel' AND quote_id = ?",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count funnel events");
+
+        assert!(
+            funnel_count >= 2,
+            "expected at least 2 funnel events (pricing_rendered + approval_action), got {funnel_count}"
+        );
+
+        // Verify the specific event types are present
+        let event_types: Vec<String> = sqlx::query_scalar(
+            "SELECT event_type FROM audit_event WHERE event_category = 'funnel' AND quote_id = ? ORDER BY timestamp",
+        )
+        .bind(&quote_id)
+        .fetch_all(&pool)
+        .await
+        .expect("fetch funnel event types");
+
+        assert!(
+            event_types.iter().any(|t| t == "funnel.pricing_rendered"),
+            "missing funnel.pricing_rendered event, got: {:?}",
+            event_types
+        );
+        assert!(
+            event_types.iter().any(|t| t == "funnel.approval_action"),
+            "missing funnel.approval_action event, got: {:?}",
+            event_types
+        );
     }
 }

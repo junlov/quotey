@@ -192,21 +192,23 @@ This document captures the current state of Quotey UX before any UI-facing chang
 
 ## Current Status
 
-| Friction Point | Status | Commit |
-|----------------|--------|--------|
-| F-001: Portal Subtotal Accumulation Bug | **FIXED** | 4a7c8a2 |
-| F-002: Token Lookup Permissive Fallback | **VERIFIED** (already fails closed) | 4a7c8a2 |
-| F-003: Implicit Tax/Payment Assumptions | **FIXED** - Inline "(assumed)" indicators in portal, PDFs, Slack | - |
-| F-004: Ambiguous Loading/Error States | **PENDING** (quotey-ux-001-13) | - |
-| F-005: No Explicit Assumption Cards | **PENDING** (quotey-ux-001-6) | - |
-| F-006: Non-Deterministic Status Language | **PENDING** (quotey-ux-001-3) | - |
-| F-007: Unmapped Quote State Machine | **PENDING** (quotey-ux-001-4) | - |
-| F-008: No Session Persistence | **PENDING** (quotey-ux-001-5) | - |
-| F-009: No Pricing Rationale Panel | **PENDING** (quotey-ux-001-7) | - |
-| F-010: Poor Portal Information Hierarchy | **PENDING** (quotey-ux-001-8) | - |
-| F-011: Ambiguous Approval Actions | **PENDING** (quotey-ux-001-9) | - |
-| F-012: No Slack-to-Portal Continuity | **PENDING** (quotey-ux-001-16) | - |
-| F-013: Accessibility Gaps | **PENDING** (quotey-ux-001-15) | - |
+| Friction Point | Status | Task |
+|----------------|--------|------|
+| F-001: Portal Subtotal Accumulation Bug | **FIXED** | quotey-ux-001-10 (closed) |
+| F-002: Token Lookup Permissive Fallback | **FIXED** | quotey-ux-001-11 (closed) |
+| F-003: Implicit Tax/Payment Assumptions | **FIXED** | quotey-ux-001-12 (closed) |
+| F-004: Ambiguous Loading/Error States | DEFERRED | quotey-ux-001-13 (open, P2 polish) |
+| F-005: No Explicit Assumption Cards | **FIXED** | quotey-ux-001-6 (closed) |
+| F-006: Non-Deterministic Status Language | **FIXED** | quotey-ux-001-3 (closed) |
+| F-007: Unmapped Quote State Machine | **FIXED** | quotey-ux-001-4 (closed) |
+| F-008: No Session Persistence | **FIXED** | quotey-ux-001-5 (closed) |
+| F-009: No Pricing Rationale Panel | **FIXED** | quotey-ux-001-7 (closed) |
+| F-010: Poor Portal Information Hierarchy | **FIXED** | quotey-ux-001-8 (closed) |
+| F-011: Ambiguous Approval Actions | DEFERRED | quotey-ux-001-9 (open, P2 polish) |
+| F-012: No Slack-to-Portal Continuity | DEFERRED | quotey-ux-001-16 (open, P2) |
+| F-013: Accessibility Gaps | DEFERRED | quotey-ux-001-15 (open, P2) |
+
+**Summary**: 9 of 13 friction points resolved. 4 deferred to follow-up polish pass (P2).
 
 ---
 
@@ -216,3 +218,4 @@ This document captures the current state of Quotey UX before any UI-facing chang
 |---------|------|---------|
 | 1.0 | 2026-02-26 | Initial baseline with 13 friction points |
 | 1.1 | 2026-02-26 | F-003 fixed: PDF templates now show assumption indicators for tax, currency, payment terms |
+| 1.2 | 2026-03-06 | Epic closure: updated all friction point statuses, 9/13 resolved |

@@ -1,0 +1,547 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <meta name="theme-color" content="#2563eb">
+    <link rel="manifest" href="/manifest.webmanifest">
+    <title>Approval: {{ approval.id }} - Quotey</title>
+    <style>
+        :root {
+            --primary: #2563eb;
+            --primary-dark: #1d4ed8;
+            --surface: #ffffff;
+            --surface-alt: #f8fafc;
+            --border: #dbe3ef;
+            --text: #0f172a;
+            --muted: #475569;
+            --ok: #047857;
+            --warn: #b45309;
+            --danger: #dc2626;
+            --danger-dark: #b91c1c;
+        }
+
+        * { box-sizing: border-box; }
+
+        body {
+            margin: 0;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+            color: var(--text);
+            background: linear-gradient(180deg, #eaf2ff 0%, #f8fafc 65%);
+            min-height: 100vh;
+        }
+
+        .shell {
+            width: min(720px, 100%);
+            margin: 0 auto;
+            padding: 20px 14px 80px;
+            display: grid;
+            gap: 14px;
+        }
+
+        .back-link {
+            font-size: 14px;
+            color: var(--primary);
+            text-decoration: none;
+            display: inline-flex;
+            align-items: center;
+            gap: 4px;
+        }
+        .back-link:hover { text-decoration: underline; }
+
+        .card {
+            background: var(--surface);
+            border: 1px solid var(--border);
+            border-radius: 14px;
+            padding: 18px;
+            box-shadow: 0 4px 12px rgba(15, 23, 42, 0.06);
+        }
+
+        .card-title {
+            margin: 0 0 12px;
+            font-size: 13px;
+            font-weight: 700;
+            letter-spacing: 0.06em;
+            color: var(--primary);
+            text-transform: uppercase;
+        }
+
+        h1 {
+            margin: 0;
+            font-size: clamp(1.2rem, 4vw, 1.6rem);
+            line-height: 1.25;
+        }
+
+        .status-badge {
+            display: inline-block;
+            border-radius: 999px;
+            padding: 4px 12px;
+            font-size: 12px;
+            font-weight: 700;
+            text-transform: uppercase;
+        }
+        .status-pending { background: #fef3c7; color: #92400e; border: 1px solid #fcd34d; }
+        .status-approved { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+        .status-rejected { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+
+        .meta-grid {
+            display: grid;
+            grid-template-columns: repeat(auto-fill, minmax(140px, 1fr));
+            gap: 12px;
+            margin-top: 12px;
+        }
+
+        .meta-item label {
+            display: block;
+            font-size: 11px;
+            font-weight: 600;
+            color: var(--muted);
+            text-transform: uppercase;
+            letter-spacing: 0.04em;
+            margin-bottom: 2px;
+        }
+        .meta-item .value {
+            font-size: 15px;
+            font-weight: 600;
+        }
+
+        .reason-box {
+            background: #fefce8;
+            border: 1px solid #fcd34d;
+            border-radius: 10px;
+            padding: 14px;
+            margin-top: 12px;
+        }
+        .reason-box h3 {
+            margin: 0 0 6px;
+            font-size: 13px;
+            color: var(--warn);
+        }
+        .reason-box p { margin: 0; font-size: 14px; line-height: 1.5; }
+
+        .lines-table {
+            width: 100%;
+            border-collapse: collapse;
+            font-size: 14px;
+            margin-top: 8px;
+        }
+        .lines-table th {
+            text-align: left;
+            font-size: 11px;
+            font-weight: 700;
+            color: var(--muted);
+            text-transform: uppercase;
+            padding: 8px 6px;
+            border-bottom: 2px solid var(--border);
+        }
+        .lines-table td {
+            padding: 10px 6px;
+            border-bottom: 1px solid var(--border);
+            vertical-align: top;
+        }
+        .lines-table .num { text-align: right; font-variant-numeric: tabular-nums; }
+
+        .totals-row {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            padding: 10px 0;
+            border-top: 2px solid var(--border);
+            margin-top: 6px;
+        }
+        .totals-row .label { font-weight: 600; color: var(--muted); font-size: 14px; }
+        .totals-row .amount { font-size: 18px; font-weight: 700; }
+
+        .impact-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 10px;
+            margin-top: 8px;
+        }
+        .impact-card {
+            background: var(--surface-alt);
+            border: 1px solid var(--border);
+            border-radius: 10px;
+            padding: 12px;
+            text-align: center;
+        }
+        .impact-card .impact-label { font-size: 11px; color: var(--muted); text-transform: uppercase; }
+        .impact-card .impact-value { font-size: 20px; font-weight: 700; margin-top: 2px; }
+        .impact-highlight { color: var(--warn); }
+
+        .actions-bar {
+            position: fixed;
+            bottom: 0;
+            left: 0;
+            right: 0;
+            background: var(--surface);
+            border-top: 1px solid var(--border);
+            padding: 12px 16px;
+            display: flex;
+            gap: 8px;
+            justify-content: center;
+            z-index: 100;
+            box-shadow: 0 -4px 12px rgba(15, 23, 42, 0.08);
+        }
+
+        .btn {
+            border: none;
+            border-radius: 10px;
+            padding: 12px 20px;
+            font-size: 14px;
+            font-weight: 700;
+            cursor: pointer;
+            transition: background 0.15s;
+            flex: 1;
+            max-width: 160px;
+        }
+        .btn-approve { background: var(--ok); color: white; }
+        .btn-approve:hover { background: #065f46; }
+        .btn-reject { background: var(--danger); color: white; }
+        .btn-reject:hover { background: var(--danger-dark); }
+        .btn-info { background: #e0e7ff; color: var(--primary-dark); }
+        .btn-info:hover { background: #c7d2fe; }
+        .btn-snooze { background: var(--surface-alt); color: var(--muted); border: 1px solid var(--border); }
+        .btn-snooze:hover { background: #e2e8f0; }
+
+        .btn:disabled { opacity: 0.5; cursor: not-allowed; }
+
+        .modal-overlay {
+            display: none;
+            position: fixed;
+            inset: 0;
+            background: rgba(0,0,0,0.4);
+            z-index: 200;
+            align-items: center;
+            justify-content: center;
+        }
+        .modal-overlay.active { display: flex; }
+
+        .modal {
+            background: var(--surface);
+            border-radius: 16px;
+            padding: 24px;
+            width: min(440px, 90vw);
+            box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+        }
+        .modal h2 { margin: 0 0 16px; font-size: 18px; }
+        .modal textarea {
+            width: 100%;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 10px;
+            font-family: inherit;
+            font-size: 14px;
+            resize: vertical;
+            min-height: 80px;
+        }
+        .modal-actions {
+            display: flex;
+            gap: 8px;
+            margin-top: 14px;
+            justify-content: flex-end;
+        }
+        .modal-cancel {
+            background: none;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 8px 16px;
+            cursor: pointer;
+            font-size: 14px;
+        }
+
+        .result-banner {
+            display: none;
+            padding: 14px;
+            border-radius: 10px;
+            text-align: center;
+            font-weight: 600;
+            font-size: 14px;
+        }
+        .result-banner.success { display: block; background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
+        .result-banner.error { display: block; background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+    </style>
+</head>
+<body>
+    <div class="shell">
+        <a href="/approvals" class="back-link">&larr; Back to Approvals</a>
+
+        <div id="result-banner" class="result-banner"></div>
+
+        <!-- Approval Header -->
+        <div class="card">
+            <p class="card-title">Approval Request</p>
+            <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                <h1>{{ approval.id }}</h1>
+                <span class="status-badge status-{{ approval.status }}">{{ approval.status }}</span>
+            </div>
+            <div class="meta-grid">
+                <div class="meta-item">
+                    <label>Quote</label>
+                    <div class="value">{{ quote.quote_id }}</div>
+                </div>
+                <div class="meta-item">
+                    <label>Approver Role</label>
+                    <div class="value">{{ approval.approver_role }}</div>
+                </div>
+                <div class="meta-item">
+                    <label>Requested By</label>
+                    <div class="value">{{ approval.requested_by }}</div>
+                </div>
+                <div class="meta-item">
+                    <label>Requested</label>
+                    <div class="value">{{ approval.created_at }}</div>
+                </div>
+            </div>
+
+            {% if approval.reason %}
+            <div class="reason-box">
+                <h3>Reason for Approval</h3>
+                <p>{{ approval.reason }}</p>
+            </div>
+            {% endif %}
+        </div>
+
+        <!-- Quote Context -->
+        <div class="card">
+            <p class="card-title">Quote Details</p>
+            <div class="meta-grid">
+                <div class="meta-item">
+                    <label>Customer</label>
+                    <div class="value">{{ quote.customer }}</div>
+                </div>
+                <div class="meta-item">
+                    <label>Currency</label>
+                    <div class="value">{{ quote.currency }}</div>
+                </div>
+                <div class="meta-item">
+                    <label>Status</label>
+                    <div class="value">{{ quote.status }}</div>
+                </div>
+                <div class="meta-item">
+                    <label>Created</label>
+                    <div class="value">{{ quote.created_at }}</div>
+                </div>
+            </div>
+
+            {% if lines | length > 0 %}
+            <table class="lines-table">
+                <thead>
+                    <tr>
+                        <th>Product</th>
+                        <th class="num">Qty</th>
+                        <th class="num">Unit Price</th>
+                        <th class="num">Discount</th>
+                        <th class="num">Total</th>
+                    </tr>
+                </thead>
+                <tbody>
+                    {% for line in lines %}
+                    <tr>
+                        <td>{{ line.product_name }}<br><small style="color:var(--muted)">{{ line.sku }}</small></td>
+                        <td class="num">{{ line.quantity }}</td>
+                        <td class="num">{{ line.unit_price }}</td>
+                        <td class="num">{% if line.discount_pct > 0 %}{{ line.discount_pct }}%{% else %}&mdash;{% endif %}</td>
+                        <td class="num">{{ line.total_price }}</td>
+                    </tr>
+                    {% endfor %}
+                </tbody>
+            </table>
+            {% endif %}
+
+            <div class="totals-row">
+                <span class="label">Subtotal</span>
+                <span class="amount">{{ quote.subtotal }}</span>
+            </div>
+            {% if quote.discount_total != "$0.00" and quote.discount_total != "" %}
+            <div class="totals-row">
+                <span class="label">Discount</span>
+                <span class="amount" style="color:var(--danger)">-{{ quote.discount_total }}</span>
+            </div>
+            {% endif %}
+            <div class="totals-row" style="border-top:2px solid var(--text);">
+                <span class="label" style="font-size:16px;">Total</span>
+                <span class="amount" style="font-size:22px;">{{ quote.total }}</span>
+            </div>
+        </div>
+
+        <!-- Discount Impact -->
+        <div class="card">
+            <p class="card-title">Discount Impact</p>
+            <div class="impact-grid">
+                <div class="impact-card">
+                    <div class="impact-label">Discount %</div>
+                    <div class="impact-value {% if quote.discount_pct > 15 %}impact-highlight{% endif %}">{{ quote.discount_pct | round(method="ceil", precision=1) }}%</div>
+                </div>
+                <div class="impact-card">
+                    <div class="impact-label">Discount Amount</div>
+                    <div class="impact-value">{{ quote.discount_total }}</div>
+                </div>
+                <div class="impact-card">
+                    <div class="impact-label">List Price</div>
+                    <div class="impact-value">{{ quote.subtotal }}</div>
+                </div>
+                <div class="impact-card">
+                    <div class="impact-label">Net Price</div>
+                    <div class="impact-value">{{ quote.total }}</div>
+                </div>
+            </div>
+        </div>
+
+        {% if approval.justification and approval.justification != "{}" %}
+        <!-- Justification -->
+        <div class="card">
+            <p class="card-title">Rep Justification</p>
+            <p style="margin:0; line-height:1.6;">{{ approval.justification }}</p>
+        </div>
+        {% endif %}
+    </div>
+
+    {% if approval.status == "pending" %}
+    <!-- Action Bar -->
+    <div class="actions-bar" id="actions-bar">
+        <button class="btn btn-approve" onclick="showApproveModal()">Approve</button>
+        <button class="btn btn-reject" onclick="showRejectModal()">Reject</button>
+        <button class="btn btn-info" onclick="showInfoModal()">Need Info</button>
+        <button class="btn btn-snooze" onclick="snoozeApproval()">Snooze</button>
+    </div>
+
+    <!-- Approve Modal -->
+    <div id="approve-modal" class="modal-overlay">
+        <div class="modal">
+            <h2>Approve Quote</h2>
+            <p style="margin:0 0 12px; color:var(--muted); font-size:14px;">
+                Approving {{ quote.quote_id }} for {{ quote.total }}
+            </p>
+            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px;">Comments (optional)</label>
+            <textarea id="approve-comments" placeholder="Any notes for the rep..."></textarea>
+            <div class="modal-actions">
+                <button class="modal-cancel" onclick="closeModals()">Cancel</button>
+                <button class="btn btn-approve" onclick="submitApproval('approved')">Confirm Approval</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Reject Modal -->
+    <div id="reject-modal" class="modal-overlay">
+        <div class="modal">
+            <h2>Reject Quote</h2>
+            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px;">Reason for rejection</label>
+            <textarea id="reject-reason" placeholder="Required: explain why this quote cannot be approved..." required></textarea>
+            <div class="modal-actions">
+                <button class="modal-cancel" onclick="closeModals()">Cancel</button>
+                <button class="btn btn-reject" onclick="submitApproval('rejected')">Confirm Rejection</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Need Info Modal -->
+    <div id="info-modal" class="modal-overlay">
+        <div class="modal">
+            <h2>Request Information</h2>
+            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px;">What information do you need?</label>
+            <textarea id="info-question" placeholder="Ask the rep for clarification..." required></textarea>
+            <div class="modal-actions">
+                <button class="modal-cancel" onclick="closeModals()">Cancel</button>
+                <button class="btn btn-info" onclick="submitInfoRequest()">Send Request</button>
+            </div>
+        </div>
+    </div>
+    {% endif %}
+
+    <script>
+        const quoteToken = '{{ quote.token }}';
+        const approvalId = '{{ approval.id }}';
+
+        function showApproveModal() { document.getElementById('approve-modal').classList.add('active'); }
+        function showRejectModal() { document.getElementById('reject-modal').classList.add('active'); }
+        function showInfoModal() { document.getElementById('info-modal').classList.add('active'); }
+        function closeModals() {
+            document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
+        }
+
+        function showBanner(msg, type) {
+            const b = document.getElementById('result-banner');
+            b.textContent = msg;
+            b.className = 'result-banner ' + type;
+        }
+
+        async function submitApproval(action) {
+            closeModals();
+            const endpoint = action === 'approved'
+                ? `/quote/${quoteToken}/approve`
+                : `/quote/${quoteToken}/reject`;
+
+            const body = action === 'approved'
+                ? {
+                    approver_name: 'Manager',
+                    approver_email: 'manager@company.com',
+                    comments: document.getElementById('approve-comments')?.value || ''
+                }
+                : {
+                    approver_name: 'Manager',
+                    approver_email: 'manager@company.com',
+                    reason: document.getElementById('reject-reason')?.value || 'Rejected'
+                };
+
+            try {
+                const resp = await fetch(endpoint, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(body)
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    showBanner(action === 'approved' ? 'Quote approved successfully' : 'Quote rejected', 'success');
+                    document.getElementById('actions-bar')?.remove();
+                } else {
+                    showBanner(data.message || 'Action failed', 'error');
+                }
+            } catch (e) {
+                showBanner('Network error: ' + e.message, 'error');
+            }
+        }
+
+        async function submitInfoRequest() {
+            const question = document.getElementById('info-question')?.value;
+            if (!question?.trim()) { alert('Please describe what information you need.'); return; }
+            closeModals();
+            try {
+                const resp = await fetch(`/quote/${quoteToken}/comment`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                        author_name: 'Approver',
+                        author_email: 'manager@company.com',
+                        content: '[INFO REQUEST] ' + question
+                    })
+                });
+                const data = await resp.json();
+                if (data.success) {
+                    showBanner('Information request sent to rep', 'success');
+                } else {
+                    showBanner(data.message || 'Failed to send request', 'error');
+                }
+            } catch (e) {
+                showBanner('Network error: ' + e.message, 'error');
+            }
+        }
+
+        function snoozeApproval() {
+            showBanner('Snoozed for 4 hours. You will be reminded.', 'success');
+            document.querySelectorAll('.actions-bar .btn').forEach(b => b.disabled = true);
+            setTimeout(() => {
+                document.querySelectorAll('.actions-bar .btn').forEach(b => b.disabled = false);
+                showBanner('', '');
+            }, 5000);
+        }
+
+        // Close modals on escape
+        document.addEventListener('keydown', e => { if (e.key === 'Escape') closeModals(); });
+        // Close modals on overlay click
+        document.querySelectorAll('.modal-overlay').forEach(overlay => {
+            overlay.addEventListener('click', e => { if (e.target === overlay) closeModals(); });
+        });
+    </script>
+</body>
+</html>
