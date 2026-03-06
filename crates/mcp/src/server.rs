@@ -1611,6 +1611,41 @@ pub struct SettingsSetInput {
 #[derive(Debug, Deserialize, JsonSchema)]
 pub struct SettingsListInput {}
 
+// AI Cost Tracking Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CostSummaryInput {
+    /// The quote ID to get AI cost summary for
+    pub quote_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct CostListInput {
+    /// Optional quote ID to filter by (omit for all recent costs)
+    pub quote_id: Option<String>,
+    /// Maximum number of events to return (default 20)
+    #[serde(default = "default_cost_limit")]
+    pub limit: u32,
+}
+
+fn default_cost_limit() -> u32 {
+    20
+}
+
+// Org Hierarchy Types
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OrgChainInput {
+    /// The sales rep ID to start the chain from
+    pub rep_id: String,
+}
+
+#[derive(Debug, Deserialize, JsonSchema)]
+pub struct OrgAuthorityInput {
+    /// The sales rep ID requesting the discount
+    pub rep_id: String,
+    /// The discount percentage that needs authorization
+    pub discount_pct: f64,
+}
+
 fn default_limit() -> u32 {
     DEFAULT_PAGE_LIMIT
 }
@@ -4254,6 +4289,197 @@ impl QuoteyMcpServer {
             Err(e) => internal_tool_error(&e),
         }
     }
+
+    // ── AI Cost Tracking ──────────────────────────────────────────────────
+
+    #[tool(
+        description = "Get AI usage cost summary for a specific quote. Returns total tokens, estimated cost, and invocation count."
+    )]
+    pub async fn cost_summary(&self, Parameters(input): Parameters<CostSummaryInput>) -> String {
+        use quotey_db::repositories::AiCostRepository;
+
+        let repo = quotey_db::repositories::SqlAiCostRepository::new(self.db_pool.clone());
+
+        match repo.summary_by_quote(&input.quote_id).await {
+            Ok(Some(summary)) => {
+                let result = serde_json::json!({
+                    "quote_id": summary.quote_id,
+                    "total_input_tokens": summary.total_input_tokens,
+                    "total_output_tokens": summary.total_output_tokens,
+                    "total_tokens": summary.total_tokens,
+                    "total_estimated_cost_cents": summary.total_estimated_cost_cents,
+                    "invocation_count": summary.invocation_count,
+                });
+                serde_json::to_string_pretty(&result).unwrap_or_default()
+            }
+            Ok(None) => serde_json::json!({
+                "quote_id": input.quote_id,
+                "total_input_tokens": 0,
+                "total_output_tokens": 0,
+                "total_tokens": 0,
+                "total_estimated_cost_cents": 0.0,
+                "invocation_count": 0,
+            })
+            .to_string(),
+            Err(e) => internal_tool_error(&e),
+        }
+    }
+
+    #[tool(
+        description = "List recent AI usage cost events. Can filter by quote ID or return all recent events across the system."
+    )]
+    pub async fn cost_list(&self, Parameters(input): Parameters<CostListInput>) -> String {
+        use quotey_db::repositories::AiCostRepository;
+
+        let repo = quotey_db::repositories::SqlAiCostRepository::new(self.db_pool.clone());
+        let limit = input.limit.min(100);
+
+        let result = match &input.quote_id {
+            Some(qid) => repo.list_by_quote(qid, limit).await,
+            None => repo.list_recent(limit).await,
+        };
+
+        match result {
+            Ok(events) => {
+                let items: Vec<serde_json::Value> = events
+                    .iter()
+                    .map(|e| {
+                        serde_json::json!({
+                            "id": e.id,
+                            "quote_id": e.quote_id,
+                            "tool_name": e.tool_name,
+                            "model_name": e.model_name,
+                            "input_tokens": e.input_tokens,
+                            "output_tokens": e.output_tokens,
+                            "total_tokens": e.total_tokens,
+                            "estimated_cost_cents": e.estimated_cost_cents,
+                            "actor_id": e.actor_id,
+                            "created_at": e.created_at.to_rfc3339(),
+                        })
+                    })
+                    .collect();
+                let resp = serde_json::json!({
+                    "count": items.len(),
+                    "items": items,
+                });
+                serde_json::to_string_pretty(&resp).unwrap_or_default()
+            }
+            Err(e) => internal_tool_error(&e),
+        }
+    }
+
+    // ── Org Hierarchy ─────────────────────────────────────────────────
+
+    #[tool(description = "Get the approval chain for a sales rep. Walks the reports_to hierarchy from the given rep up through managers, VP, and CRO.")]
+    pub async fn org_chain(&self, Parameters(input): Parameters<OrgChainInput>) -> String {
+        use quotey_core::cpq::hierarchy::find_approval_chain;
+        use quotey_core::domain::sales_rep::SalesRepId;
+        use quotey_db::repositories::SalesRepRepository;
+
+        let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
+
+        let start_id = SalesRepId(input.rep_id.clone());
+        let start = match repo.find_by_id(&start_id).await {
+            Ok(Some(rep)) => rep,
+            Ok(None) => {
+                return tool_error("VALIDATION_ERROR", &format!("Sales rep '{}' not found", input.rep_id), None);
+            }
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        let chain = find_approval_chain(&start, |id| {
+            // Synchronous lookup via blocking — hierarchy chains are short (< 20)
+            // and this avoids making find_approval_chain async
+            let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(repo.find_by_id(id))
+                    .ok()
+                    .flatten()
+            })
+        });
+
+        let items: Vec<serde_json::Value> = chain
+            .chain
+            .iter()
+            .enumerate()
+            .map(|(i, rep)| {
+                serde_json::json!({
+                    "position": i,
+                    "id": rep.id.0,
+                    "name": rep.name,
+                    "role": rep.role.as_str(),
+                    "max_discount_pct": rep.max_discount_pct,
+                    "reports_to": rep.reports_to.as_ref().map(|id| &id.0),
+                })
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "rep_id": input.rep_id,
+            "chain_length": items.len(),
+            "chain": items,
+        });
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
+
+    #[tool(description = "Find who in the org hierarchy has authority to approve a given discount percentage. Walks up from the specified rep to find the first person with sufficient max_discount_pct.")]
+    pub async fn org_authority(
+        &self,
+        Parameters(input): Parameters<OrgAuthorityInput>,
+    ) -> String {
+        use quotey_core::cpq::hierarchy::find_authority_for_discount;
+        use quotey_core::domain::sales_rep::SalesRepId;
+        use quotey_db::repositories::SalesRepRepository;
+
+        let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
+
+        let start_id = SalesRepId(input.rep_id.clone());
+        let start = match repo.find_by_id(&start_id).await {
+            Ok(Some(rep)) => rep,
+            Ok(None) => {
+                return tool_error("VALIDATION_ERROR", &format!("Sales rep '{}' not found", input.rep_id), None);
+            }
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        let authority = find_authority_for_discount(&start, input.discount_pct, |id| {
+            let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
+            tokio::task::block_in_place(|| {
+                tokio::runtime::Handle::current()
+                    .block_on(repo.find_by_id(id))
+                    .ok()
+                    .flatten()
+            })
+        });
+
+        let chain_items: Vec<serde_json::Value> = authority
+            .chain
+            .iter()
+            .map(|rep| {
+                serde_json::json!({
+                    "id": rep.id.0,
+                    "name": rep.name,
+                    "role": rep.role.as_str(),
+                    "max_discount_pct": rep.max_discount_pct,
+                })
+            })
+            .collect();
+
+        let result = serde_json::json!({
+            "rep_id": input.rep_id,
+            "requested_discount_pct": input.discount_pct,
+            "authority_found": authority.authorizer.is_some(),
+            "authorizer": authority.authorizer.as_ref().map(|rep| serde_json::json!({
+                "id": rep.id.0,
+                "name": rep.name,
+                "role": rep.role.as_str(),
+                "max_discount_pct": rep.max_discount_pct,
+            })),
+            "chain_traversed": chain_items,
+        });
+        serde_json::to_string_pretty(&result).unwrap_or_default()
+    }
 }
 
 /// Record a system-generated auto-comment on a quote for audit trail purposes.
@@ -4311,6 +4537,39 @@ async fn load_policy_thresholds(
     }
 
     thresholds
+}
+
+/// Record an AI cost event for a tool invocation. Non-blocking: logs failures.
+async fn record_ai_cost(
+    pool: &quotey_db::DbPool,
+    tool_name: &str,
+    quote_id: Option<&str>,
+    input_tokens: i64,
+    output_tokens: i64,
+    cost_cents: f64,
+    actor_id: Option<&str>,
+) {
+    use quotey_core::domain::ai_cost::AiCostEvent;
+    use quotey_db::repositories::AiCostRepository;
+
+    let event = AiCostEvent {
+        id: format!("COST-{:.8}", uuid::Uuid::new_v4()),
+        quote_id: quote_id.map(str::to_string),
+        tool_name: tool_name.to_string(),
+        model_name: "mcp-tool".to_string(),
+        input_tokens,
+        output_tokens,
+        total_tokens: input_tokens + output_tokens,
+        estimated_cost_cents: cost_cents,
+        actor_id: actor_id.map(str::to_string),
+        metadata_json: "{}".to_string(),
+        created_at: chrono::Utc::now(),
+    };
+
+    let repo = quotey_db::repositories::SqlAiCostRepository::new(pool.clone());
+    if let Err(e) = repo.record(event).await {
+        warn!(error = %e, tool = %tool_name, "ai cost recording failed (non-blocking)");
+    }
 }
 
 fn org_setting_to_json(
@@ -6746,5 +7005,110 @@ mod tests {
             true,
             "8% discount should trigger approval when threshold is set to 5%"
         );
+    }
+
+    // ── AI Cost Tracking Tests ────────────────────────────────────────
+
+    #[tokio::test]
+    async fn cost_summary_returns_zero_for_no_events() {
+        let pool = test_db().await;
+        let srv = server(pool);
+
+        let result = srv
+            .cost_summary(Parameters(CostSummaryInput { quote_id: "Q-NONEXISTENT".to_string() }))
+            .await;
+        let json = parse_output(&result);
+        assert_eq!(json["invocation_count"], 0);
+        assert_eq!(json["total_tokens"], 0);
+    }
+
+    #[tokio::test]
+    async fn cost_summary_returns_aggregated_data() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-CS1", "SKU-CS1", "Widget", "5.00").await;
+        let srv = server(pool.clone());
+
+        // Create a quote to get a valid ID
+        let create_result = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "acct-cost".to_string(),
+                currency: "USD".to_string(),
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-CS1".to_string(),
+                    quantity: 1,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                term_months: None,
+                start_date: None,
+                deal_id: None,
+                idempotency_key: None,
+                notes: None,
+            }))
+            .await;
+        let qid = parse_output(&create_result)["quote_id"].as_str().unwrap().to_string();
+
+        // Insert cost events directly
+        record_ai_cost(&pool, "quote_price", Some(&qid), 1000, 200, 0.36, Some("mcp:test")).await;
+        record_ai_cost(&pool, "catalog_search", Some(&qid), 500, 100, 0.18, Some("mcp:test")).await;
+
+        let result = srv.cost_summary(Parameters(CostSummaryInput { quote_id: qid.clone() })).await;
+        let json = parse_output(&result);
+        assert_eq!(json["invocation_count"], 2);
+        assert_eq!(json["total_input_tokens"], 1500);
+        assert_eq!(json["total_output_tokens"], 300);
+    }
+
+    #[tokio::test]
+    async fn cost_list_returns_recent_events() {
+        let pool = test_db().await;
+        let srv = server(pool.clone());
+
+        record_ai_cost(&pool, "settings_list", None, 100, 50, 0.04, None).await;
+        record_ai_cost(&pool, "catalog_search", None, 200, 80, 0.08, None).await;
+
+        let result = srv.cost_list(Parameters(CostListInput { quote_id: None, limit: 10 })).await;
+        let json = parse_output(&result);
+        assert_eq!(json["count"], 2);
+        assert!(json["items"].is_array());
+        assert_eq!(json["items"].as_array().unwrap().len(), 2);
+    }
+
+    #[tokio::test]
+    async fn cost_list_filters_by_quote_id() {
+        let pool = test_db().await;
+        seed_product(&pool, "PROD-CL1", "SKU-CL1", "Gizmo", "10.00").await;
+        let srv = server(pool.clone());
+
+        let create_result = srv
+            .quote_create(Parameters(QuoteCreateInput {
+                account_id: "acct-cl".to_string(),
+                currency: "USD".to_string(),
+                line_items: vec![LineItemInput {
+                    product_id: "PROD-CL1".to_string(),
+                    quantity: 1,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: None,
+                }],
+                term_months: None,
+                start_date: None,
+                deal_id: None,
+                idempotency_key: None,
+                notes: None,
+            }))
+            .await;
+        let qid = parse_output(&create_result)["quote_id"].as_str().unwrap().to_string();
+
+        record_ai_cost(&pool, "quote_price", Some(&qid), 800, 150, 0.28, None).await;
+        record_ai_cost(&pool, "settings_list", None, 100, 50, 0.04, None).await;
+
+        let result = srv
+            .cost_list(Parameters(CostListInput { quote_id: Some(qid.clone()), limit: 10 }))
+            .await;
+        let json = parse_output(&result);
+        assert_eq!(json["count"], 1);
+        assert_eq!(json["items"][0]["tool_name"].as_str().unwrap(), "quote_price");
     }
 }
