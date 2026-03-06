@@ -25,6 +25,7 @@
 #   QUOTEY_THRESHOLD_CRITICAL_PATH_GAPS_MAX=0       # Maximum open P0/P1 gaps
 #   QUOTEY_THRESHOLD_E2E_PASS_PCT=100               # Minimum E2E pass rate
 #   QUOTEY_THRESHOLD_LOG_VALIDATOR_CASES_MIN=5      # Minimum log-validator cases
+#   QUOTEY_QA_REPORT_DIR=.planning/qa/reports       # QA dashboard/report artifact output dir
 
 set -euo pipefail
 
@@ -47,6 +48,55 @@ NC='\033[0m' # No Color
 RUN_ALL=true
 GATES_TO_RUN=()
 FAIL_FAST="${QUOTEY_FAIL_FAST:-1}"
+RUN_ID="$(date -u +%Y%m%dT%H%M%SZ)"
+RUN_STARTED_AT_UTC="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+REPORT_DIR="${QUOTEY_QA_REPORT_DIR:-$ROOT_DIR/.planning/qa/reports}"
+
+# Per-gate execution results for dashboard/report artifacts
+declare -a GATE_RESULT_NAME=()
+declare -a GATE_RESULT_STATUS=()
+declare -a GATE_RESULT_DURATION_S=()
+declare -a GATE_RESULT_NOTES=()
+
+# QA threshold metrics captured from qa gate execution
+QA_TOTAL_TESTS=""
+QA_REAL_DB_TESTS=""
+QA_REAL_DB_PCT=""
+QA_REAL_DB_THRESHOLD=""
+QA_CRITICAL_GAP_COUNT=""
+QA_CRITICAL_GAP_THRESHOLD=""
+QA_E2E_PASSED=""
+QA_E2E_FAILED=""
+QA_E2E_TOTAL=""
+QA_E2E_PASS_PCT=""
+QA_E2E_THRESHOLD=""
+QA_E2E_REASON="qa gate not executed"
+QA_LOG_VALIDATOR_CASES=""
+QA_LOG_VALIDATOR_THRESHOLD=""
+
+# Derived report fields populated before artifact write
+COVERAGE_CURRENT_TOTAL=0
+COVERAGE_CURRENT_REAL_DB=0
+COVERAGE_CURRENT_INMEMORY=0
+COVERAGE_CURRENT_PURE_UNIT=0
+COVERAGE_BASELINE_TOTAL=0
+COVERAGE_BASELINE_REAL_DB=0
+COVERAGE_BASELINE_INMEMORY=0
+COVERAGE_BASELINE_PURE_UNIT=0
+COVERAGE_DELTA_TOTAL=0
+COVERAGE_DELTA_REAL_DB=0
+COVERAGE_DELTA_INMEMORY=0
+COVERAGE_DELTA_PURE_UNIT=0
+FLAKY_SIGNAL_COUNT=0
+FLAKY_SIGNAL_PREVIEW="none"
+EXCEPTION_ACTIVE_COUNT=0
+EXCEPTION_EXPIRED_COUNT=0
+declare -a EXCEPTION_ID=()
+declare -a EXCEPTION_PATH=()
+declare -a EXCEPTION_OWNER=()
+declare -a EXCEPTION_EXPIRY=()
+declare -a EXCEPTION_EXPIRED=()
+declare -a EXCEPTION_FOLLOWUP=()
 
 # Parse arguments
 while [[ $# -gt 0 ]]; do
