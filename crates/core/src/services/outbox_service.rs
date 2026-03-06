@@ -12,7 +12,6 @@ use thiserror::Error;
 use crate::domain::execution::ExecutionTaskId;
 use crate::domain::outbox::{
     DeadLetterEntry, OutboxOperation, OutboxState, OutboxStatus, ReplayRequest, ReplayResult,
-    ResolutionStatus,
 };
 use crate::domain::quote::QuoteId;
 

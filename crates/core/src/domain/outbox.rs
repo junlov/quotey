@@ -245,6 +245,17 @@ pub enum OutboxState {
     Failed,
 }
 
+impl std::fmt::Display for OutboxState {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Self::Pending => write!(f, "pending"),
+            Self::Claimed => write!(f, "claimed"),
+            Self::Completed => write!(f, "completed"),
+            Self::Failed => write!(f, "failed"),
+        }
+    }
+}
+
 /// Entry in the dead letter queue (manual intervention required)
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct DeadLetterEntry {
