@@ -511,8 +511,9 @@ mod tests {
     use serde_json::json;
 
     use super::{
-        build_pricing_rule, preview_pricing_rule, pricing_rule_sql_preview, PricingRuleAction,
-        PricingRuleBuilderError, PricingRulePreviewInput,
+        build_pricing_rule, is_safe_sql_identifier, preview_pricing_rule, pricing_rule_sql_preview,
+        render_condition_sql, PricingRuleAction, PricingRuleBuilderError, PricingRuleCondition,
+        PricingRuleOperator, PricingRulePreviewInput,
     };
     use crate::{
         VisualActionType, VisualOperator, VisualRuleAction, VisualRuleCondition,
@@ -672,5 +673,67 @@ mod tests {
         assert_eq!(case.after_discount_pct, Decimal::new(1500, 2));
         assert_eq!(case.before_total, Decimal::new(7500, 2));
         assert_eq!(case.after_total, Decimal::new(8500, 2));
+    }
+
+    #[test]
+    fn rejects_disallowed_field_key_sql_injection_attempt() {
+        let mut visual_rule = pricing_rule_fixture(VisualActionType::SetUnitPrice);
+        // Attempt SQL injection through field_key
+        visual_rule.conditions[0].field_key = "1=1; DROP TABLE quote; --".to_string();
+
+        let result = build_pricing_rule(&visual_rule);
+        assert!(
+            matches!(result, Err(PricingRuleBuilderError::DisallowedFieldKey { .. })),
+            "Should reject disallowed field key to prevent SQL injection, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn rejects_field_key_with_special_characters() {
+        let mut visual_rule = pricing_rule_fixture(VisualActionType::SetUnitPrice);
+        // Field key with SQL injection attempt using semicolon
+        visual_rule.conditions[0].field_key = "customer_segment; DELETE FROM quote".to_string();
+
+        let result = build_pricing_rule(&visual_rule);
+        assert!(
+            matches!(result, Err(PricingRuleBuilderError::DisallowedFieldKey { .. })),
+            "Should reject field key with special characters, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn sql_identifier_safety_check_blocks_dangerous_identifiers() {
+        // Test the is_safe_sql_identifier function directly
+        assert!(!is_safe_sql_identifier("")); // Empty
+        assert!(!is_safe_sql_identifier("1=1")); // Starts with number
+        assert!(!is_safe_sql_identifier("field; DROP")); // Contains semicolon
+        assert!(!is_safe_sql_identifier("field' OR '1'='1")); // Contains quotes
+        assert!(!is_safe_sql_identifier("field--comment")); // Contains comment
+        assert!(!is_safe_sql_identifier("field/*comment*/")); // Contains block comment
+        assert!(!is_safe_sql_identifier("field.name")); // Contains dot
+        assert!(!is_safe_sql_identifier("field name")); // Contains space
+
+        // Valid identifiers
+        assert!(is_safe_sql_identifier("customer_segment"));
+        assert!(is_safe_sql_identifier("product_category"));
+        assert!(is_safe_sql_identifier("_private_field"));
+        assert!(is_safe_sql_identifier("field123"));
+    }
+
+    #[test]
+    fn render_condition_sql_defense_in_depth() {
+        // Direct construction of PricingRuleCondition with dangerous field_key
+        // This tests the defense-in-depth check in render_condition_sql
+        let dangerous_condition = PricingRuleCondition {
+            field_key: "1=1; DROP TABLE quote; --".to_string(),
+            operator: PricingRuleOperator::Equals,
+            value: "test".to_string(),
+            connector: None,
+        };
+
+        let sql = render_condition_sql(&dangerous_condition);
+        assert_eq!(sql, "1=0", "Should return no-op condition for unsafe identifiers");
     }
 }

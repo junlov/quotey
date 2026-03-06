@@ -85,6 +85,8 @@
         .status-approved { background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
         .status-rejected { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
         .status-declined { background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+        .status-revision_requested { background: #e0e7ff; color: #3730a3; border: 1px solid #c7d2fe; }
+        .status-expired { background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; }
 
         .meta-grid {
             display: grid;
@@ -958,10 +960,12 @@
 
                 const payload = await response.json();
                 const signature = approvalSignatureFromLive(payload);
+                if (!payload.is_pending) {
+                    showStale(payload.status);
+                }
                 if (approvalLiveSignature && signature !== approvalLiveSignature) {
                     showLiveUpdateBanner();
                     if (!payload.is_pending) {
-                        showStale();
                         showBanner('Approval status changed in another session.', 'error');
                     }
                 }
@@ -1223,22 +1227,41 @@
             b.className = 'result-banner ' + type;
         }
 
+        function normalizeStatusForBadge(statusText) {
+            const normalized = (statusText || '').toString().trim().toLowerCase();
+            if (!normalized) return null;
+            if (normalized === 'rejected') return 'rejected';
+            if (normalized === 'declined') return 'declined';
+            if (normalized === 'approved') return 'approved';
+            if (normalized === 'pending') return 'pending';
+            if (normalized === 'revision_requested') return 'revision_requested';
+            if (normalized === 'expired') return 'expired';
+            return normalized;
+        }
+
         function disableAllActions(statusText) {
             actionsDisabled = true;
             const bar = document.getElementById('actions-bar');
             if (bar) bar.querySelectorAll('.btn').forEach(b => { b.disabled = true; });
             // Update status badge
             const badge = document.querySelector('.status-badge');
-            if (badge && statusText) {
-                badge.className = 'status-badge status-' + statusText;
-                badge.textContent = statusText;
+            const badgeStatus = normalizeStatusForBadge(statusText);
+            if (badge && badgeStatus) {
+                badge.className = 'status-badge status-' + badgeStatus;
+                badge.textContent = badgeStatus;
             }
         }
 
-        function showStale() {
+        function showStale(statusText) {
             const sb = document.getElementById('stale-banner');
-            if (sb) sb.classList.add('visible');
-            disableAllActions(null);
+            const badgeStatus = normalizeStatusForBadge(statusText);
+            if (sb) {
+                if (badgeStatus && badgeStatus !== 'pending') {
+                    sb.textContent = `This approval is now ${badgeStatus}. Actions are disabled.`;
+                }
+                sb.classList.add('visible');
+            }
+            disableAllActions(badgeStatus);
         }
 
         // Pre-flight check: verify approval is still pending before destructive actions

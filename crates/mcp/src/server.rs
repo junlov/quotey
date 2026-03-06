@@ -4847,6 +4847,154 @@ impl QuoteyMcpServer {
         }))
         .unwrap_or_default()
     }
+
+    // -----------------------------------------------------------------------
+    // Budget tools
+    // -----------------------------------------------------------------------
+
+    #[tool(
+        name = "budget_check",
+        description = "Check whether a proposed discount fits within a sales rep's monthly discount budget. Returns Ok (under 80%), SoftWarn (80-99%), or HardLimit (100%+, needs manager approval)."
+    )]
+    pub async fn budget_check(
+        &self,
+        Parameters(input): Parameters<BudgetCheckInput>,
+    ) -> String {
+        use quotey_core::cpq::discount_budget::check_discount_budget;
+        use quotey_db::repositories::SalesRepRepository;
+
+        let rep_id = input.rep_id.trim();
+        if rep_id.is_empty() {
+            return tool_error("VALIDATION_ERROR", "rep_id is required", None);
+        }
+        if input.proposed_discount_cents < 0 {
+            return tool_error("VALIDATION_ERROR", "proposed_discount_cents must be >= 0", None);
+        }
+
+        let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
+        let sid = quotey_core::domain::sales_rep::SalesRepId(rep_id.to_string());
+        let rep = match repo.find_by_id(&sid).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return tool_error(
+                    "VALIDATION_ERROR",
+                    &format!("Sales rep '{rep_id}' not found"),
+                    None,
+                );
+            }
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        let status = check_discount_budget(&rep, input.proposed_discount_cents);
+        let (level, used_pct, remaining, overage, message) = match &status {
+            quotey_core::cpq::discount_budget::BudgetStatus::Ok { used_pct, remaining_cents } => {
+                ("ok", *used_pct, *remaining_cents, 0i64, String::new())
+            }
+            quotey_core::cpq::discount_budget::BudgetStatus::SoftWarn { used_pct, remaining_cents, message } => {
+                ("soft_warn", *used_pct, *remaining_cents, 0i64, message.clone())
+            }
+            quotey_core::cpq::discount_budget::BudgetStatus::HardLimit { used_pct, overage_cents, message } => {
+                ("hard_limit", *used_pct, 0i64, *overage_cents, message.clone())
+            }
+        };
+
+        serde_json::to_string_pretty(&serde_json::json!({
+            "rep_id": rep_id,
+            "rep_name": rep.name,
+            "budget_monthly_cents": rep.discount_budget_monthly_cents,
+            "spent_cents": rep.spent_discount_cents,
+            "proposed_discount_cents": input.proposed_discount_cents,
+            "status": level,
+            "used_pct": used_pct,
+            "remaining_cents": remaining,
+            "overage_cents": overage,
+            "message": message,
+        }))
+        .unwrap_or_default()
+    }
+
+    #[tool(
+        name = "budget_status",
+        description = "Get a sales rep's current discount budget summary: monthly budget, amount spent, remaining, utilization percentage, and status level."
+    )]
+    pub async fn budget_status(
+        &self,
+        Parameters(input): Parameters<BudgetStatusInput>,
+    ) -> String {
+        use quotey_core::cpq::discount_budget::budget_summary;
+        use quotey_db::repositories::SalesRepRepository;
+
+        let rep_id = input.rep_id.trim();
+        if rep_id.is_empty() {
+            return tool_error("VALIDATION_ERROR", "rep_id is required", None);
+        }
+
+        let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
+        let sid = quotey_core::domain::sales_rep::SalesRepId(rep_id.to_string());
+        let rep = match repo.find_by_id(&sid).await {
+            Ok(Some(r)) => r,
+            Ok(None) => {
+                return tool_error(
+                    "VALIDATION_ERROR",
+                    &format!("Sales rep '{rep_id}' not found"),
+                    None,
+                );
+            }
+            Err(e) => return internal_tool_error(&e),
+        };
+
+        let summary = budget_summary(&rep);
+        serde_json::to_string_pretty(&serde_json::json!({
+            "rep_id": summary.rep_id,
+            "rep_name": summary.rep_name,
+            "budget_monthly_cents": summary.budget_monthly_cents,
+            "spent_cents": summary.spent_cents,
+            "remaining_cents": summary.remaining_cents,
+            "used_pct": summary.used_pct,
+            "status": summary.status,
+        }))
+        .unwrap_or_default()
+    }
+
+    #[tool(
+        name = "budget_record",
+        description = "Record a discount spend against a sales rep's monthly budget. Atomically updates the spent total and returns the new balance."
+    )]
+    pub async fn budget_record(
+        &self,
+        Parameters(input): Parameters<BudgetRecordInput>,
+    ) -> String {
+        let rep_id = input.rep_id.trim();
+        if rep_id.is_empty() {
+            return tool_error("VALIDATION_ERROR", "rep_id is required", None);
+        }
+        if input.discount_cents <= 0 {
+            return tool_error("VALIDATION_ERROR", "discount_cents must be > 0", None);
+        }
+
+        let repo = quotey_db::repositories::SqlSalesRepRepository::new(self.db_pool.clone());
+        let sid = quotey_core::domain::sales_rep::SalesRepId(rep_id.to_string());
+
+        match repo.record_discount_spend(&sid, input.discount_cents).await {
+            Ok(Some(new_total)) => {
+                serde_json::to_string_pretty(&serde_json::json!({
+                    "rep_id": rep_id,
+                    "discount_cents_recorded": input.discount_cents,
+                    "new_spent_total_cents": new_total,
+                    "success": true,
+                }))
+                .unwrap_or_default()
+            }
+            Ok(None) => {
+                tool_error(
+                    "VALIDATION_ERROR",
+                    &format!("Sales rep '{rep_id}' not found"),
+                    None,
+                )
+            }
+            Err(e) => internal_tool_error(&e),
+        }
+    }
 }
 
 /// Record a system-generated auto-comment on a quote for audit trail purposes.
