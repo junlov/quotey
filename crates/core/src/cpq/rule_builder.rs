@@ -344,6 +344,9 @@ fn escape_sql_literal(value: &str) -> String {
 fn build_condition(
     condition: &VisualRuleCondition,
 ) -> Result<PricingRuleCondition, PricingRuleBuilderError> {
+    // Security: Validate field key against allowlist to prevent SQL injection
+    validate_field_key(&condition.field_key)?;
+
     let operator = match condition.operator {
         VisualOperator::Equals => PricingRuleOperator::Equals,
         VisualOperator::NotEquals => PricingRuleOperator::NotEquals,
