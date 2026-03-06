@@ -450,8 +450,8 @@
     {% endif %}
 
     <script>
-        const quoteToken = '{{ quote.token }}';
-        const approvalId = '{{ approval.id }}';
+        const quoteToken = {{ quote.token | json_encode | safe }};
+        const approvalId = {{ approval.id | json_encode | safe }};
 
         function showApproveModal() { document.getElementById('approve-modal').classList.add('active'); }
         function showRejectModal() { document.getElementById('reject-modal').classList.add('active'); }

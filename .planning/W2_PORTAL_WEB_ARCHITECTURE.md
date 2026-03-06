@@ -134,16 +134,18 @@ This addendum defines the mobile approval PWA architecture aligned to the existi
 
 ### URL and Asset Surface
 1. `GET /approvals` -> mobile-optimized pending approval list (PWA shell entrypoint).
-2. `GET /approvals/{id}` -> approval detail view for one decision packet.
+2. `GET /approvals/{id}` -> approval detail route for one decision packet (full manager decision view).
 3. `GET /settings` -> notification + cache/reset preferences.
-4. `GET /manifest.webmanifest` -> install metadata.
-5. `GET /sw.js` -> service worker script.
+4. `GET /manifest.webmanifest` -> install metadata alias.
+5. `GET /sw.js` -> service worker script alias.
+6. Backward-compatible aliases remain available: `GET /portal/manifest.webmanifest` and `GET /portal/sw.js`.
 
 ### Runtime Integration Strategy
 1. Keep one server process: PWA routes are merged into existing `portal::router(...)`.
 2. Reuse existing token model from `portal_link` for customer-manager link access.
 3. Reuse existing approval mutation endpoints (`/quote/{token}/approve|reject`) to avoid parallel write paths.
-4. PWA read models consume the same deterministic quote + pricing snapshot state used by the portal.
+4. `GET /approvals/{id}` resolves `approval_request.id -> quote_id -> portal_link.token` and renders quote/approval context while decision actions post to `/quote/{token}/...`.
+5. PWA read models consume the same deterministic quote + pricing snapshot state used by the portal.
 
 ### Offline and Caching Model
 1. Service worker cache-first for static shell assets (HTML/CSS/JS/icons).
@@ -172,3 +174,9 @@ This addendum defines the mobile approval PWA architecture aligned to the existi
 2. Integration with existing Axum/portal runtime is explicit.
 3. Offline/service worker constraints are explicit.
 4. Notification, auth/session, and audit requirements are explicit.
+
+### Implementation Note (2026-03-06)
+1. `crates/server/src/portal.rs` now serves `/approvals`, `/approvals/{id}`, `/settings`, `/manifest.webmanifest`, and `/sw.js`.
+2. `templates/portal/settings.html` defines the PWA settings shell for push + cache policy.
+3. `templates/portal/manifest.webmanifest` uses `/approvals` as `start_url` and adds shortcuts for approvals/settings.
+4. `templates/portal/sw.js` now uses network-first handling for `/approvals*` with cache fallback, and network-only handling for `/quote/*` and `/api/*` to avoid caching token-bearing responses or API payloads.
