@@ -501,6 +501,20 @@ impl SuggestionFeedbackRepository for InMemorySuggestionFeedbackRepository {
         Ok(())
     }
 
+    async fn record_hidden(
+        &self,
+        request_id: &str,
+        product_id: &str,
+    ) -> Result<(), RepositoryError> {
+        let mut store = self.feedbacks.write().await;
+        for fb in store.values_mut() {
+            if fb.request_id == request_id && fb.product_id == product_id {
+                fb.was_hidden = true;
+            }
+        }
+        Ok(())
+    }
+
     async fn find_by_product(
         &self,
         product_id: &str,

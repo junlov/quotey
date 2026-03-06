@@ -3,6 +3,7 @@ pub mod doctor;
 pub mod genome;
 pub mod migrate;
 pub mod policy_packet;
+pub mod rule_preview;
 pub mod seed;
 pub mod smoke;
 pub mod start;

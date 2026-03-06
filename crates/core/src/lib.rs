@@ -58,8 +58,9 @@ pub use cpq::draft_quote_builder::{
 };
 pub use cpq::product_matcher::{MatchAmbiguity, ProductMatch, ProductMatchResult, ProductMatcher};
 pub use cpq::rule_builder::{
-    build_pricing_rule, PricingRuleAction, PricingRuleBuilderError, PricingRuleCondition,
-    PricingRuleDraft, PricingRuleOperator,
+    build_pricing_rule, preview_pricing_rule, pricing_rule_sql_preview, PricingRuleAction,
+    PricingRuleBuilderError, PricingRuleCondition, PricingRuleDraft, PricingRuleOperator,
+    PricingRulePreviewCase, PricingRulePreviewInput, PricingRulePreviewResult,
 };
 pub use dna::{
     ClosedDealOutcome, ConfigurationFingerprint, DealDnaLifecycleService, DealOutcomeMetadata,
@@ -76,6 +77,11 @@ pub use domain::execution::{
     ExecutionTransitionId, IdempotencyRecord, IdempotencyRecordState, OperationKey,
 };
 pub use domain::explanation::*;
+pub use domain::negotiation::{
+    BoundaryEvaluation, ConcessionEnvelope, ConcessionRange, CounterofferAlternative,
+    CounterofferPlan, NegotiationSession, NegotiationSessionId, NegotiationState, NegotiationTurn,
+    NegotiationTurnId, TurnOutcome, TurnRequestType,
+};
 pub use domain::optimizer::*;
 pub use domain::precedent::*;
 pub use domain::product::{Product, ProductId};
@@ -118,7 +124,7 @@ pub use policy::optimizer::{
 pub use policy::{ExplanationGenerator, ExplanationTemplate, GeneratedExplanation};
 pub use suggestions::{
     BusinessRule, BusinessRuleType, ComponentScores, ConfidenceLevel, CustomerProfile,
-    CustomerSimilarity, ProductInfo, ProductRelationship, ProductSuggestion, QuoteContext,
-    RelationshipType, ScoreCalculator, ScoringWeights, SeasonalPattern, SuggestionCategory,
-    SuggestionEngine, SuggestionFeedback, SuggestionRequest,
+    CustomerSimilarity, FeedbackExperimentVariant, ProductInfo, ProductRelationship,
+    ProductSuggestion, QuoteContext, RelationshipType, ScoreCalculator, ScoringWeights,
+    SeasonalPattern, SuggestionCategory, SuggestionEngine, SuggestionFeedback, SuggestionRequest,
 };

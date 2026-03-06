@@ -24,6 +24,37 @@ impl Default for ScoringWeights {
     }
 }
 
+/// Deterministic experiment variants for feedback-driven suggestion re-ranking.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FeedbackExperimentVariant {
+    /// Control behavior: standard feedback adjustment.
+    Control,
+    /// Treatment behavior: slightly stronger positive/negative feedback adjustment.
+    Treatment,
+}
+
+impl FeedbackExperimentVariant {
+    /// Deterministically assigns a variant from a stable cohort key.
+    ///
+    /// Uses FNV-1a so the same key always maps to the same variant, enabling
+    /// replay-safe experiment analysis.
+    pub fn from_cohort_key(cohort_key: &str) -> Self {
+        const OFFSET_BASIS: u32 = 0x811C9DC5;
+        const PRIME: u32 = 0x0100_0193;
+
+        let hash = cohort_key
+            .as_bytes()
+            .iter()
+            .fold(OFFSET_BASIS, |state, byte| state.wrapping_mul(PRIME) ^ u32::from(*byte));
+
+        if hash % 2 == 0 {
+            Self::Control
+        } else {
+            Self::Treatment
+        }
+    }
+}
+
 /// Score calculator for product suggestions
 #[derive(Debug, Clone)]
 pub struct ScoreCalculator {
@@ -281,6 +312,24 @@ impl ScoreCalculator {
         (base_score + adjustment).clamp(0.0, 1.0)
     }
 
+    /// Apply feedback adjustment using a deterministic experiment variant.
+    pub fn feedback_adjusted_score_for_variant(
+        &self,
+        base_score: f64,
+        acceptance: &ProductAcceptanceRate,
+        variant: FeedbackExperimentVariant,
+    ) -> f64 {
+        let control_score = self.feedback_adjusted_score(base_score, acceptance);
+        if variant == FeedbackExperimentVariant::Control {
+            return control_score;
+        }
+
+        // Treatment variant scales adjustment magnitude while preserving sign.
+        let delta = control_score - base_score;
+        let scaled_delta = if delta >= 0.0 { delta * 1.20 } else { delta * 1.10 };
+        (base_score + scaled_delta).clamp(0.0, 1.0)
+    }
+
     /// Filter and sort suggestions, ensuring diversity
     pub fn filter_and_diversify(
         &self,
@@ -476,5 +525,39 @@ mod tests {
         };
         let adjusted = calc.feedback_adjusted_score(0.02, &low_rate);
         assert!(adjusted >= 0.0, "score should not go below 0.0");
+    }
+
+    #[test]
+    fn feedback_variant_assignment_is_deterministic() {
+        let key = "acct-1234:Q-2026-9001";
+        let first = FeedbackExperimentVariant::from_cohort_key(key);
+        let second = FeedbackExperimentVariant::from_cohort_key(key);
+        assert_eq!(first, second, "variant assignment must be stable for the same key");
+    }
+
+    #[test]
+    fn treatment_variant_strengthens_feedback_adjustment() {
+        let calc = ScoreCalculator::new();
+        let acceptance = ProductAcceptanceRate {
+            shown_count: 12,
+            clicked_count: 7,
+            added_count: 5,
+            click_rate: 0.58,
+            add_rate: 0.42,
+        };
+        let control = calc.feedback_adjusted_score_for_variant(
+            0.60,
+            &acceptance,
+            FeedbackExperimentVariant::Control,
+        );
+        let treatment = calc.feedback_adjusted_score_for_variant(
+            0.60,
+            &acceptance,
+            FeedbackExperimentVariant::Treatment,
+        );
+        assert!(
+            treatment > control,
+            "treatment variant should apply a stronger positive adjustment"
+        );
     }
 }

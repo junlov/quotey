@@ -116,13 +116,14 @@ impl E2ESeedDataset {
     pub async fn verify(pool: &DbPool) -> Result<VerificationResult, RepositoryError> {
         let mut checks = Vec::new();
 
-        let quoted_audits = sql_array_from_ids(SEED_AUDIT_EVENT_IDS);
         let expected_audit_total = (SEED_AUDIT_EVENT_IDS.len()) as i64;
-        let existing_audit_count: i64 = sqlx::query_scalar(&format!(
-            "SELECT COUNT(1) FROM audit_event WHERE id IN {quoted_audits}"
-        ))
-        .fetch_one(pool)
-        .await?;
+        let placeholders = bind_placeholders(SEED_AUDIT_EVENT_IDS.len());
+        let sql = format!("SELECT COUNT(1) FROM audit_event WHERE id IN ({placeholders})");
+        let mut q = sqlx::query_scalar::<_, i64>(&sql);
+        for id in SEED_AUDIT_EVENT_IDS {
+            q = q.bind(*id);
+        }
+        let existing_audit_count: i64 = q.fetch_one(pool).await?;
         checks.push(("audit-events", existing_audit_count == expected_audit_total));
 
         for flow in SEED_FLOWS {
@@ -337,22 +338,10 @@ impl E2ESeedDataset {
     pub async fn clean(pool: &DbPool) -> Result<(), RepositoryError> {
         let mut tx = pool.begin().await?;
 
-        let quoted_audits = sql_array_from_ids(SEED_AUDIT_EVENT_IDS);
-        let quoted_flows = sql_array_from_ids(SEED_FLOW_STATE_IDS);
-        let quoted_quotes = sql_array_from_ids(SEED_QUOTE_IDS);
-
-        sqlx::query(&format!("DELETE FROM audit_event WHERE id IN {quoted_audits}"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(&format!("DELETE FROM flow_state WHERE id IN {quoted_flows}"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(&format!("DELETE FROM quote_line WHERE quote_id IN {quoted_quotes}"))
-            .execute(&mut *tx)
-            .await?;
-        sqlx::query(&format!("DELETE FROM quote WHERE id IN {quoted_quotes}"))
-            .execute(&mut *tx)
-            .await?;
+        delete_by_ids(&mut tx, "audit_event", "id", SEED_AUDIT_EVENT_IDS).await?;
+        delete_by_ids(&mut tx, "flow_state", "id", SEED_FLOW_STATE_IDS).await?;
+        delete_by_ids(&mut tx, "quote_line", "quote_id", SEED_QUOTE_IDS).await?;
+        delete_by_ids(&mut tx, "quote", "id", SEED_QUOTE_IDS).await?;
 
         tx.commit().await?;
         Ok(())
@@ -445,9 +434,27 @@ fn json_string_list_matches(actual: &[String], expected: &[&str]) -> bool {
     actual.len() == expected.len() && actual.iter().zip(expected).all(|(a, b)| a == b)
 }
 
-fn sql_array_from_ids(ids: &[&str]) -> String {
-    let quoted = ids.iter().map(|id| format!("'{}'", id)).collect::<Vec<_>>().join(",");
-    format!("({quoted})")
+/// Generate comma-separated `?` placeholders for parameterized IN clauses.
+fn bind_placeholders(count: usize) -> String {
+    vec!["?"; count].join(",")
+}
+
+/// Delete rows from `table` where `column` matches any of `ids`, using bind parameters.
+async fn delete_by_ids(
+    tx: &mut sqlx::Transaction<'_, sqlx::Sqlite>,
+    table: &str,
+    column: &str,
+    ids: &[&str],
+) -> Result<(), RepositoryError> {
+    // table and column names are compile-time constants from this module, not user input.
+    let placeholders = bind_placeholders(ids.len());
+    let sql = format!("DELETE FROM {table} WHERE {column} IN ({placeholders})");
+    let mut q = sqlx::query(&sql);
+    for id in ids {
+        q = q.bind(*id);
+    }
+    q.execute(&mut **tx).await?;
+    Ok(())
 }
 
 #[derive(Debug)]

@@ -5,6 +5,7 @@ pub mod customer;
 pub mod dialogue;
 pub mod execution;
 pub mod explanation;
+pub mod negotiation;
 pub mod optimizer;
 pub mod precedent;
 pub mod product;

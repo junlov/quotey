@@ -11,6 +11,7 @@ use quotey_core::domain::quote::{Quote, QuoteId};
 use quotey_core::suggestions::{ProductAcceptanceRate, SuggestionFeedback};
 
 pub mod analytics;
+pub mod anomaly_override;
 pub mod approval;
 pub mod audit;
 pub mod customer;
@@ -18,6 +19,7 @@ pub mod dialogue;
 pub mod execution_queue;
 pub mod explanation;
 pub mod memory;
+pub mod negotiation;
 pub mod optimizer;
 pub mod precedent;
 pub mod pricing_snapshot;
@@ -27,6 +29,7 @@ pub mod simulation;
 pub mod suggestion_feedback;
 
 pub use analytics::{AnalyticsQueryError, SqlAnalyticsQueryBuilder};
+pub use anomaly_override::SqlAnomalyOverrideRepository;
 pub use approval::SqlApprovalRepository;
 pub use audit::SqlAuditEventRepository;
 pub use customer::SqlCustomerRepository;
@@ -38,6 +41,7 @@ pub use memory::{
     InMemoryPolicyOptimizerRepository, InMemoryProductRepository, InMemoryQuoteRepository,
     InMemorySuggestionFeedbackRepository,
 };
+pub use negotiation::SqlNegotiationRepository;
 pub use optimizer::{PolicyOptimizerRepository, SqlPolicyOptimizerRepository};
 pub use precedent::{PrecedentRepository, SqlPrecedentRepository};
 pub use pricing_snapshot::SqlPricingSnapshotRepository;
@@ -146,6 +150,11 @@ pub trait SuggestionFeedbackRepository: Send + Sync {
     ) -> Result<(), RepositoryError>;
     async fn record_added(&self, request_id: &str, product_id: &str)
         -> Result<(), RepositoryError>;
+    async fn record_hidden(
+        &self,
+        request_id: &str,
+        product_id: &str,
+    ) -> Result<(), RepositoryError>;
     async fn find_by_product(
         &self,
         product_id: &str,

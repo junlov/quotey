@@ -4,7 +4,7 @@ use std::collections::{HashMap, HashSet};
 
 use chrono::{DateTime, Datelike, Duration, Utc};
 
-use super::scoring::{ScoreCalculator, ScoringWeights};
+use super::scoring::{FeedbackExperimentVariant, ScoreCalculator, ScoringWeights};
 use super::types::*;
 use super::SuggestionResult;
 
@@ -510,6 +510,10 @@ pub struct SuggestionEngine {
     customer_cache: HashMap<String, Vec<(CustomerProfile, f64)>>,
     /// In-memory cache for product relationships  
     relationship_cache: HashMap<String, Vec<ProductRelationship>>,
+    /// In-memory feedback cache used for deterministic score re-ranking.
+    feedback_cache: HashMap<String, ProductAcceptanceRate>,
+    /// Optional explicit variant override for deterministic harness/replay tests.
+    feedback_variant_override: Option<FeedbackExperimentVariant>,
 }
 
 impl SuggestionEngine {
@@ -519,6 +523,8 @@ impl SuggestionEngine {
             calculator: ScoreCalculator::new(),
             customer_cache: HashMap::new(),
             relationship_cache: HashMap::new(),
+            feedback_cache: HashMap::new(),
+            feedback_variant_override: None,
         }
     }
 
@@ -528,7 +534,26 @@ impl SuggestionEngine {
             calculator: ScoreCalculator::with_weights(weights),
             customer_cache: HashMap::new(),
             relationship_cache: HashMap::new(),
+            feedback_cache: HashMap::new(),
+            feedback_variant_override: None,
         }
+    }
+
+    /// Determine the deterministic feedback experiment variant for a suggestion request.
+    pub fn feedback_variant_for_request(
+        &self,
+        request: &SuggestionRequest,
+    ) -> FeedbackExperimentVariant {
+        self.feedback_variant_override.unwrap_or_else(|| {
+            FeedbackExperimentVariant::from_cohort_key(
+                normalize_identifier(&request.customer_id).as_str(),
+            )
+        })
+    }
+
+    /// Override the deterministic feedback variant (useful for replay/A-B harness tests).
+    pub fn set_feedback_variant_override(&mut self, variant: Option<FeedbackExperimentVariant>) {
+        self.feedback_variant_override = variant;
     }
 
     /// Get product suggestions for a customer
@@ -536,6 +561,7 @@ impl SuggestionEngine {
         &self,
         request: SuggestionRequest,
     ) -> SuggestionResult<Vec<ProductSuggestion>> {
+        let feedback_variant = self.feedback_variant_for_request(&request);
         // Get customer profile
         let customer = self.get_customer_profile(&request.customer_id).await?;
 
@@ -561,21 +587,49 @@ impl SuggestionEngine {
                 .score_product(&customer, &current_products, &candidate, &similar_customers)
                 .await?;
             let total_score = self.calculator.calculate_total_score(&scores);
+            let adjusted_score = self
+                .feedback_cache
+                .get(&candidate.id)
+                .map(|acceptance| {
+                    self.calculator.feedback_adjusted_score_for_variant(
+                        total_score,
+                        acceptance,
+                        feedback_variant,
+                    )
+                })
+                .unwrap_or(total_score);
 
             // Skip if below threshold
-            if total_score < super::MIN_SUGGESTION_SCORE {
+            if adjusted_score < super::MIN_SUGGESTION_SCORE {
                 continue;
             }
 
-            let confidence = ConfidenceLevel::from_score(total_score);
+            let confidence = ConfidenceLevel::from_score(adjusted_score);
             let category = self.calculator.determine_category(&scores);
-            let reasoning = self.calculator.generate_reasoning(&scores, &similar_customer_names);
+            let mut reasoning =
+                self.calculator.generate_reasoning(&scores, &similar_customer_names);
+
+            if adjusted_score > total_score + f64::EPSILON {
+                reasoning.push(
+                    format!(
+                        "Historical acceptance is strong for this product, so rank is boosted ({:?} variant).",
+                        feedback_variant
+                    ),
+                );
+            } else if adjusted_score + f64::EPSILON < total_score {
+                reasoning.push(
+                    format!(
+                        "Historical acceptance is weak for this product, so rank is reduced ({:?} variant).",
+                        feedback_variant
+                    ),
+                );
+            }
 
             suggestions.push(ProductSuggestion {
                 product_id: candidate.id.clone(),
                 product_name: candidate.name.clone(),
                 product_sku: candidate.sku.clone(),
-                score: total_score,
+                score: adjusted_score,
                 confidence,
                 reasoning,
                 category,
@@ -923,10 +977,16 @@ impl SuggestionEngine {
         self.relationship_cache = data;
     }
 
+    /// Warm the feedback cache with product acceptance-rate metrics.
+    pub fn warm_feedback_cache(&mut self, data: HashMap<String, ProductAcceptanceRate>) {
+        self.feedback_cache = data;
+    }
+
     /// Clear all caches
     pub fn clear_caches(&mut self) {
         self.customer_cache.clear();
         self.relationship_cache.clear();
+        self.feedback_cache.clear();
     }
 }
 
@@ -970,5 +1030,140 @@ mod tests {
         });
         // Use approximate comparison for floating point
         assert!((score - 1.0).abs() < 0.0001);
+    }
+
+    #[tokio::test]
+    async fn feedback_cache_adjusts_scores_and_reasoning() {
+        let mut engine = SuggestionEngine::new();
+        let request = SuggestionRequest::new("test_customer")
+            .with_current_products(vec!["prod_pro_v2".to_string()]);
+
+        let baseline = engine.get_suggestions(request.clone()).await.expect("baseline suggestions");
+        let baseline_sso = baseline
+            .iter()
+            .find(|suggestion| suggestion.product_id == "prod_sso")
+            .expect("baseline should include prod_sso")
+            .score;
+
+        let mut feedback = HashMap::new();
+        feedback.insert(
+            "prod_sso".to_string(),
+            ProductAcceptanceRate {
+                shown_count: 20,
+                clicked_count: 14,
+                added_count: 10,
+                click_rate: 0.70,
+                add_rate: 0.50,
+            },
+        );
+        engine.warm_feedback_cache(feedback);
+
+        let adjusted = engine.get_suggestions(request).await.expect("adjusted suggestions");
+        let adjusted_sso = adjusted
+            .iter()
+            .find(|suggestion| suggestion.product_id == "prod_sso")
+            .expect("adjusted should include prod_sso");
+
+        assert!(adjusted_sso.score > baseline_sso, "feedback cache should boost prod_sso score");
+        assert!(
+            adjusted_sso.reasoning.iter().any(|line| line.contains("Historical acceptance")),
+            "reasoning should include feedback adjustment context"
+        );
+    }
+
+    #[tokio::test]
+    async fn clear_caches_clears_feedback_adjustments() {
+        let mut engine = SuggestionEngine::new();
+        let request = SuggestionRequest::new("test_customer")
+            .with_current_products(vec!["prod_pro_v2".to_string()]);
+
+        let mut feedback = HashMap::new();
+        feedback.insert(
+            "prod_sso".to_string(),
+            ProductAcceptanceRate {
+                shown_count: 20,
+                clicked_count: 2,
+                added_count: 0,
+                click_rate: 0.10,
+                add_rate: 0.0,
+            },
+        );
+        engine.warm_feedback_cache(feedback);
+
+        let penalized =
+            engine.get_suggestions(request.clone()).await.expect("penalized suggestions");
+        let penalized_sso = penalized
+            .iter()
+            .find(|suggestion| suggestion.product_id == "prod_sso")
+            .expect("penalized should include prod_sso")
+            .score;
+
+        engine.clear_caches();
+        let reset = engine.get_suggestions(request).await.expect("reset suggestions");
+        let reset_sso = reset
+            .iter()
+            .find(|suggestion| suggestion.product_id == "prod_sso")
+            .expect("reset should include prod_sso")
+            .score;
+
+        assert!(
+            reset_sso > penalized_sso,
+            "clearing caches should remove feedback penalty from prod_sso"
+        );
+    }
+
+    #[test]
+    fn feedback_variant_for_request_is_deterministic() {
+        let engine = SuggestionEngine::new();
+        let request = SuggestionRequest::new("Acme-Enterprise");
+        let first = engine.feedback_variant_for_request(&request);
+        let second = engine.feedback_variant_for_request(&request);
+        assert_eq!(first, second, "request should map to a stable feedback variant");
+    }
+
+    #[tokio::test]
+    async fn variant_override_changes_feedback_adjustment_strength() {
+        let request = SuggestionRequest::new("test_customer")
+            .with_current_products(vec!["prod_pro_v2".to_string()]);
+        let mut feedback = HashMap::new();
+        feedback.insert(
+            "prod_sso".to_string(),
+            ProductAcceptanceRate {
+                shown_count: 20,
+                clicked_count: 12,
+                added_count: 8,
+                click_rate: 0.60,
+                add_rate: 0.40,
+            },
+        );
+
+        let mut control = SuggestionEngine::new();
+        control.warm_feedback_cache(feedback.clone());
+        control.set_feedback_variant_override(Some(FeedbackExperimentVariant::Control));
+        let control_sso = control
+            .get_suggestions(request.clone())
+            .await
+            .expect("control suggestions")
+            .into_iter()
+            .find(|suggestion| suggestion.product_id == "prod_sso")
+            .expect("control should include prod_sso")
+            .score;
+
+        let mut treatment = SuggestionEngine::new();
+        treatment.warm_feedback_cache(feedback);
+        treatment.set_feedback_variant_override(Some(FeedbackExperimentVariant::Treatment));
+        let treatment_sso = treatment
+            .get_suggestions(request)
+            .await
+            .expect("treatment suggestions")
+            .into_iter()
+            .find(|suggestion| suggestion.product_id == "prod_sso")
+            .expect("treatment should include prod_sso")
+            .score;
+
+        assert!(
+            treatment_sso > control_sso,
+            "treatment variant should apply stronger positive adjustment than control"
+        );
     }
 }

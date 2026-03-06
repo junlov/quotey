@@ -39,6 +39,13 @@ enum Command {
         #[command(subcommand)]
         command: PolicyPacketCommand,
     },
+    #[command(about = "Preview pricing rule SQL and before/after sample quote impacts")]
+    RulePreview {
+        #[arg(long, help = "Visual rule JSON payload (VisualRuleDefinition)")]
+        rule_json: String,
+        #[arg(long, help = "Sample quote rows JSON payload (Vec<PricingRulePreviewInput>)")]
+        samples_json: String,
+    },
     #[command(
         about = "Revenue Genome: deal autopsy, attribution graph, and counterfactual simulation"
     )]
@@ -142,6 +149,9 @@ pub fn run() -> ExitCode {
                 commands::policy_packet::run_action(packet_json, decision, reason)
             }
         },
+        Command::RulePreview { rule_json, samples_json } => {
+            commands::rule_preview::run(rule_json, samples_json)
+        }
         Command::Genome { command } => match command {
             GenomeCommand::Autopsy { input_json } => commands::genome::run_autopsy(input_json),
             GenomeCommand::Query { query_json, graph_json } => {

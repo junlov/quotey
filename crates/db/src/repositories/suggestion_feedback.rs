@@ -41,6 +41,8 @@ fn row_to_feedback(row: &sqlx::sqlite::SqliteRow) -> Result<SuggestionFeedback, 
         row.try_get("was_clicked").map_err(|e| RepositoryError::Decode(e.to_string()))?;
     let was_added_to_quote: bool =
         row.try_get("was_added_to_quote").map_err(|e| RepositoryError::Decode(e.to_string()))?;
+    let was_hidden: bool =
+        row.try_get("was_hidden").map_err(|e| RepositoryError::Decode(e.to_string()))?;
     let context_str: Option<String> =
         row.try_get("context").map_err(|e| RepositoryError::Decode(e.to_string()))?;
 
@@ -75,6 +77,7 @@ fn row_to_feedback(row: &sqlx::sqlite::SqliteRow) -> Result<SuggestionFeedback, 
         was_shown,
         was_clicked,
         was_added_to_quote,
+        was_hidden,
         context,
     })
 }
@@ -91,8 +94,8 @@ impl SuggestionFeedbackRepository for SqlSuggestionFeedbackRepository {
                 "INSERT INTO suggestion_feedback
                     (id, request_id, customer_id, product_id, product_sku, score,
                      confidence, category, quote_id, suggested_at,
-                     was_shown, was_clicked, was_added_to_quote, context)
-                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, ?)
+                     was_shown, was_clicked, was_added_to_quote, was_hidden, context)
+                 VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0, 0, 0, ?)
                  ON CONFLICT(id) DO NOTHING",
             )
             .bind(&fb.id)
@@ -146,6 +149,23 @@ impl SuggestionFeedbackRepository for SqlSuggestionFeedbackRepository {
         Ok(())
     }
 
+    async fn record_hidden(
+        &self,
+        request_id: &str,
+        product_id: &str,
+    ) -> Result<(), RepositoryError> {
+        sqlx::query(
+            "UPDATE suggestion_feedback
+             SET was_hidden = 1, updated_at = datetime('now')
+             WHERE request_id = ? AND product_id = ?",
+        )
+        .bind(request_id)
+        .bind(product_id)
+        .execute(&self.pool)
+        .await?;
+        Ok(())
+    }
+
     async fn find_by_product(
         &self,
         product_id: &str,
@@ -154,7 +174,7 @@ impl SuggestionFeedbackRepository for SqlSuggestionFeedbackRepository {
         let rows = sqlx::query(
             "SELECT id, request_id, customer_id, product_id, product_sku, score,
                     confidence, category, quote_id, suggested_at,
-                    was_shown, was_clicked, was_added_to_quote, context
+                    was_shown, was_clicked, was_added_to_quote, was_hidden, context
              FROM suggestion_feedback
              WHERE product_id = ?
              ORDER BY suggested_at DESC
@@ -243,6 +263,7 @@ mod tests {
             was_shown: true,
             was_clicked: false,
             was_added_to_quote: false,
+            was_hidden: false,
             context: None,
         }
     }
@@ -262,6 +283,7 @@ mod tests {
         assert_eq!(results[0].product_id, "prod_sso");
         assert!(results[0].was_shown);
         assert!(!results[0].was_clicked);
+        assert!(!results[0].was_hidden);
     }
 
     #[tokio::test]
@@ -292,6 +314,21 @@ mod tests {
         let results = repo.find_by_product("prod_sso", 10).await.expect("find");
         assert!(results[0].was_clicked);
         assert!(results[0].was_added_to_quote);
+        assert!(!results[0].was_hidden);
+    }
+
+    #[tokio::test]
+    async fn record_hidden_sets_hidden_flag() {
+        let pool = setup().await;
+        let repo = SqlSuggestionFeedbackRepository::new(pool);
+
+        let fb = sample_feedback("fb-1", "req-1", "prod_sso");
+        repo.record_shown(vec![fb]).await.expect("record shown");
+
+        repo.record_hidden("req-1", "prod_sso").await.expect("record hidden");
+
+        let results = repo.find_by_product("prod_sso", 10).await.expect("find");
+        assert!(results[0].was_hidden);
     }
 
     #[tokio::test]

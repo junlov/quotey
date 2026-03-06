@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
@@ -47,6 +49,36 @@ pub enum PricingRuleAction {
     ApplyDiscountCap { max_discount_pct: Decimal },
 }
 
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PricingRulePreviewInput {
+    pub quote_id: String,
+    pub context_fields: BTreeMap<String, String>,
+    pub quantity: u32,
+    pub unit_price: Decimal,
+    /// Discount percentage in the [0, 100] range.
+    pub discount_pct: Decimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PricingRulePreviewCase {
+    pub quote_id: String,
+    pub matched: bool,
+    pub before_total: Decimal,
+    pub after_total: Decimal,
+    pub before_unit_price: Decimal,
+    pub after_unit_price: Decimal,
+    pub before_discount_pct: Decimal,
+    pub after_discount_pct: Decimal,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PricingRulePreviewResult {
+    pub rule_id: String,
+    pub sql_preview: String,
+    pub affected_quote_ids: Vec<String>,
+    pub cases: Vec<PricingRulePreviewCase>,
+}
+
 pub fn build_pricing_rule(
     visual_rule: &VisualRuleDefinition,
 ) -> Result<PricingRuleDraft, PricingRuleBuilderError> {
@@ -72,6 +104,241 @@ pub fn build_pricing_rule(
         conditions,
         action,
     })
+}
+
+/// Render a deterministic SQL preview statement for the pricing rule draft.
+pub fn pricing_rule_sql_preview(rule: &PricingRuleDraft) -> String {
+    let where_clause = render_where_clause(&rule.conditions);
+    let action_sql = match &rule.action {
+        PricingRuleAction::SetUnitPrice { amount, .. } => {
+            format!("unit_price = {}", amount.normalize())
+        }
+        PricingRuleAction::ApplyDiscountCap { max_discount_pct } => {
+            format!("discount_pct = MIN(discount_pct, {})", max_discount_pct.normalize())
+        }
+    };
+
+    format!("UPDATE quote_line SET {} WHERE {};", action_sql, where_clause)
+}
+
+/// Preview pricing-rule impact against sample quote rows before persisting the rule.
+pub fn preview_pricing_rule(
+    rule: &PricingRuleDraft,
+    samples: &[PricingRulePreviewInput],
+) -> PricingRulePreviewResult {
+    let sql_preview = pricing_rule_sql_preview(rule);
+    let mut affected_quote_ids = Vec::new();
+    let mut cases = Vec::with_capacity(samples.len());
+
+    for sample in samples {
+        let matched = sample_matches_rule(sample, &rule.conditions);
+        let normalized_before_discount = clamp_discount_pct(sample.discount_pct);
+        let (after_unit_price, after_discount_pct) = if matched {
+            apply_action(&rule.action, sample)
+        } else {
+            (sample.unit_price, normalized_before_discount)
+        };
+
+        if matched {
+            affected_quote_ids.push(sample.quote_id.clone());
+        }
+
+        cases.push(PricingRulePreviewCase {
+            quote_id: sample.quote_id.clone(),
+            matched,
+            before_total: line_total(
+                sample.unit_price,
+                normalized_before_discount,
+                sample.quantity,
+            ),
+            after_total: line_total(after_unit_price, after_discount_pct, sample.quantity),
+            before_unit_price: sample.unit_price,
+            after_unit_price,
+            before_discount_pct: normalized_before_discount,
+            after_discount_pct,
+        });
+    }
+
+    PricingRulePreviewResult { rule_id: rule.id.clone(), sql_preview, affected_quote_ids, cases }
+}
+
+fn sample_matches_rule(
+    sample: &PricingRulePreviewInput,
+    conditions: &[PricingRuleCondition],
+) -> bool {
+    let mut iter = conditions.iter();
+    let Some(first) = iter.next() else {
+        return true;
+    };
+
+    let mut result = evaluate_condition(sample, first);
+    for condition in iter {
+        let current = evaluate_condition(sample, condition);
+        match condition.connector.unwrap_or(LogicalConnector::And) {
+            LogicalConnector::And => result = result && current,
+            LogicalConnector::Or => result = result || current,
+        }
+    }
+
+    result
+}
+
+fn evaluate_condition(sample: &PricingRulePreviewInput, condition: &PricingRuleCondition) -> bool {
+    let candidate =
+        sample.context_fields.get(&condition.field_key).map(String::as_str).unwrap_or_default();
+    let expected = condition.value.trim();
+
+    match condition.operator {
+        PricingRuleOperator::Equals => candidate == expected,
+        PricingRuleOperator::NotEquals => candidate != expected,
+        PricingRuleOperator::Contains => {
+            candidate.to_ascii_lowercase().contains(&expected.to_ascii_lowercase())
+        }
+        PricingRuleOperator::In => {
+            split_csv_values(expected).iter().any(|entry| candidate.eq_ignore_ascii_case(entry))
+        }
+        PricingRuleOperator::NotIn => {
+            split_csv_values(expected).iter().all(|entry| !candidate.eq_ignore_ascii_case(entry))
+        }
+        PricingRuleOperator::GreaterThan => {
+            compare_decimal(candidate, expected, |lhs, rhs| lhs > rhs)
+        }
+        PricingRuleOperator::GreaterOrEqual => {
+            compare_decimal(candidate, expected, |lhs, rhs| lhs >= rhs)
+        }
+        PricingRuleOperator::LessThan => compare_decimal(candidate, expected, |lhs, rhs| lhs < rhs),
+        PricingRuleOperator::LessOrEqual => {
+            compare_decimal(candidate, expected, |lhs, rhs| lhs <= rhs)
+        }
+    }
+}
+
+fn compare_decimal<F>(left: &str, right: &str, comparator: F) -> bool
+where
+    F: Fn(Decimal, Decimal) -> bool,
+{
+    let Ok(lhs) = Decimal::from_str_exact(left.trim()) else {
+        return false;
+    };
+    let Ok(rhs) = Decimal::from_str_exact(right.trim()) else {
+        return false;
+    };
+    comparator(lhs, rhs)
+}
+
+fn split_csv_values(value: &str) -> Vec<String> {
+    value
+        .split(',')
+        .map(str::trim)
+        .filter(|entry| !entry.is_empty())
+        .map(ToOwned::to_owned)
+        .collect()
+}
+
+fn apply_action(
+    action: &PricingRuleAction,
+    sample: &PricingRulePreviewInput,
+) -> (Decimal, Decimal) {
+    let current_discount = clamp_discount_pct(sample.discount_pct);
+    match action {
+        PricingRuleAction::SetUnitPrice { amount, .. } => (*amount, current_discount),
+        PricingRuleAction::ApplyDiscountCap { max_discount_pct } => {
+            (sample.unit_price, clamp_discount_pct(current_discount.min(*max_discount_pct)))
+        }
+    }
+}
+
+fn clamp_discount_pct(value: Decimal) -> Decimal {
+    if value < Decimal::ZERO {
+        Decimal::ZERO
+    } else if value > Decimal::from(100u32) {
+        Decimal::from(100u32)
+    } else {
+        value
+    }
+}
+
+fn line_total(unit_price: Decimal, discount_pct: Decimal, quantity: u32) -> Decimal {
+    let quantity_decimal = Decimal::from(u64::from(quantity));
+    let hundred = Decimal::from(100u32);
+    unit_price * quantity_decimal * (hundred - discount_pct) / hundred
+}
+
+fn render_where_clause(conditions: &[PricingRuleCondition]) -> String {
+    let mut rendered = String::new();
+    for (idx, condition) in conditions.iter().enumerate() {
+        if idx > 0 {
+            let connector = condition.connector.unwrap_or(LogicalConnector::And);
+            let connector_sql = match connector {
+                LogicalConnector::And => "AND",
+                LogicalConnector::Or => "OR",
+            };
+            rendered.push(' ');
+            rendered.push_str(connector_sql);
+            rendered.push(' ');
+        }
+        rendered.push_str(&render_condition_sql(condition));
+    }
+
+    if rendered.is_empty() {
+        "1=1".to_string()
+    } else {
+        rendered
+    }
+}
+
+fn render_condition_sql(condition: &PricingRuleCondition) -> String {
+    let field = condition.field_key.trim();
+    let value = condition.value.trim();
+
+    match condition.operator {
+        PricingRuleOperator::Equals => {
+            format!("{} = '{}'", field, escape_sql_literal(value))
+        }
+        PricingRuleOperator::NotEquals => {
+            format!("{} != '{}'", field, escape_sql_literal(value))
+        }
+        PricingRuleOperator::GreaterThan => {
+            format!("{} > {}", field, render_numeric_or_literal(value))
+        }
+        PricingRuleOperator::GreaterOrEqual => {
+            format!("{} >= {}", field, render_numeric_or_literal(value))
+        }
+        PricingRuleOperator::LessThan => {
+            format!("{} < {}", field, render_numeric_or_literal(value))
+        }
+        PricingRuleOperator::LessOrEqual => {
+            format!("{} <= {}", field, render_numeric_or_literal(value))
+        }
+        PricingRuleOperator::Contains => {
+            format!("{} LIKE '%{}%'", field, escape_sql_literal(value))
+        }
+        PricingRuleOperator::In | PricingRuleOperator::NotIn => {
+            let entries = split_csv_values(value)
+                .into_iter()
+                .map(|entry| format!("'{}'", escape_sql_literal(&entry)))
+                .collect::<Vec<_>>();
+            let op = if condition.operator == PricingRuleOperator::In { "IN" } else { "NOT IN" };
+            format!(
+                "{} {} ({})",
+                field,
+                op,
+                if entries.is_empty() { "''".to_string() } else { entries.join(", ") }
+            )
+        }
+    }
+}
+
+fn render_numeric_or_literal(value: &str) -> String {
+    if Decimal::from_str_exact(value).is_ok() {
+        value.to_string()
+    } else {
+        format!("'{}'", escape_sql_literal(value))
+    }
+}
+
+fn escape_sql_literal(value: &str) -> String {
+    value.replace('\'', "''")
 }
 
 fn build_condition(
@@ -178,9 +445,13 @@ pub enum PricingRuleBuilderError {
 mod tests {
     use std::collections::BTreeMap;
 
+    use rust_decimal::Decimal;
     use serde_json::json;
 
-    use super::{build_pricing_rule, PricingRuleAction, PricingRuleBuilderError};
+    use super::{
+        build_pricing_rule, preview_pricing_rule, pricing_rule_sql_preview, PricingRuleAction,
+        PricingRuleBuilderError, PricingRulePreviewInput,
+    };
     use crate::{
         VisualActionType, VisualOperator, VisualRuleAction, VisualRuleCondition,
         VisualRuleDefinition, VisualRuleMetadata, VisualRuleType, VISUAL_RULE_SCHEMA_VERSION,
@@ -256,5 +527,88 @@ mod tests {
             build_pricing_rule(&visual_rule),
             Err(PricingRuleBuilderError::WrongRuleType { actual: VisualRuleType::DiscountPolicy })
         );
+    }
+
+    #[test]
+    fn sql_preview_renders_update_statement() {
+        let visual_rule = pricing_rule_fixture(VisualActionType::SetUnitPrice);
+        let draft = build_pricing_rule(&visual_rule).expect("rule should translate");
+        let sql = pricing_rule_sql_preview(&draft);
+
+        assert!(sql.starts_with("UPDATE quote_line SET unit_price ="));
+        assert!(sql.contains("customer_segment = 'enterprise'"));
+        assert!(sql.ends_with(';'));
+    }
+
+    #[test]
+    fn preview_highlights_affected_quotes_with_before_after_totals() {
+        let visual_rule = pricing_rule_fixture(VisualActionType::SetUnitPrice);
+        let draft = build_pricing_rule(&visual_rule).expect("rule should translate");
+
+        let mut enterprise_fields = BTreeMap::new();
+        enterprise_fields.insert("customer_segment".to_string(), "enterprise".to_string());
+
+        let mut smb_fields = BTreeMap::new();
+        smb_fields.insert("customer_segment".to_string(), "smb".to_string());
+
+        let samples = vec![
+            PricingRulePreviewInput {
+                quote_id: "Q-enterprise".to_string(),
+                context_fields: enterprise_fields,
+                quantity: 2,
+                unit_price: Decimal::new(10000, 2),
+                discount_pct: Decimal::new(1000, 2),
+            },
+            PricingRulePreviewInput {
+                quote_id: "Q-smb".to_string(),
+                context_fields: smb_fields,
+                quantity: 2,
+                unit_price: Decimal::new(10000, 2),
+                discount_pct: Decimal::new(1000, 2),
+            },
+        ];
+
+        let result = preview_pricing_rule(&draft, &samples);
+        assert_eq!(result.affected_quote_ids, vec!["Q-enterprise".to_string()]);
+
+        let enterprise = result
+            .cases
+            .iter()
+            .find(|case| case.quote_id == "Q-enterprise")
+            .expect("enterprise case");
+        assert!(enterprise.matched);
+        assert_eq!(enterprise.before_total, Decimal::new(18000, 2));
+        assert_eq!(enterprise.after_total, Decimal::new(17991, 2));
+
+        let smb = result.cases.iter().find(|case| case.quote_id == "Q-smb").expect("smb case");
+        assert!(!smb.matched);
+        assert_eq!(smb.before_total, smb.after_total);
+    }
+
+    #[test]
+    fn preview_applies_discount_cap_action() {
+        let mut visual_rule = pricing_rule_fixture(VisualActionType::ApplyDiscountCap);
+        visual_rule.actions[0].parameters.clear();
+        visual_rule.actions[0].parameters.insert("max_discount_pct".to_string(), json!("15"));
+
+        let draft = build_pricing_rule(&visual_rule).expect("rule should translate");
+        let mut fields = BTreeMap::new();
+        fields.insert("customer_segment".to_string(), "enterprise".to_string());
+
+        let samples = vec![PricingRulePreviewInput {
+            quote_id: "Q-1".to_string(),
+            context_fields: fields,
+            quantity: 1,
+            unit_price: Decimal::new(10000, 2),
+            discount_pct: Decimal::new(2500, 2),
+        }];
+        let result = preview_pricing_rule(&draft, &samples);
+        let case = result.cases.first().expect("case");
+
+        assert!(case.matched);
+        assert_eq!(case.before_discount_pct, Decimal::new(2500, 2));
+        assert_eq!(case.after_discount_pct, Decimal::new(1500, 2));
+        assert_eq!(case.before_total, Decimal::new(7500, 2));
+        assert_eq!(case.after_total, Decimal::new(8500, 2));
     }
 }

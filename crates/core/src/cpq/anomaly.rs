@@ -132,6 +132,25 @@ pub enum AnomalySeverity {
 }
 
 impl AnomalySeverity {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Info => "info",
+            Self::Warning => "warning",
+            Self::Critical => "critical",
+        }
+    }
+
+    pub fn parse_label(s: &str) -> Option<Self> {
+        match s {
+            "none" => Some(Self::None),
+            "info" => Some(Self::Info),
+            "warning" => Some(Self::Warning),
+            "critical" => Some(Self::Critical),
+            _ => None,
+        }
+    }
+
     /// The approval role that should handle this severity, if any.
     pub fn escalation_role(&self) -> Option<&'static str> {
         match self {
@@ -158,6 +177,27 @@ pub enum AnomalyRuleKind {
     Margin,
     Quantity,
     Price,
+}
+
+impl AnomalyRuleKind {
+    pub fn as_str(&self) -> &'static str {
+        match self {
+            Self::Discount => "discount",
+            Self::Margin => "margin",
+            Self::Quantity => "quantity",
+            Self::Price => "price",
+        }
+    }
+
+    pub fn parse_label(s: &str) -> Option<Self> {
+        match s {
+            "discount" => Some(Self::Discount),
+            "margin" => Some(Self::Margin),
+            "quantity" => Some(Self::Quantity),
+            "price" => Some(Self::Price),
+            _ => None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -191,6 +231,22 @@ pub struct AnomalyScore {
     pub flags: Vec<AnomalyFlag>,
     /// Human-readable summary.
     pub summary: String,
+}
+
+// ---------------------------------------------------------------------------
+// Override record
+// ---------------------------------------------------------------------------
+
+/// Persisted record of a rep overriding an anomaly flag with justification.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct AnomalyOverride {
+    pub id: String,
+    pub quote_id: String,
+    pub rule_kind: AnomalyRuleKind,
+    pub severity: AnomalySeverity,
+    pub justification: String,
+    pub overridden_by: String,
+    pub created_at: String,
 }
 
 // ---------------------------------------------------------------------------

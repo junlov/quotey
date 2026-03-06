@@ -229,6 +229,20 @@ mod tests {
         "idx_crm_sync_event_status",
         "idx_crm_sync_event_quote_id",
         "idx_crm_sync_event_created_at",
+        // 0030 — anomaly override
+        "anomaly_override",
+        "idx_anomaly_override_quote_id",
+        "idx_anomaly_override_by",
+        // 0032 — negotiation (NXT W2)
+        "negotiation_session",
+        "idx_negotiation_session_quote_id",
+        "idx_negotiation_session_actor_id",
+        "idx_negotiation_session_state",
+        "idx_negotiation_session_idempotency",
+        "negotiation_turn",
+        "idx_negotiation_turn_session_id",
+        "idx_negotiation_turn_session_number",
+        "idx_negotiation_turn_transition_key",
     ];
 
     async fn managed_object_count(pool: &sqlx::SqlitePool, object_name: &str) -> TestResult<i64> {

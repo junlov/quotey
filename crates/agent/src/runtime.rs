@@ -119,10 +119,16 @@ impl AgentRuntime {
     }
 }
 
+/// Maximum length for user input text processed by the agent runtime.
+const MAX_INPUT_TEXT_LEN: usize = 4096;
+
 fn classify_thread_intent(text: &str) -> GuardrailIntent {
-    let lowered = text.to_ascii_lowercase();
-    let quote_id = extract_quote_id(text).unwrap_or_else(|| "Q-UNKNOWN".to_string());
-    let task_id = extract_task_id(text).unwrap_or_else(|| "task-unknown".to_string());
+    // Truncate excessively long input to prevent allocation-based DoS.
+    let safe_text =
+        if text.len() > MAX_INPUT_TEXT_LEN { &text[..MAX_INPUT_TEXT_LEN] } else { text };
+    let lowered = safe_text.to_ascii_lowercase();
+    let quote_id = extract_quote_id(safe_text).unwrap_or_else(|| "Q-UNKNOWN".to_string());
+    let task_id = extract_task_id(safe_text).unwrap_or_else(|| "task-unknown".to_string());
 
     if lowered.contains("price override") || lowered.contains("set price") {
         return GuardrailIntent::PriceOverride { quote_id, requested_price_cents: 0 };
@@ -152,7 +158,7 @@ fn classify_thread_intent(text: &str) -> GuardrailIntent {
         };
     }
 
-    GuardrailIntent::AmbiguousQueueIntent { quote_id, raw_text: text.to_string() }
+    GuardrailIntent::AmbiguousQueueIntent { quote_id, raw_text: safe_text.to_string() }
 }
 
 fn extract_quote_id(text: &str) -> Option<String> {
@@ -163,9 +169,15 @@ fn extract_task_id(text: &str) -> Option<String> {
     extract_prefixed_token(text, "task-")
 }
 
+/// Maximum length for extracted ID tokens (prevents memory/log abuse from crafted input).
+const MAX_ID_TOKEN_LEN: usize = 64;
+
 fn extract_prefixed_token(text: &str, prefix: &str) -> Option<String> {
     text.split_whitespace().find_map(|part| {
         let cleaned = part.trim_matches(|ch: char| !ch.is_ascii_alphanumeric() && ch != '-');
+        if cleaned.len() > MAX_ID_TOKEN_LEN {
+            return None;
+        }
         if cleaned.to_ascii_lowercase().starts_with(prefix) {
             Some(cleaned.to_string())
         } else {

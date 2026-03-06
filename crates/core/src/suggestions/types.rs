@@ -244,6 +244,7 @@ pub struct SuggestionFeedback {
     pub was_shown: bool,
     pub was_clicked: bool,
     pub was_added_to_quote: bool,
+    pub was_hidden: bool,
     pub context: Option<serde_json::Value>,
 }
 
@@ -254,6 +255,8 @@ pub enum SuggestionFeedbackEvent {
     Added { request_id: String, product_id: String, product_sku: String, quote_id: Option<String> },
     /// User clicked "View Details" on a suggestion
     Clicked { request_id: String, product_id: String },
+    /// User explicitly hid/rejected a suggestion from the card
+    Hidden { request_id: String, product_id: String },
 }
 
 /// Acceptance rate for a product across all suggestion feedback
