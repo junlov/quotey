@@ -40,6 +40,7 @@ use uuid::Uuid;
 const MAX_SYNC_ATTEMPTS: i32 = 5;
 const CRM_SYNC_BASE_RETRY_DELAY_SECONDS: i64 = 30;
 const CRM_SYNC_MAX_RETRY_DELAY_SECONDS: i64 = 3600;
+const CRM_INBOUND_DEDUPE_WINDOW_MINUTES: i64 = 30;
 const CRM_SYNC_OPERATION_KIND: &str = "crm.quote_sync";
 const CRM_SYNC_WORKER_ID: &str = "crm-worker";
 
@@ -721,7 +722,7 @@ struct SyncEventsQuery {
     limit: Option<i64>,
 }
 
-#[derive(Debug, Serialize, Deserialize)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 struct WebhookPayload {
     #[serde(default)]
     quote_id: Option<String>,
@@ -1035,6 +1036,7 @@ pub fn router(db_pool: DbPool, config: CrmConfig) -> Router {
         .route("/api/v1/crm/connect/{provider}", get(start_oauth))
         .route("/api/v1/crm/oauth/{provider}/callback", get(oauth_callback))
         .route("/api/v1/crm/sync/batch", post(batch_retry_quotey_sync_events))
+        .route("/api/v1/crm/sync/inbound/batch", post(batch_retry_inbound_sync_events))
         .route("/api/v1/crm/sync/{quote_id}", post(sync_quote_to_crm))
         .route("/api/v1/crm/mappings/catalog", get(list_mapping_catalog))
         .route("/api/v1/crm/mappings", get(list_mappings).post(upsert_mappings))
@@ -2263,6 +2265,102 @@ async fn batch_retry_quotey_sync_events(
     }))
 }
 
+async fn batch_retry_inbound_sync_events(
+    State(state): State<CrmState>,
+    Query(query): Query<BatchSyncQuery>,
+) -> Result<Json<BatchSyncResponse>, (StatusCode, Json<CrmError>)> {
+    crm_state_guard(&HeaderMap::new(), &state, None, false).await?;
+    let provider = query.provider.as_deref().map(parse_provider).transpose()?;
+    let limit = query.limit.unwrap_or(50).clamp(1, 200);
+
+    let rows = if let Some(provider) = provider {
+        sqlx::query(
+            "SELECT id\n             FROM crm_sync_event\n             WHERE direction = 'crm_to_quotey'\n               AND provider = ?\n               AND status IN ('queued', 'failed', 'retrying', 'skipped')\n               AND attempts < ?\n             ORDER BY created_at ASC\n             LIMIT ?",
+        )
+        .bind(provider.as_str())
+        .bind(MAX_SYNC_ATTEMPTS)
+        .bind(limit)
+        .fetch_all(&state.db_pool)
+        .await
+        .map_err(db_error)?
+    } else {
+        sqlx::query(
+            "SELECT id\n             FROM crm_sync_event\n             WHERE direction = 'crm_to_quotey'\n               AND status IN ('queued', 'failed', 'retrying', 'skipped')\n               AND attempts < ?\n             ORDER BY created_at ASC\n             LIMIT ?",
+        )
+        .bind(MAX_SYNC_ATTEMPTS)
+        .bind(limit)
+        .fetch_all(&state.db_pool)
+        .await
+        .map_err(db_error)?
+    };
+
+    let mut results = Vec::with_capacity(rows.len());
+    let mut succeeded = 0usize;
+    let mut failed = 0usize;
+    let mut skipped = 0usize;
+
+    for row in rows {
+        let event_id: String = row.try_get("id").unwrap_or_default();
+        if event_id.is_empty() {
+            continue;
+        }
+
+        match retry_sync_event(
+            Path(SyncRetryPath { event_id: event_id.clone() }),
+            State(state.clone()),
+        )
+        .await
+        {
+            Ok(Json(replayed)) => {
+                let message = replayed.error_message.clone().unwrap_or_else(|| {
+                    if replayed.status == "success" {
+                        "inbound batch replay completed".to_string()
+                    } else {
+                        format!("inbound batch replay finished with status `{}`", replayed.status)
+                    }
+                });
+
+                match replayed.status.as_str() {
+                    "success" => succeeded += 1,
+                    "queued" | "running" | "retrying" => succeeded += 1,
+                    "skipped" => skipped += 1,
+                    _ => failed += 1,
+                }
+
+                results.push(SyncAttempt {
+                    provider: replayed.provider,
+                    event_id: replayed.id,
+                    status: replayed.status,
+                    message,
+                    attempts: replayed.attempts,
+                });
+            }
+            Err((status, Json(err))) => {
+                failed += 1;
+                results.push(SyncAttempt {
+                    provider: provider.map(|p| p.as_str().to_string()).unwrap_or_default(),
+                    event_id,
+                    status: "failed".to_string(),
+                    message: format!(
+                        "inbound batch replay failed ({}): {}",
+                        status.as_u16(),
+                        err.error
+                    ),
+                    attempts: 0,
+                });
+            }
+        }
+    }
+
+    Ok(Json(BatchSyncResponse {
+        processed: results.len(),
+        succeeded,
+        failed,
+        skipped,
+        provider_results: results,
+    }))
+}
+
 async fn crm_status(
     State(state): State<CrmState>,
 ) -> Result<Json<CrmStatusPayload>, (StatusCode, Json<CrmError>)> {
@@ -2382,6 +2480,33 @@ async fn sync_event_stats(
     }))
 }
 
+async fn inbound_event_is_duplicate(
+    state: &CrmState,
+    provider: CrmProvider,
+    event_type: &str,
+    crm_object_type: Option<&str>,
+    crm_object_id: Option<&str>,
+) -> Result<bool, (StatusCode, Json<CrmError>)> {
+    let (Some(crm_object_type), Some(crm_object_id)) = (crm_object_type, crm_object_id) else {
+        return Ok(false);
+    };
+
+    let cutoff = (Utc::now() - Duration::minutes(CRM_INBOUND_DEDUPE_WINDOW_MINUTES)).to_rfc3339();
+    let duplicate_count: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)\n         FROM crm_sync_event\n         WHERE provider = ?\n           AND direction = 'crm_to_quotey'\n           AND event_type = ?\n           AND crm_object_type = ?\n           AND crm_object_id = ?\n           AND created_at >= ?",
+    )
+    .bind(provider.as_str())
+    .bind(event_type)
+    .bind(crm_object_type)
+    .bind(crm_object_id)
+    .bind(cutoff)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    Ok(duplicate_count > 0)
+}
+
 async fn webhook_ingest(
     Path(provider_raw): Path<String>,
     State(state): State<CrmState>,
@@ -2433,10 +2558,21 @@ async fn webhook_ingest(
         inbound_update.account_id.as_deref(),
         inbound_update.deal_id.as_deref(),
     );
+    let duplicate_event = inbound_event_is_duplicate(
+        &state,
+        provider,
+        event_type,
+        crm_object_type.as_deref(),
+        crm_object_id.as_deref(),
+    )
+    .await?;
 
     if inbound_update.is_empty() {
         status = "skipped";
         error_msg = Some("webhook has no actionable fields".to_string());
+    } else if duplicate_event {
+        status = "skipped";
+        error_msg = Some("duplicate crm object event ignored".to_string());
     } else if let Some(ref quote_id) = quote_id {
         if let Err((_, err)) = apply_crm_update_to_quote(
             &state,
@@ -3521,6 +3657,8 @@ fn encode_query(value: &str) -> String {
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashMap;
+
     use axum::extract::{Path, Query, State};
     use axum::http::StatusCode;
     use axum::Json;
@@ -3531,10 +3669,11 @@ mod tests {
     use sqlx::Row;
 
     use super::{
-        batch_retry_quotey_sync_events, encode_query, fetch_and_reserve_oauth_state,
-        oauth_callback, outbound_sync_semantics_for_status, retry_sync_event, start_oauth,
-        sync_quote_to_crm, BatchSyncQuery, CrmProvider, CrmRuntimeConfig, CrmState,
-        OAuthCallbackQuery, OAuthConnectRequest, SyncEventPayloadRequest,
+        batch_retry_inbound_sync_events, batch_retry_quotey_sync_events, encode_query,
+        fetch_and_reserve_oauth_state, oauth_callback, outbound_sync_semantics_for_status,
+        retry_sync_event, start_oauth, sync_quote_to_crm, webhook_ingest, BatchSyncQuery,
+        CrmProvider, CrmRuntimeConfig, CrmState, OAuthCallbackQuery, OAuthConnectRequest,
+        SyncEventPayloadRequest, WebhookPayload,
     };
 
     async fn setup_state() -> CrmState {
@@ -3999,6 +4138,140 @@ mod tests {
             "unexpected batch replay status: {}",
             batch.provider_results[0].status
         );
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn webhook_ingest_applies_account_contact_and_stage_updates() {
+        let state = setup_state().await;
+        seed_connected_integration(&state, "salesforce").await;
+        seed_quote_with_line(&state, "Q-CRM-IN-001", "draft").await;
+
+        let payload = WebhookPayload {
+            quote_id: Some("Q-CRM-IN-001".to_string()),
+            account_id: Some("A-UPDATED".to_string()),
+            deal_id: Some("D-UPDATED".to_string()),
+            stage: Some("approved".to_string()),
+            status: None,
+            notes: None,
+            contact_id: Some("C-100".to_string()),
+            contact_email: Some("buyer@example.com".to_string()),
+            contact_name: Some("Buyer Jane".to_string()),
+            event_type: Some("opportunity_stage_changed".to_string()),
+            payload: HashMap::new(),
+        };
+
+        let (status, Json(response)) = webhook_ingest(
+            Path("salesforce".to_string()),
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Json(payload),
+        )
+        .await
+        .expect("webhook ingest should succeed");
+
+        assert_eq!(status, StatusCode::OK);
+        assert_eq!(response.status, "success");
+
+        let row = sqlx::query("SELECT account_id, deal_id, status, notes FROM quote WHERE id = ?")
+            .bind("Q-CRM-IN-001")
+            .fetch_one(&state.db_pool)
+            .await
+            .expect("fetch updated quote");
+
+        let account_id: Option<String> = row.try_get("account_id").ok();
+        let deal_id: Option<String> = row.try_get("deal_id").ok();
+        let quote_status: String = row.try_get("status").expect("quote status");
+        let notes: Option<String> = row.try_get("notes").ok();
+
+        assert_eq!(account_id.as_deref(), Some("A-UPDATED"));
+        assert_eq!(deal_id.as_deref(), Some("D-UPDATED"));
+        assert_eq!(quote_status, "approved");
+        assert!(
+            notes.as_deref().unwrap_or_default().contains("contact_added: Buyer Jane"),
+            "expected contact snapshot note in quote notes, got {:?}",
+            notes
+        );
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn webhook_ingest_dedupes_by_crm_object_id() {
+        let state = setup_state().await;
+        seed_connected_integration(&state, "salesforce").await;
+        seed_quote_with_line(&state, "Q-CRM-IN-002", "draft").await;
+
+        let payload = WebhookPayload {
+            quote_id: None,
+            account_id: Some("A-001".to_string()),
+            deal_id: Some("DEAL-DEDUPE-001".to_string()),
+            stage: Some("approved".to_string()),
+            status: None,
+            notes: Some("first webhook".to_string()),
+            contact_id: None,
+            contact_email: None,
+            contact_name: None,
+            event_type: Some("opportunity_stage_changed".to_string()),
+            payload: HashMap::new(),
+        };
+
+        let (_first_status, Json(first)) = webhook_ingest(
+            Path("salesforce".to_string()),
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Json(payload.clone()),
+        )
+        .await
+        .expect("first webhook should succeed");
+        assert_eq!(first.status, "success");
+
+        let (_second_status, Json(second)) = webhook_ingest(
+            Path("salesforce".to_string()),
+            State(state.clone()),
+            axum::http::HeaderMap::new(),
+            Json(payload),
+        )
+        .await
+        .expect("second webhook should be deduped");
+
+        assert_eq!(second.status, "skipped");
+        assert_eq!(second.error_message.as_deref(), Some("duplicate crm object event ignored"));
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn inbound_batch_retry_replays_failed_crm_to_quotey_events() {
+        let state = setup_state().await;
+        seed_connected_integration(&state, "salesforce").await;
+        seed_quote_with_line(&state, "Q-CRM-IN-003", "draft").await;
+
+        let now = Utc::now().to_rfc3339();
+        sqlx::query(
+            "INSERT INTO crm_sync_event
+                (id, provider, direction, event_type, quote_id, crm_object_type, crm_object_id, payload_json, status, attempts, error_message, created_at, updated_at)
+             VALUES
+                ('CRMEV-INBATCH-001', 'salesforce', 'crm_to_quotey', 'account_updated', 'Q-CRM-IN-003', 'account', 'A-RETRY-1', '{\"quote_id\":\"Q-CRM-IN-003\",\"account_id\":\"A-RETRY-1\"}', 'failed', 1, 'seed inbound failure', ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&state.db_pool)
+        .await
+        .expect("seed failed inbound event");
+
+        let Json(batch) = batch_retry_inbound_sync_events(
+            State(state.clone()),
+            Query(BatchSyncQuery { provider: Some("salesforce".to_string()), limit: Some(10) }),
+        )
+        .await
+        .expect("inbound batch replay should run");
+
+        assert_eq!(batch.processed, 1);
+        assert_eq!(batch.succeeded + batch.failed + batch.skipped, 1);
+        assert_eq!(batch.provider_results.len(), 1);
+        assert_eq!(batch.provider_results[0].event_id, "CRMEV-INBATCH-001");
 
         state.db_pool.close().await;
     }

@@ -1,0 +1,93 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+env:
+  CARGO_TERM_COLOR: always
+  RUSTFLAGS: -D warnings
+  CARGO_TARGET_DIR: target
+
+jobs:
+  # ── Stage 1: Fast checks (format + clippy) ───────────────────────────
+  lint:
+    name: Lint
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt, clippy
+      - uses: Swatinem/rust-cache@v2
+      - name: Check formatting
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
+  # ── Stage 2: Unit tests (all crates) ─────────────────────────────────
+  unit-tests:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run workspace tests
+        run: cargo test --workspace
+      - name: Test count summary
+        if: always()
+        run: |
+          cargo test --workspace 2>&1 | grep 'test result:' | tee test-summary.txt
+          echo "## Test Summary" >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+          cat test-summary.txt >> $GITHUB_STEP_SUMMARY
+          echo '```' >> $GITHUB_STEP_SUMMARY
+
+  # ── Stage 3: E2E integration scenarios ───────────────────────────────
+  e2e-tests:
+    name: E2E Scenarios
+    runs-on: ubuntu-latest
+    needs: lint
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Run E2E scenarios
+        run: ./scripts/e2e_runner.sh
+      - name: Upload E2E artifacts
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: e2e-artifacts-${{ github.sha }}
+          path: target/e2e-artifacts/
+          retention-days: 14
+
+  # ── Stage 4: QA quality gates ────────────────────────────────────────
+  quality-gates:
+    name: Quality Gates
+    runs-on: ubuntu-latest
+    needs: [unit-tests, e2e-tests]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - name: Install jq
+        run: sudo apt-get install -y jq
+      - name: Run quality gates
+        run: ./scripts/quality-gates.sh
+        env:
+          QUOTEY_SKIP_BUILD: "1"
+          QUOTEY_SKIP_FMT: "1"
+          QUOTEY_SKIP_CLIPPY: "1"
+          QUOTEY_SKIP_TESTS: "1"
+          QUOTEY_SKIP_DENY: "1"
+          QUOTEY_SKIP_DOC: "1"
+      - name: QA summary
+        if: always()
+        run: |
+          echo "## QA Gate Results" >> $GITHUB_STEP_SUMMARY
+          echo "Quality gates completed." >> $GITHUB_STEP_SUMMARY
