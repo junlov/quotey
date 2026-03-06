@@ -8,6 +8,7 @@ authors.workspace = true
 
 [dependencies]
 anyhow.workspace = true
+async-trait.workspace = true
 axum = { version = "0.8", default-features = false, features = ["http1", "json", "query", "tokio"] }
 chrono.workspace = true
 quotey-agent = { path = "../agent" }

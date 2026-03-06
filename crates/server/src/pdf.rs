@@ -20,11 +20,14 @@ struct TemplateBranding {
     company_logo: Option<String>,
     company_address: Option<String>,
     company_email: Option<String>,
+    support_email: Option<String>,
+    sender_name: Option<String>,
     company_phone: Option<String>,
     primary_color: String,
     secondary_color: String,
     accent_color: String,
     footer_text: Option<String>,
+    terms_footer: Option<String>,
     white_label: bool,
 }
 
@@ -35,11 +38,14 @@ impl Default for TemplateBranding {
             company_logo: None,
             company_address: None,
             company_email: None,
+            support_email: None,
+            sender_name: None,
             company_phone: None,
             primary_color: "#2563eb".to_owned(),
             secondary_color: "#1e40af".to_owned(),
             accent_color: "#3b82f6".to_owned(),
             footer_text: None,
+            terms_footer: None,
             white_label: false,
         }
     }
@@ -55,6 +61,11 @@ impl TemplateBranding {
         branding.company_logo = read_string(nested, quote_data, "company_logo");
         branding.company_address = read_string(nested, quote_data, "company_address");
         branding.company_email = read_string(nested, quote_data, "company_email");
+        branding.support_email = read_string(nested, quote_data, "support_email")
+            .or_else(|| read_string(nested, quote_data, "contact_email"))
+            .or_else(|| branding.company_email.clone());
+        branding.sender_name = read_string(nested, quote_data, "sender_name")
+            .or_else(|| read_string(nested, quote_data, "contact_name"));
         branding.company_phone = read_string(nested, quote_data, "company_phone");
         branding.primary_color = read_string(nested, quote_data, "primary_color")
             .unwrap_or_else(|| branding.primary_color.clone());
@@ -63,22 +74,89 @@ impl TemplateBranding {
         branding.accent_color = read_string(nested, quote_data, "accent_color")
             .unwrap_or_else(|| branding.accent_color.clone());
         branding.footer_text = read_string(nested, quote_data, "footer_text");
+        branding.terms_footer = read_string(nested, quote_data, "terms_footer")
+            .or_else(|| read_string(nested, quote_data, "custom_terms_footer"))
+            .or_else(|| branding.footer_text.clone());
         branding.white_label =
             read_bool(nested, quote_data, "white_label").unwrap_or(branding.white_label);
         branding
     }
 
-    fn insert_into_context(&self, context: &mut Context) {
+    fn support_contact_name(&self, quote_data: &serde_json::Value) -> String {
+        if let Some(name) = self.sender_name.clone() {
+            return name;
+        }
+
+        quote_data
+            .get("sales_rep")
+            .and_then(|value| value.get("name"))
+            .and_then(serde_json::Value::as_str)
+            .map(str::trim)
+            .filter(|value| !value.is_empty())
+            .map(str::to_owned)
+            .unwrap_or_else(|| "your sales representative".to_owned())
+    }
+
+    fn support_contact_email(&self, quote_data: &serde_json::Value) -> String {
+        self.support_email
+            .clone()
+            .or_else(|| self.company_email.clone())
+            .or_else(|| {
+                quote_data
+                    .get("sales_rep")
+                    .and_then(|value| value.get("email"))
+                    .and_then(serde_json::Value::as_str)
+                    .map(str::trim)
+                    .filter(|value| !value.is_empty())
+                    .map(str::to_owned)
+            })
+            .unwrap_or_else(|| "sales@example.com".to_owned())
+    }
+
+    fn resolved_terms_footer(&self) -> Option<String> {
+        self.terms_footer.clone().or_else(|| self.footer_text.clone())
+    }
+
+    fn insert_into_context(&self, context: &mut Context, quote_data: &serde_json::Value) {
+        let support_contact_name = self.support_contact_name(quote_data);
+        let support_contact_email = self.support_contact_email(quote_data);
+        let terms_footer = self.resolved_terms_footer();
+
         context.insert("company_name", &self.company_name);
         context.insert("company_logo", &self.company_logo);
         context.insert("company_address", &self.company_address);
         context.insert("company_email", &self.company_email);
+        context.insert("support_email", &self.support_email);
+        context.insert("sender_name", &self.sender_name);
         context.insert("company_phone", &self.company_phone);
         context.insert("primary_color", &self.primary_color);
         context.insert("secondary_color", &self.secondary_color);
         context.insert("accent_color", &self.accent_color);
         context.insert("footer_text", &self.footer_text);
+        context.insert("terms_footer", &terms_footer);
+        context.insert("support_contact_name", &support_contact_name);
+        context.insert("support_contact_email", &support_contact_email);
         context.insert("white_label", &self.white_label);
+        context.insert(
+            "branding",
+            &serde_json::json!({
+                "company_name": self.company_name,
+                "logo_url": self.company_logo,
+                "company_logo": self.company_logo,
+                "company_address": self.company_address,
+                "company_email": self.company_email,
+                "contact_email": self.support_email.clone().or_else(|| self.company_email.clone()),
+                "support_email": self.support_email,
+                "company_phone": self.company_phone,
+                "primary_color": self.primary_color,
+                "secondary_color": self.secondary_color,
+                "accent_color": self.accent_color,
+                "footer_text": self.footer_text,
+                "terms_footer": terms_footer,
+                "sender_name": self.sender_name,
+                "white_label": self.white_label,
+            }),
+        );
     }
 }
 
@@ -279,7 +357,7 @@ impl PdfGenerator {
             "sales_rep",
             &quote_data.get("sales_rep").cloned().unwrap_or(serde_json::json!({})),
         );
-        branding.insert_into_context(&mut context);
+        branding.insert_into_context(&mut context, quote_data);
 
         // Assumption tracking for F-003
         context.insert(
@@ -397,7 +475,7 @@ impl PdfGenerator {
             "pricing",
             &quote_data.get("pricing").cloned().unwrap_or(serde_json::json!({})),
         );
-        branding.insert_into_context(&mut context);
+        branding.insert_into_context(&mut context, quote_data);
 
         // Assumption tracking for F-003
         context.insert(
@@ -474,6 +552,9 @@ mod tests {
         assert_eq!(branding.primary_color, "#2563eb");
         assert_eq!(branding.secondary_color, "#1e40af");
         assert_eq!(branding.accent_color, "#3b82f6");
+        assert_eq!(branding.support_email, None);
+        assert_eq!(branding.sender_name, None);
+        assert_eq!(branding.terms_footer, None);
         assert!(!branding.white_label);
     }
 
@@ -489,6 +570,9 @@ mod tests {
                 "secondary_color": "#334455",
                 "accent_color": "#556677",
                 "company_email": "quotes@acme.example",
+                "support_email": "support@acme.example",
+                "sender_name": "Acme Partner Desk",
+                "terms_footer": "Partner terms apply.",
                 "white_label": true
             }
         });
@@ -500,7 +584,23 @@ mod tests {
         assert_eq!(branding.secondary_color, "#334455");
         assert_eq!(branding.accent_color, "#556677");
         assert_eq!(branding.company_email.as_deref(), Some("quotes@acme.example"));
+        assert_eq!(branding.support_email.as_deref(), Some("support@acme.example"));
+        assert_eq!(branding.sender_name.as_deref(), Some("Acme Partner Desk"));
+        assert_eq!(branding.terms_footer.as_deref(), Some("Partner terms apply."));
         assert!(branding.white_label);
+    }
+
+    #[test]
+    fn template_branding_support_email_falls_back_to_company_email() {
+        let quote_data = serde_json::json!({
+            "branding": {
+                "company_email": "quotes@fallback.example"
+            }
+        });
+
+        let branding = TemplateBranding::from_quote_data(&quote_data);
+        assert_eq!(branding.company_email.as_deref(), Some("quotes@fallback.example"));
+        assert_eq!(branding.support_email.as_deref(), Some("quotes@fallback.example"));
     }
 
     #[test]
@@ -570,5 +670,45 @@ mod tests {
                 // Test passes if we get this far — error is expected due to Tera date filter limitations
             }
         }
+    }
+
+    #[test]
+    fn template_branding_resolves_contact_and_terms_from_white_label_overrides() {
+        let quote_data = serde_json::json!({
+            "sales_rep": {
+                "name": "Default Rep",
+                "email": "rep@example.com"
+            },
+            "branding": {
+                "sender_name": "Partner RevOps Desk",
+                "support_email": "support@partner.example",
+                "terms_footer": "Partner-specific legal terms apply.",
+                "white_label": true
+            }
+        });
+
+        let branding = TemplateBranding::from_quote_data(&quote_data);
+        assert_eq!(branding.support_contact_name(&quote_data), "Partner RevOps Desk");
+        assert_eq!(branding.support_contact_email(&quote_data), "support@partner.example");
+        assert_eq!(
+            branding.resolved_terms_footer().as_deref(),
+            Some("Partner-specific legal terms apply.")
+        );
+        assert!(branding.white_label);
+    }
+
+    #[test]
+    fn template_branding_resolves_contact_fallback_from_sales_rep() {
+        let quote_data = serde_json::json!({
+            "sales_rep": {
+                "name": "Fallback Rep",
+                "email": "fallback-rep@example.com"
+            }
+        });
+
+        let branding = TemplateBranding::from_quote_data(&quote_data);
+        assert_eq!(branding.support_contact_name(&quote_data), "Fallback Rep");
+        assert_eq!(branding.support_contact_email(&quote_data), "fallback-rep@example.com");
+        assert_eq!(branding.resolved_terms_footer(), None);
     }
 }

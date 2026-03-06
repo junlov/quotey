@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Quotey Approvals Settings</title>
+    <title>{{ branding.company_name | default(value="Quotey") }} Approvals Settings</title>
     <style>
         :root {
             --primary: #2563eb;
@@ -12,6 +12,10 @@
             --border: #dbe3ef;
             --text: #0f172a;
             --text-muted: #475569;
+            --shadow-shell: 0 14px 30px rgba(15, 23, 42, 0.08);
+            --motion-fast: 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+            --motion-medium: 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+            --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.24);
         }
 
         * {
@@ -24,6 +28,7 @@
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             background: linear-gradient(180deg, #eef4ff 0%, #f8fafc 100%);
             color: var(--text);
+            letter-spacing: 0.01em;
             display: grid;
             place-items: center;
             padding: 20px;
@@ -34,10 +39,12 @@
             background: var(--surface);
             border: 1px solid var(--border);
             border-radius: 16px;
-            box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+            box-shadow: var(--shadow-shell);
             padding: 24px;
             display: grid;
             gap: 20px;
+            transition: box-shadow var(--motion-medium), transform var(--motion-fast);
+            animation: settings-fade-up 260ms var(--motion-medium) both;
         }
 
         .kicker {
@@ -62,6 +69,7 @@
             padding: 14px;
             display: grid;
             gap: 8px;
+            transition: border-color var(--motion-fast), box-shadow var(--motion-medium);
         }
 
         .panel h2 {
@@ -100,6 +108,64 @@
             gap: 10px;
         }
 
+        .field {
+            display: grid;
+            gap: 6px;
+        }
+
+        .field label {
+            font-size: 0.85rem;
+            color: var(--text-muted);
+            font-weight: 600;
+        }
+
+        .field input,
+        .field select {
+            border: 1px solid var(--border);
+            background: #ffffff;
+            border-radius: 8px;
+            padding: 8px 10px;
+            color: var(--text);
+            transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
+        }
+
+        .grid {
+            display: grid;
+            gap: 10px;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        }
+
+        .status {
+            min-height: 20px;
+            color: var(--text-muted);
+            font-size: 0.85rem;
+        }
+
+        .checkbox-grid {
+            display: grid;
+            gap: 8px;
+            grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+        }
+
+        .check {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            font-size: 0.9rem;
+            color: var(--text);
+            background: #ffffff;
+            border: 1px solid var(--border);
+            border-radius: 8px;
+            padding: 8px 10px;
+            transition: border-color var(--motion-fast), box-shadow var(--motion-fast);
+        }
+
+        .check input {
+            width: 16px;
+            height: 16px;
+            margin: 0;
+        }
+
         .btn {
             border: 1px solid var(--primary);
             background: var(--primary);
@@ -111,11 +177,88 @@
             display: inline-flex;
             align-items: center;
             justify-content: center;
+            transition:
+                background-color var(--motion-fast),
+                color var(--motion-fast),
+                border-color var(--motion-fast),
+                transform var(--motion-fast),
+                box-shadow var(--motion-fast);
         }
 
         .btn.secondary {
             background: #ffffff;
             color: var(--primary);
+        }
+
+        .btn:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 10px 18px rgba(37, 99, 235, 0.16);
+        }
+
+        .btn.secondary:hover {
+            background: #eff6ff;
+        }
+
+        .field input:focus,
+        .field select:focus,
+        .field input:focus-visible,
+        .field select:focus-visible {
+            outline: none;
+            border-color: var(--primary);
+            box-shadow: var(--focus-ring);
+        }
+
+        .panel:focus-within {
+            border-color: rgba(37, 99, 235, 0.45);
+            box-shadow: var(--focus-ring);
+        }
+
+        :focus-visible {
+            outline: none;
+            box-shadow: var(--focus-ring);
+        }
+
+        @keyframes settings-fade-up {
+            from {
+                opacity: 0;
+                transform: translateY(8px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .panel:nth-of-type(2) {
+            animation: settings-fade-up 260ms var(--motion-medium) both;
+            animation-delay: 25ms;
+        }
+
+        .panel:nth-of-type(3) {
+            animation: settings-fade-up 260ms var(--motion-medium) both;
+            animation-delay: 50ms;
+        }
+
+        .panel:nth-of-type(4) {
+            animation: settings-fade-up 260ms var(--motion-medium) both;
+            animation-delay: 75ms;
+        }
+
+        .panel:nth-of-type(5) {
+            animation: settings-fade-up 260ms var(--motion-medium) both;
+            animation-delay: 100ms;
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+            .shell,
+            .panel {
+                animation: none !important;
+            }
         }
     </style>
 </head>
@@ -138,10 +281,340 @@
             <p>If you are offline, do not approve/reject until connectivity is restored.</p>
         </section>
 
+        <section class="panel" aria-label="Biometric Authentication">
+            <h2>Biometric Approval Authentication</h2>
+            <p>Register Face ID / Touch ID for approval actions. The portal will fall back to password when biometrics are unavailable.</p>
+            <div class="grid">
+                <div class="field">
+                    <label for="approver-name">Approver Name</label>
+                    <input id="approver-name" type="text" placeholder="Alex Manager" aria-label="Approver name">
+                </div>
+                <div class="field">
+                    <label for="approver-email">Approver Email</label>
+                    <input id="approver-email" type="email" placeholder="manager@example.com" aria-label="Approver email">
+                </div>
+                <div class="field">
+                    <label for="fallback-password">Fallback Password</label>
+                    <input id="fallback-password" type="password" placeholder="Required when biometrics fail" aria-label="Fallback password">
+                </div>
+            </div>
+            <div class="actions">
+                <button class="btn secondary" id="approver-profile-save" type="button">Save Profile</button>
+                <button class="btn" id="biometric-register" type="button">Register Biometric</button>
+                <button class="btn secondary" id="biometric-clear" type="button">Clear Biometric</button>
+            </div>
+            <p class="status" id="biometric-status" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="panel" aria-label="Weekly Digest Scheduling">
+            <h2>Weekly Analytics Digest</h2>
+            <p>Configure a weekly UTC digest schedule for CSV exports and KPI snapshots.</p>
+            <div class="grid">
+                <div class="field">
+                    <label for="digest-enabled">Enabled</label>
+                    <select id="digest-enabled" aria-label="Digest enabled">
+                        <option value="false">Disabled</option>
+                        <option value="true">Enabled</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="digest-day">Day (UTC)</label>
+                    <select id="digest-day" aria-label="Digest day">
+                        <option value="monday">Monday</option>
+                        <option value="tuesday">Tuesday</option>
+                        <option value="wednesday">Wednesday</option>
+                        <option value="thursday">Thursday</option>
+                        <option value="friday">Friday</option>
+                        <option value="saturday">Saturday</option>
+                        <option value="sunday">Sunday</option>
+                    </select>
+                </div>
+                <div class="field">
+                    <label for="digest-time">Time (UTC)</label>
+                    <input id="digest-time" type="time" value="09:00" aria-label="Digest time UTC">
+                </div>
+                <div class="field">
+                    <label for="digest-email">Recipient Email</label>
+                    <input id="digest-email" type="email" placeholder="ops@example.com" aria-label="Digest recipient email">
+                </div>
+            </div>
+            <div class="actions">
+                <button class="btn" id="digest-save" type="button">Save Digest Schedule</button>
+            </div>
+            <p class="status" id="digest-status" role="status" aria-live="polite"></p>
+        </section>
+
+        <section class="panel" aria-label="CSV Export">
+            <h2>CSV Export</h2>
+            <p>Download quote analytics with optional date filters and custom column selection.</p>
+            <div class="grid">
+                <div class="field">
+                    <label for="export-start">Start Date (UTC)</label>
+                    <input id="export-start" type="date" aria-label="Export start date">
+                </div>
+                <div class="field">
+                    <label for="export-end">End Date (UTC)</label>
+                    <input id="export-end" type="date" aria-label="Export end date">
+                </div>
+                <div class="field">
+                    <label for="export-days">Lookback Days</label>
+                    <input id="export-days" type="number" min="1" max="3650" value="30" aria-label="Export lookback days">
+                </div>
+                <div class="field">
+                    <label for="export-status-filter">Status</label>
+                    <select id="export-status-filter" aria-label="Export status">
+                        <option value="all">All</option>
+                        <option value="draft">Draft</option>
+                        <option value="pending">Pending</option>
+                        <option value="sent">Sent</option>
+                        <option value="approved">Approved</option>
+                        <option value="rejected">Rejected</option>
+                        <option value="expired">Expired</option>
+                    </select>
+                </div>
+            </div>
+            <div class="field">
+                <label>Columns</label>
+                <div class="checkbox-grid" id="export-columns">
+                    <label class="check"><input type="checkbox" value="quote_id" checked>Quote ID</label>
+                    <label class="check"><input type="checkbox" value="status" checked>Status</label>
+                    <label class="check"><input type="checkbox" value="currency" checked>Currency</label>
+                    <label class="check"><input type="checkbox" value="created_by" checked>Created By</label>
+                    <label class="check"><input type="checkbox" value="account_id" checked>Account ID</label>
+                    <label class="check"><input type="checkbox" value="created_at" checked>Created At</label>
+                    <label class="check"><input type="checkbox" value="updated_at" checked>Updated At</label>
+                    <label class="check"><input type="checkbox" value="valid_until" checked>Valid Until</label>
+                    <label class="check"><input type="checkbox" value="subtotal" checked>Subtotal</label>
+                    <label class="check"><input type="checkbox" value="discount_total" checked>Discount Total</label>
+                    <label class="check"><input type="checkbox" value="tax_total" checked>Tax Total</label>
+                    <label class="check"><input type="checkbox" value="total" checked>Total</label>
+                </div>
+            </div>
+            <div class="actions">
+                <button class="btn secondary" id="export-download" type="button">Download CSV</button>
+            </div>
+            <p class="status" id="export-status" role="status" aria-live="polite"></p>
+        </section>
+
         <nav class="actions" aria-label="PWA Navigation">
             <a class="btn" href="/approvals">Open Pending Approvals</a>
             <a class="btn secondary" href="/portal">Open Full Portal</a>
         </nav>
     </main>
+    <script>
+        const APPROVER_NAME_KEY = 'quotey.portal.approver_name';
+        const APPROVER_EMAIL_KEY = 'quotey.portal.approver_email';
+        const BIOMETRIC_CRED_KEY = 'quotey.portal.biometric_credential_id';
+        const FALLBACK_PASSWORD_KEY = 'quotey.portal.approval_fallback_password';
+
+        function supportsWebAuthn() {
+            return Boolean(
+                window.PublicKeyCredential
+                    && navigator.credentials
+                    && typeof navigator.credentials.create === 'function'
+                    && typeof navigator.credentials.get === 'function',
+            );
+        }
+
+        function randomChallenge(length = 32) {
+            const bytes = new Uint8Array(length);
+            crypto.getRandomValues(bytes);
+            return bytes;
+        }
+
+        function loadApproverProfileSettings() {
+            document.getElementById('approver-name').value = localStorage.getItem(APPROVER_NAME_KEY) || '';
+            document.getElementById('approver-email').value = localStorage.getItem(APPROVER_EMAIL_KEY) || '';
+            document.getElementById('fallback-password').value = localStorage.getItem(FALLBACK_PASSWORD_KEY) || '';
+            const status = document.getElementById('biometric-status');
+            const credentialId = localStorage.getItem(BIOMETRIC_CRED_KEY);
+            status.textContent = credentialId
+                ? `Biometric credential configured (${credentialId.slice(0, 12)}…).`
+                : 'No biometric credential registered on this device yet.';
+        }
+
+        function saveApproverProfileSettings() {
+            const status = document.getElementById('biometric-status');
+            const approverName = document.getElementById('approver-name').value.trim();
+            const approverEmail = document.getElementById('approver-email').value.trim();
+            const fallbackPassword = document.getElementById('fallback-password').value.trim();
+
+            if (!approverName || !approverEmail) {
+                status.textContent = 'Approver name and email are required.';
+                return;
+            }
+
+            localStorage.setItem(APPROVER_NAME_KEY, approverName);
+            localStorage.setItem(APPROVER_EMAIL_KEY, approverEmail);
+            if (fallbackPassword) {
+                localStorage.setItem(FALLBACK_PASSWORD_KEY, fallbackPassword);
+            } else {
+                localStorage.removeItem(FALLBACK_PASSWORD_KEY);
+            }
+
+            status.textContent = 'Saved approver profile for biometric + fallback approval auth.';
+        }
+
+        async function registerBiometricCredential() {
+            const status = document.getElementById('biometric-status');
+            if (!supportsWebAuthn()) {
+                status.textContent = 'WebAuthn biometrics are unavailable in this browser/device.';
+                return;
+            }
+
+            saveApproverProfileSettings();
+            const approverName = (localStorage.getItem(APPROVER_NAME_KEY) || '').trim();
+            const approverEmail = (localStorage.getItem(APPROVER_EMAIL_KEY) || '').trim();
+            if (!approverName || !approverEmail) {
+                status.textContent = 'Save approver name and email before biometric registration.';
+                return;
+            }
+
+            status.textContent = 'Registering biometric credential...';
+            try {
+                const credential = await navigator.credentials.create({
+                    publicKey: {
+                        challenge: randomChallenge(),
+                        rp: { name: 'Quotey Portal' },
+                        user: {
+                            id: randomChallenge(16),
+                            name: approverEmail,
+                            displayName: approverName,
+                        },
+                        pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+                        timeout: 60000,
+                        authenticatorSelection: {
+                            authenticatorAttachment: 'platform',
+                            userVerification: 'preferred',
+                            residentKey: 'preferred',
+                        },
+                        attestation: 'none',
+                    },
+                });
+                if (!credential || !credential.id) {
+                    throw new Error('registration canceled');
+                }
+                localStorage.setItem(BIOMETRIC_CRED_KEY, credential.id);
+                status.textContent = `Biometric credential registered (${credential.id.slice(0, 12)}…).`;
+            } catch (error) {
+                status.textContent = `Biometric registration failed: ${error.message}`;
+            }
+        }
+
+        function clearBiometricCredential() {
+            localStorage.removeItem(BIOMETRIC_CRED_KEY);
+            const status = document.getElementById('biometric-status');
+            status.textContent = 'Biometric credential removed for this device. Fallback password remains available.';
+        }
+
+        async function loadDigestSchedule() {
+            const status = document.getElementById('digest-status');
+            try {
+                const response = await fetch('/api/v1/portal/analytics/digest-schedule', { cache: 'no-store' });
+                if (!response.ok) {
+                    throw new Error(`Load failed (${response.status})`);
+                }
+                const data = await response.json();
+                document.getElementById('digest-enabled').value = data.enabled ? 'true' : 'false';
+                document.getElementById('digest-day').value = data.day_of_week || 'monday';
+                document.getElementById('digest-time').value = data.time_utc || '09:00';
+                document.getElementById('digest-email').value = data.recipient_email || '';
+                status.textContent = `Loaded schedule (updated ${data.updated_at || 'unknown'}).`;
+            } catch (error) {
+                status.textContent = `Could not load digest schedule: ${error.message}`;
+            }
+        }
+
+        async function saveDigestSchedule() {
+            const status = document.getElementById('digest-status');
+            const payload = {
+                enabled: document.getElementById('digest-enabled').value === 'true',
+                day_of_week: document.getElementById('digest-day').value,
+                time_utc: document.getElementById('digest-time').value,
+                recipient_email: document.getElementById('digest-email').value || null,
+            };
+
+            status.textContent = 'Saving...';
+            try {
+                const response = await fetch('/api/v1/portal/analytics/digest-schedule', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify(payload),
+                });
+                if (!response.ok) {
+                    const err = await response.json().catch(() => ({}));
+                    throw new Error(err.error || `Save failed (${response.status})`);
+                }
+                const data = await response.json();
+                status.textContent = `Saved schedule: ${data.day_of_week} ${data.time_utc} UTC`;
+            } catch (error) {
+                status.textContent = `Could not save digest schedule: ${error.message}`;
+            }
+        }
+
+        function toUtcBoundary(dateValue, endOfDay) {
+            if (!dateValue) {
+                return null;
+            }
+            return `${dateValue}T${endOfDay ? '23:59:59' : '00:00:00'}Z`;
+        }
+
+        function collectSelectedColumns() {
+            return Array.from(
+                document.querySelectorAll('#export-columns input[type="checkbox"]:checked'),
+            ).map((input) => input.value);
+        }
+
+        function requestCsvExport() {
+            const status = document.getElementById('export-status');
+            const columns = collectSelectedColumns();
+            if (columns.length === 0) {
+                status.textContent = 'Select at least one export column.';
+                return;
+            }
+
+            const params = new URLSearchParams();
+            const startIso = toUtcBoundary(document.getElementById('export-start').value, false);
+            const endIso = toUtcBoundary(document.getElementById('export-end').value, true);
+
+            if (startIso) {
+                params.set('start', startIso);
+            }
+            if (endIso) {
+                params.set('end', endIso);
+            }
+
+            if (!startIso && !endIso) {
+                const daysRaw = document.getElementById('export-days').value;
+                const days = Number.parseInt(daysRaw, 10);
+                if (Number.isFinite(days) && days > 0) {
+                    params.set('days', String(days));
+                }
+            }
+
+            const statusFilter = document.getElementById('export-status-filter').value;
+            if (statusFilter && statusFilter !== 'all') {
+                params.set('status', statusFilter);
+            }
+
+            params.set('columns', columns.join(','));
+            status.textContent = `Starting download with ${columns.length} column(s)...`;
+            window.location.href = `/api/v1/portal/export/quotes?${params.toString()}`;
+        }
+
+        document
+            .getElementById('approver-profile-save')
+            .addEventListener('click', saveApproverProfileSettings);
+        document
+            .getElementById('biometric-register')
+            .addEventListener('click', registerBiometricCredential);
+        document
+            .getElementById('biometric-clear')
+            .addEventListener('click', clearBiometricCredential);
+        document.getElementById('digest-save').addEventListener('click', saveDigestSchedule);
+        document.getElementById('export-download').addEventListener('click', requestCsvExport);
+        loadApproverProfileSettings();
+        loadDigestSchedule();
+    </script>
 </body>
 </html>

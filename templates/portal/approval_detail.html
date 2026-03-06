@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#2563eb">
     <link rel="manifest" href="/manifest.webmanifest">
-    <title>Approval: {{ approval.id }} - Quotey</title>
+    <title>Approval: {{ approval.id }} - {{ company_name | default(value="Quotey") }}</title>
     <style>
         :root {
             --primary: #2563eb;
@@ -16,7 +16,7 @@
             --text: #0f172a;
             --muted: #475569;
             --ok: #047857;
-            --warn: #b45309;
+            --warn: #92400e;
             --danger: #dc2626;
             --danger-dark: #b91c1c;
         }
@@ -191,10 +191,11 @@
             font-size: 14px;
             font-weight: 700;
             cursor: pointer;
-            transition: background 0.15s;
+            transition: background 0.15s ease, transform 0.1s ease;
             flex: 1;
             max-width: 160px;
         }
+        .btn:active:not(:disabled) { transform: scale(0.97); }
         .btn-approve { background: var(--ok); color: white; }
         .btn-approve:hover { background: #065f46; }
         .btn-reject { background: var(--danger); color: white; }
@@ -275,6 +276,11 @@
             padding: 24px;
             width: min(440px, 90vw);
             box-shadow: 0 20px 60px rgba(0,0,0,0.15);
+            animation: modalIn 0.2s ease;
+        }
+        @keyframes modalIn {
+            from { transform: translateY(-12px) scale(0.98); opacity: 0; }
+            to { transform: translateY(0) scale(1); opacity: 1; }
         }
         .modal h2 { margin: 0 0 16px; font-size: 18px; }
         .modal textarea {
@@ -312,14 +318,34 @@
         }
         .result-banner.success { display: block; background: #d1fae5; color: #065f46; border: 1px solid #6ee7b7; }
         .result-banner.error { display: block; background: #fee2e2; color: #991b1b; border: 1px solid #fca5a5; }
+
+        .card { transition: box-shadow 0.15s ease; }
+        .card:hover { box-shadow: 0 8px 24px rgba(15,23,42,0.08); }
+
+        :focus-visible {
+            outline: 2px solid var(--primary);
+            outline-offset: 2px;
+        }
+
+        .line-ask-btn { transition: background 0.1s ease; }
+        .modal-cancel { transition: background 0.1s ease; }
+        .modal-cancel:hover { background: var(--surface-alt); }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+        }
     </style>
 </head>
 <body>
-    <div class="shell">
-        <a href="/approvals" class="back-link">&larr; Back to Approvals</a>
+    <main class="shell" aria-label="Approval detail">
+        <a href="/approvals" class="back-link" aria-label="Return to approvals list">&larr; Back to Approvals</a>
 
-        <div id="result-banner" class="result-banner"></div>
-        <div id="stale-banner" class="stale-banner">This approval is no longer pending. Actions are disabled.</div>
+        <div id="result-banner" class="result-banner" role="status" aria-live="polite" aria-atomic="true"></div>
+        <div id="stale-banner" class="stale-banner" role="alert" aria-live="assertive" aria-atomic="true">This approval is no longer pending. Actions are disabled.</div>
 
         <!-- Approval Header -->
         <div class="card">
@@ -378,14 +404,14 @@
             </div>
 
             {% if lines | length > 0 %}
-            <table class="lines-table">
+            <table class="lines-table" aria-label="Quote line items">
                 <thead>
                     <tr>
-                        <th>Product</th>
-                        <th class="num">Qty</th>
-                        <th class="num">Unit Price</th>
-                        <th class="num">Discount</th>
-                        <th class="num">Total</th>
+                        <th scope="col">Product</th>
+                        <th scope="col" class="num">Qty</th>
+                        <th scope="col" class="num">Unit Price</th>
+                        <th scope="col" class="num">Discount</th>
+                        <th scope="col" class="num">Total</th>
                     </tr>
                 </thead>
                 <tbody>
@@ -452,7 +478,7 @@
             <p style="margin:0; line-height:1.6;">{{ approval.justification }}</p>
         </div>
         {% endif %}
-    </div>
+    </main>
 
     {% if approval.status == "pending" %}
     <!-- Action Bar -->
@@ -464,17 +490,17 @@
     </div>
 
     <!-- Approve Modal -->
-    <div id="approve-modal" class="modal-overlay">
+    <div id="approve-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="approve-modal-title">
         <div class="modal">
-            <h2>Approve Quote</h2>
+            <h2 id="approve-modal-title">Approve Quote</h2>
             <p style="margin:0 0 12px; color:var(--muted); font-size:14px;">
                 Approving {{ quote.quote_id }} for {{ quote.total }}
             </p>
             <div class="context-ref">
                 Quote {{ quote.quote_id }} &bull; {{ lines | length }} line item(s) &bull; Total: {{ quote.total }}
             </div>
-            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">Comments (optional)</label>
-            <textarea id="approve-comments" placeholder="Any notes for the rep..."></textarea>
+            <label for="approve-comments" style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">Comments (optional)</label>
+            <textarea id="approve-comments" placeholder="Any notes for the rep..." aria-label="Approval comments"></textarea>
             <div class="confirm-gate">
                 <input type="checkbox" id="approve-confirm-check" onchange="toggleApproveBtn()">
                 <label for="approve-confirm-check">I have reviewed this quote and confirm my approval</label>
@@ -487,14 +513,14 @@
     </div>
 
     <!-- Reject Modal -->
-    <div id="reject-modal" class="modal-overlay">
+    <div id="reject-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="reject-modal-title">
         <div class="modal">
-            <h2>Reject Quote</h2>
+            <h2 id="reject-modal-title">Reject Quote</h2>
             <div class="context-ref">
                 Quote {{ quote.quote_id }} &bull; {{ lines | length }} line item(s) &bull; Total: {{ quote.total }}
             </div>
-            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">Reason for rejection</label>
-            <textarea id="reject-reason" placeholder="Required: explain why this quote cannot be approved..." required></textarea>
+            <label for="reject-reason" style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">Reason for rejection</label>
+            <textarea id="reject-reason" placeholder="Required: explain why this quote cannot be approved..." required aria-required="true"></textarea>
             <p id="reject-error" style="display:none; color:var(--danger); font-size:13px; margin:4px 0 0;">A rejection reason is required.</p>
             <div class="modal-actions">
                 <button class="modal-cancel" onclick="closeModals()">Cancel</button>
@@ -504,14 +530,14 @@
     </div>
 
     <!-- Need Info Modal -->
-    <div id="info-modal" class="modal-overlay">
+    <div id="info-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="info-modal-title">
         <div class="modal">
-            <h2>Request Information</h2>
+            <h2 id="info-modal-title">Request Information</h2>
             <div class="context-ref">
                 Re: Quote {{ quote.quote_id }} &bull; {{ lines | length }} line item(s) &bull; Total: {{ quote.total }}
             </div>
-            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">What information do you need?</label>
-            <textarea id="info-question" placeholder="Ask the rep for clarification..." required></textarea>
+            <label for="info-question" style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">What information do you need?</label>
+            <textarea id="info-question" placeholder="Ask the rep for clarification..." required aria-required="true"></textarea>
             <div class="modal-actions">
                 <button class="modal-cancel" onclick="closeModals()">Cancel</button>
                 <button class="btn btn-info" onclick="submitInfoRequest()">Send Request</button>
@@ -520,12 +546,12 @@
     </div>
 
     <!-- Line-specific Info Modal -->
-    <div id="line-info-modal" class="modal-overlay">
+    <div id="line-info-modal" class="modal-overlay" role="dialog" aria-modal="true" aria-labelledby="line-info-modal-title">
         <div class="modal">
-            <h2>Ask About Line Item</h2>
+            <h2 id="line-info-modal-title">Ask About Line Item</h2>
             <div id="line-info-context" class="context-ref"></div>
-            <label style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">What do you need to know about this line item?</label>
-            <textarea id="line-info-question" placeholder="Ask about pricing, quantity, configuration..." required></textarea>
+            <label for="line-info-question" style="font-size:13px; font-weight:600; display:block; margin-bottom:4px; margin-top:12px;">What do you need to know about this line item?</label>
+            <textarea id="line-info-question" placeholder="Ask about pricing, quantity, configuration..." required aria-required="true"></textarea>
             <input type="hidden" id="line-info-line-id" value="">
             <div class="modal-actions">
                 <button class="modal-cancel" onclick="closeModals()">Cancel</button>
@@ -538,24 +564,222 @@
     <script>
         const quoteToken = {{ quote.token | json_encode | safe }};
         const approvalId = {{ approval.id | json_encode | safe }};
+        const APPROVER_NAME_KEY = 'quotey.portal.approver_name';
+        const APPROVER_EMAIL_KEY = 'quotey.portal.approver_email';
+        const BIOMETRIC_CRED_KEY = 'quotey.portal.biometric_credential_id';
+        const FALLBACK_PASSWORD_KEY = 'quotey.portal.approval_fallback_password';
         let actionsDisabled = false;
+        let lastFocusedElement = null;
+
+        function loadStoredApproverProfile() {
+            return {
+                approverName: (localStorage.getItem(APPROVER_NAME_KEY) || '').trim(),
+                approverEmail: (localStorage.getItem(APPROVER_EMAIL_KEY) || '').trim(),
+            };
+        }
+
+        function persistApproverProfile(name, email) {
+            localStorage.setItem(APPROVER_NAME_KEY, name.trim());
+            localStorage.setItem(APPROVER_EMAIL_KEY, email.trim());
+        }
+
+        function getCommentAuthorIdentity() {
+            const profile = loadStoredApproverProfile();
+            return {
+                name: profile.approverName || 'Approver',
+                email: profile.approverEmail || 'manager@company.com',
+            };
+        }
+
+        async function ensureApproverProfile() {
+            const existing = loadStoredApproverProfile();
+            if (existing.approverName && existing.approverEmail) {
+                return existing;
+            }
+
+            const nameInput = window.prompt(
+                'Enter your name for approval audit records:',
+                existing.approverName || '',
+            );
+            if (nameInput === null || !nameInput.trim()) {
+                throw new Error('Approver name is required to continue.');
+            }
+
+            const emailInput = window.prompt(
+                'Enter your approval email:',
+                existing.approverEmail || '',
+            );
+            if (emailInput === null || !emailInput.trim()) {
+                throw new Error('Approver email is required to continue.');
+            }
+
+            persistApproverProfile(nameInput, emailInput);
+            return {
+                approverName: nameInput.trim(),
+                approverEmail: emailInput.trim(),
+            };
+        }
+
+        function supportsWebAuthn() {
+            return Boolean(
+                window.PublicKeyCredential
+                    && navigator.credentials
+                    && typeof navigator.credentials.create === 'function'
+                    && typeof navigator.credentials.get === 'function',
+            );
+        }
+
+        function randomChallenge(length = 32) {
+            const bytes = new Uint8Array(length);
+            crypto.getRandomValues(bytes);
+            return bytes;
+        }
+
+        function toBase64Url(bytesLike) {
+            const bytes = new Uint8Array(bytesLike);
+            let binary = '';
+            bytes.forEach((byte) => { binary += String.fromCharCode(byte); });
+            return btoa(binary).replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '');
+        }
+
+        async function registerBiometricCredentialIfNeeded() {
+            if (!supportsWebAuthn()) {
+                return null;
+            }
+
+            const existing = (localStorage.getItem(BIOMETRIC_CRED_KEY) || '').trim();
+            if (existing) {
+                return existing;
+            }
+
+            const enroll = window.confirm(
+                'Set up Face ID / Touch ID for approvals on this device?',
+            );
+            if (!enroll) {
+                return null;
+            }
+
+            const profile = await ensureApproverProfile();
+            const credential = await navigator.credentials.create({
+                publicKey: {
+                    challenge: randomChallenge(),
+                    rp: { name: 'Quotey Portal' },
+                    user: {
+                        id: randomChallenge(16),
+                        name: profile.approverEmail,
+                        displayName: profile.approverName,
+                    },
+                    pubKeyCredParams: [{ type: 'public-key', alg: -7 }],
+                    timeout: 60000,
+                    authenticatorSelection: {
+                        authenticatorAttachment: 'platform',
+                        userVerification: 'preferred',
+                        residentKey: 'preferred',
+                    },
+                    attestation: 'none',
+                },
+            });
+
+            if (!credential || !credential.id) {
+                throw new Error('Biometric registration was not completed.');
+            }
+
+            localStorage.setItem(BIOMETRIC_CRED_KEY, credential.id);
+            return credential.id;
+        }
+
+        async function requestBiometricAssertion(credentialId) {
+            const assertion = await navigator.credentials.get({
+                publicKey: {
+                    challenge: randomChallenge(),
+                    timeout: 60000,
+                    userVerification: 'preferred',
+                },
+            });
+            if (!assertion || !assertion.response) {
+                throw new Error('Biometric verification was canceled.');
+            }
+            const clientData = assertion.response.clientDataJSON
+                ? toBase64Url(assertion.response.clientDataJSON)
+                : '';
+            return `${credentialId}:${clientData}`;
+        }
+
+        function promptFallbackPassword() {
+            const previous = localStorage.getItem(FALLBACK_PASSWORD_KEY) || '';
+            const entered = window.prompt(
+                'Enter your fallback approval password:',
+                previous,
+            );
+            if (entered === null) {
+                return null;
+            }
+            const normalized = entered.trim();
+            if (!normalized) {
+                return '';
+            }
+            localStorage.setItem(FALLBACK_PASSWORD_KEY, normalized);
+            return normalized;
+        }
+
+        async function collectActionAuth() {
+            const profile = await ensureApproverProfile();
+
+            if (supportsWebAuthn()) {
+                try {
+                    const credentialId = await registerBiometricCredentialIfNeeded();
+                    if (credentialId) {
+                        const biometricAssertion = await requestBiometricAssertion(credentialId);
+                        return {
+                            ...profile,
+                            authMethod: 'biometric',
+                            biometricAssertion,
+                            fallbackPassword: null,
+                        };
+                    }
+                } catch (error) {
+                    console.warn('Biometric verification failed; falling back to password', error);
+                }
+            }
+
+            const fallbackPassword = promptFallbackPassword();
+            if (fallbackPassword === null) {
+                throw new Error('Approval canceled.');
+            }
+            if (!fallbackPassword) {
+                throw new Error('Fallback password is required to continue.');
+            }
+            return {
+                ...profile,
+                authMethod: 'password',
+                biometricAssertion: null,
+                fallbackPassword,
+            };
+        }
+
+        function openModal(modalId) {
+            lastFocusedElement = document.activeElement;
+            const modal = document.getElementById(modalId);
+            modal.classList.add('active');
+            const firstFocusable = modal.querySelector('textarea, input:not([type="hidden"]), button, [tabindex="0"]');
+            if (firstFocusable) setTimeout(() => firstFocusable.focus(), 50);
+        }
 
         function showApproveModal() {
             if (actionsDisabled) return;
-            // Reset confirm checkbox each time modal opens
             const cb = document.getElementById('approve-confirm-check');
             if (cb) cb.checked = false;
             toggleApproveBtn();
-            document.getElementById('approve-modal').classList.add('active');
+            openModal('approve-modal');
         }
         function showRejectModal() {
             if (actionsDisabled) return;
             document.getElementById('reject-error').style.display = 'none';
-            document.getElementById('reject-modal').classList.add('active');
+            openModal('reject-modal');
         }
         function showInfoModal() {
             if (actionsDisabled) return;
-            document.getElementById('info-modal').classList.add('active');
+            openModal('info-modal');
         }
         function showLineInfoModal(lineId, productName, sku) {
             if (actionsDisabled) return;
@@ -563,11 +787,16 @@
             document.getElementById('line-info-context').textContent =
                 'Re: ' + productName + ' (' + sku + ') on Quote ' + {{ quote.quote_id | json_encode | safe }};
             document.getElementById('line-info-question').value = '';
-            document.getElementById('line-info-modal').classList.add('active');
+            openModal('line-info-modal');
         }
         function closeModals() {
             document.querySelectorAll('.modal-overlay').forEach(m => m.classList.remove('active'));
+            if (lastFocusedElement) lastFocusedElement.focus();
         }
+
+        document.addEventListener('keydown', function(e) {
+            if (e.key === 'Escape') closeModals();
+        });
 
         function toggleApproveBtn() {
             const cb = document.getElementById('approve-confirm-check');
@@ -630,18 +859,34 @@
 
             closeModals();
 
+            let auth;
+            try {
+                auth = await collectActionAuth();
+            } catch (error) {
+                showBanner(error.message || 'Approval authentication is required.', 'error');
+                return;
+            }
+
             const endpoint = action === 'approved'
                 ? `/quote/${quoteToken}/approve`
                 : `/quote/${quoteToken}/reject`;
 
+            const authPayload = {
+                authMethod: auth.authMethod,
+                biometricAssertion: auth.biometricAssertion,
+                fallbackPassword: auth.fallbackPassword,
+            };
+
             const body = action === 'approved'
                 ? {
-                    approverName: 'Manager',
-                    approverEmail: 'manager@company.com',
-                    comments: document.getElementById('approve-comments')?.value || ''
+                    approverName: auth.approverName,
+                    approverEmail: auth.approverEmail,
+                    comments: document.getElementById('approve-comments')?.value || '',
+                    ...authPayload,
                 }
                 : {
-                    reason: document.getElementById('reject-reason').value.trim()
+                    reason: document.getElementById('reject-reason').value.trim(),
+                    ...authPayload,
                 };
 
             try {
@@ -660,11 +905,11 @@
                         showStale();
                         showBanner('This approval has already been resolved.', 'error');
                     } else {
-                        showBanner(data.message || 'Action failed', 'error');
+                        showBanner(data.message || 'Could not process this action. Please reload the page and try again.', 'error');
                     }
                 }
             } catch (e) {
-                showBanner('Network error: ' + e.message, 'error');
+                showBanner('Unable to reach the server. Check your connection and try again.', 'error');
             }
         }
 
@@ -673,6 +918,7 @@
             const question = document.getElementById('info-question')?.value;
             if (!question?.trim()) { alert('Please describe what information you need.'); return; }
             closeModals();
+            const identity = getCommentAuthorIdentity();
             const contextLine = '[INFO REQUEST] ' + question
                 + '\n---\nRe: Quote ' + {{ quote.quote_id | json_encode | safe }}
                 + ' | ' + {{ lines | length }} + ' line item(s) | Total: ' + {{ quote.total | json_encode | safe }};
@@ -682,8 +928,8 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         text: contextLine,
-                        author_name: 'Approver',
-                        author_email: 'manager@company.com'
+                        author_name: identity.name,
+                        author_email: identity.email,
                     })
                 });
                 const data = await resp.json();
@@ -691,10 +937,10 @@
                     showBanner('Information request sent to rep', 'success');
                     document.getElementById('info-question').value = '';
                 } else {
-                    showBanner(data.message || 'Failed to send request', 'error');
+                    showBanner(data.message || 'Could not send the info request. Please try again.', 'error');
                 }
             } catch (e) {
-                showBanner('Network error: ' + e.message, 'error');
+                showBanner('Unable to reach the server. Check your connection and try again.', 'error');
             }
         }
 
@@ -704,6 +950,7 @@
             const question = document.getElementById('line-info-question')?.value;
             if (!question?.trim()) { alert('Please describe what information you need.'); return; }
             closeModals();
+            const identity = getCommentAuthorIdentity();
             const contextRef = document.getElementById('line-info-context').textContent;
             const body = '[LINE ITEM QUESTION] ' + question + '\n---\n' + contextRef;
             try {
@@ -712,8 +959,8 @@
                     headers: { 'Content-Type': 'application/json' },
                     body: JSON.stringify({
                         text: body,
-                        author_name: 'Approver',
-                        author_email: 'manager@company.com'
+                        author_name: identity.name,
+                        author_email: identity.email,
                     })
                 });
                 const data = await resp.json();
@@ -721,10 +968,10 @@
                     showBanner('Question about line item sent to rep', 'success');
                     document.getElementById('line-info-question').value = '';
                 } else {
-                    showBanner(data.message || 'Failed to send request', 'error');
+                    showBanner(data.message || 'Could not send the question. Please try again.', 'error');
                 }
             } catch (e) {
-                showBanner('Network error: ' + e.message, 'error');
+                showBanner('Unable to reach the server. Check your connection and try again.', 'error');
             }
         }
 

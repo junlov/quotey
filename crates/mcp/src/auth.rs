@@ -125,7 +125,15 @@ impl AuthManager {
             .map(|key_config| ApiKeyEntry {
                 key: key_config.key.clone(),
                 name: key_config.name.clone(),
-                requests_per_minute: key_config.requests_per_minute,
+                requests_per_minute: {
+                    if key_config.requests_per_minute == 0 {
+                        warn!(
+                            key_name = %key_config.name,
+                            "requests_per_minute=0 is invalid; clamping to 1"
+                        );
+                    }
+                    key_config.requests_per_minute.max(1)
+                },
                 created_at: chrono::Utc::now(),
                 active: true,
             })
@@ -147,7 +155,7 @@ impl AuthManager {
         }
 
         // Check if key was provided
-        let key = match api_key {
+        let key = match api_key.map(str::trim).filter(|k| !k.is_empty()) {
             Some(k) => k,
             None => {
                 return AuthResult::Denied {
@@ -182,7 +190,7 @@ impl AuthManager {
         let mut limits = self.rate_limits.write().await;
         let limit_entry = limits.entry(key.to_string()).or_insert_with(RateLimitEntry::new);
 
-        let limit = entry.requests_per_minute as usize;
+        let limit = entry.requests_per_minute.max(1) as usize;
         let request_count = match limit_entry.record_request(self.rate_limit_window, limit) {
             Ok(count) => count,
             Err(retry_after) => {
@@ -226,6 +234,35 @@ impl AuthManager {
         }
 
         removed
+    }
+
+    /// Rotate an API key in-place.
+    ///
+    /// This atomically revokes the old key and inserts the new key entry.
+    /// Existing rate-limit state for the old key is dropped.
+    pub async fn rotate_key(&self, old_key: &str, new_entry: ApiKeyEntry) -> Result<(), String> {
+        if old_key.trim().is_empty() {
+            return Err("old API key is required".to_string());
+        }
+        if new_entry.key.trim().is_empty() {
+            return Err("new API key is required".to_string());
+        }
+
+        let mut keys = self.api_keys.write().await;
+        if !keys.contains_key(old_key) {
+            return Err("old API key does not exist".to_string());
+        }
+        if old_key != new_entry.key && keys.contains_key(&new_entry.key) {
+            return Err("new API key already exists".to_string());
+        }
+        keys.remove(old_key);
+        keys.insert(new_entry.key.clone(), new_entry.clone());
+        drop(keys);
+
+        let mut limits = self.rate_limits.write().await;
+        limits.remove(old_key);
+        limits.remove(&new_entry.key);
+        Ok(())
     }
 
     /// List all API keys (without the actual key values)
@@ -414,6 +451,22 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn test_blank_key_treated_as_missing() {
+        let key = ApiKeyEntry {
+            key: "test_key_123".to_string(),
+            name: "Test Key".to_string(),
+            requests_per_minute: 10,
+            created_at: chrono::Utc::now(),
+            active: true,
+        };
+
+        let auth = AuthManager::with_keys(vec![key]);
+        let result = auth.validate_request(Some("   ")).await;
+        assert!(!result.is_allowed());
+        assert_eq!(result.denial_reason(), Some("API key required"));
+    }
+
+    #[tokio::test]
     async fn test_rate_limiting() {
         let key = ApiKeyEntry {
             key: "test_key_123".to_string(),
@@ -437,6 +490,56 @@ mod tests {
         assert!(!result3.is_allowed());
         assert_eq!(result3.denial_reason(), Some("Rate limit exceeded"));
         assert!(result3.retry_after().is_some());
+    }
+
+    #[tokio::test]
+    async fn test_zero_requests_per_minute_is_clamped_to_one() {
+        let auth = AuthManager::from_config(&AuthConfig {
+            enabled: true,
+            rate_limit_window_secs: 60,
+            api_keys: vec![ApiKeyConfig {
+                key: "zero-rpm".to_string(),
+                name: "Zero RPM".to_string(),
+                requests_per_minute: 0,
+            }],
+        });
+
+        let first = auth.validate_request(Some("zero-rpm")).await;
+        assert!(first.is_allowed());
+        let second = auth.validate_request(Some("zero-rpm")).await;
+        assert!(!second.is_allowed());
+        assert_eq!(second.denial_reason(), Some("Rate limit exceeded"));
+    }
+
+    #[tokio::test]
+    async fn test_rotate_key_replaces_old_key() {
+        let old_key = ApiKeyEntry {
+            key: "old-key".to_string(),
+            name: "Old Key".to_string(),
+            requests_per_minute: 2,
+            created_at: chrono::Utc::now(),
+            active: true,
+        };
+        let auth = AuthManager::with_keys(vec![old_key]);
+
+        let old_allowed = auth.validate_request(Some("old-key")).await;
+        assert!(old_allowed.is_allowed());
+
+        let rotated = ApiKeyEntry {
+            key: "new-key".to_string(),
+            name: "New Key".to_string(),
+            requests_per_minute: 10,
+            created_at: chrono::Utc::now(),
+            active: true,
+        };
+        auth.rotate_key("old-key", rotated).await.expect("rotate key");
+
+        let old_denied = auth.validate_request(Some("old-key")).await;
+        assert!(!old_denied.is_allowed());
+        assert_eq!(old_denied.denial_reason(), Some("Invalid API key"));
+
+        let new_allowed = auth.validate_request(Some("new-key")).await;
+        assert!(new_allowed.is_allowed());
     }
 
     #[test]

@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="theme-color" content="#2563eb">
     <link rel="manifest" href="/manifest.webmanifest">
-    <title>Quotey Approvals</title>
+    <title>{{ branding.company_name | default(value="Quotey") }} Approvals</title>
     <style>
         :root {
             --primary: #2563eb;
@@ -16,7 +16,11 @@
             --text: #0f172a;
             --muted: #475569;
             --ok: #047857;
-            --warn: #b45309;
+            --warn: #92400e;
+            --shadow-card: 0 10px 20px rgba(15, 23, 42, 0.08);
+            --motion-fast: 140ms cubic-bezier(0.2, 0.8, 0.2, 1);
+            --motion-medium: 220ms cubic-bezier(0.2, 0.8, 0.2, 1);
+            --focus-ring: 0 0 0 3px rgba(37, 99, 235, 0.24);
         }
 
         * { box-sizing: border-box; }
@@ -25,7 +29,7 @@
             margin: 0;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
             color: var(--text);
-            background: linear-gradient(180deg, #eaf2ff 0%, #f8fafc 65%);
+            background: linear-gradient(180deg, #e7f0ff 0%, #f8fafc 72%);
             min-height: 100vh;
         }
 
@@ -42,7 +46,7 @@
             border: 1px solid var(--border);
             border-radius: 18px;
             padding: 18px;
-            box-shadow: 0 12px 28px rgba(15, 23, 42, 0.08);
+            box-shadow: 0 12px 24px rgba(15, 23, 42, 0.07);
             display: grid;
             gap: 8px;
         }
@@ -95,7 +99,7 @@
             border: 1px solid var(--border);
             border-radius: 14px;
             background: var(--surface);
-            box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+            box-shadow: var(--shadow-card);
             padding: 14px;
             display: grid;
             gap: 10px;
@@ -176,9 +180,68 @@
             font-size: 14px;
         }
 
+        .hero,
+        .card {
+            transition: box-shadow var(--motion-medium), transform var(--motion-fast), border-color var(--motion-fast);
+        }
+
+        .card:hover {
+            transform: translateY(-2px);
+            box-shadow: 0 14px 26px rgba(15, 23, 42, 0.1);
+        }
+
+        .open {
+            transition:
+                background-color var(--motion-fast),
+                transform var(--motion-fast),
+                box-shadow var(--motion-fast);
+        }
+        .open:hover {
+            transform: translateY(-1px);
+            box-shadow: 0 10px 18px rgba(37, 99, 235, 0.2);
+        }
+        .open:active { transform: scale(0.97); }
+
+        :focus-visible {
+            outline: none;
+            box-shadow: var(--focus-ring);
+        }
+
+        @keyframes approvals-fade-up {
+            from {
+                opacity: 0;
+                transform: translateY(6px);
+            }
+            to {
+                opacity: 1;
+                transform: translateY(0);
+            }
+        }
+
+        .hero,
+        .card {
+            animation: approvals-fade-up 240ms var(--motion-medium) both;
+        }
+
+        .card:nth-child(2n) {
+            animation-delay: 35ms;
+        }
+
         @media (min-width: 768px) {
             .shell {
                 padding-top: 28px;
+            }
+        }
+
+        @media (prefers-reduced-motion: reduce) {
+            *, *::before, *::after {
+                animation-duration: 0.01ms !important;
+                animation-iteration-count: 1 !important;
+                transition-duration: 0.01ms !important;
+            }
+            .hero,
+            .card {
+                animation: none !important;
             }
         }
     </style>
@@ -200,7 +263,7 @@
             <article class="card" aria-label="Approval {{ approval.approval_id }}">
                 <div class="card-head">
                     <div>
-                        <p class="customer">{{ approval.customer_name }}</p>
+                        <h2 class="customer">{{ approval.customer_name }}</h2>
                         <p class="quote-id">{{ approval.quote_id }} • {{ approval.approval_id }}</p>
                     </div>
                     <p class="total">{{ approval.total_amount }}</p>
@@ -211,7 +274,7 @@
 
                 <div class="decision">
                     <p class="role">Approver role: {{ approval.approver_role }}</p>
-                    <a class="open" href="{{ approval.detail_href }}">View</a>
+                    <a class="open" href="{{ approval.detail_href }}" aria-label="View approval {{ approval.approval_id }}">View</a>
                 </div>
             </article>
             {% endfor %}

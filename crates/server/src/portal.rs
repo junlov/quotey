@@ -20,6 +20,7 @@
 //! - `POST /quote/{token}/line/{line_id}/comment` — add a per-line-item comment
 //! - `POST /quote/{token}/assumptions`          — update quote assumptions and recalculate
 //! - `POST /api/v1/portal/links`                — generate a shareable link
+//! - `POST /api/v1/portal/links/regenerate`     — regenerate link (revokes older active links)
 //! - `POST /api/v1/portal/links/revoke`         — revoke an existing link
 //! - `GET  /api/v1/portal/links/{quote_id}`     — list active links for a quote
 //! - `POST /api/v1/portal/push/subscribe`       — register browser push subscription
@@ -28,12 +29,12 @@
 use crate::pdf::PdfGenerator;
 use axum::{
     extract::{Path, Query, State},
-    http::{header::CONTENT_TYPE, HeaderMap, StatusCode},
+    http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse},
     routing::{get, post},
     Json, Router,
 };
-use chrono::Utc;
+use chrono::{Datelike, Duration, Timelike, Utc};
 use quotey_db::DbPool;
 use serde::{Deserialize, Serialize};
 use sqlx::{QueryBuilder, Row};
@@ -52,11 +53,103 @@ fn escape_html(input: &str) -> String {
         .replace('\'', "&#x27;")
 }
 
+/// Return a generic HTML error page for database errors.
+/// The detailed error is logged server-side but NOT exposed to the user.
+fn redacted_db_error(e: sqlx::Error) -> (StatusCode, Html<String>) {
+    warn!(error = %e, "portal database error (redacted from user response)");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Html(
+            "<h1>Service Unavailable</h1><p>A database error occurred. Please try again later.</p>"
+                .to_string(),
+        ),
+    )
+}
+
+/// Return a generic HTML error page for template rendering errors.
+/// The detailed error is logged server-side but NOT exposed to the user.
+fn redacted_template_error(e: tera::Error) -> (StatusCode, Html<String>) {
+    warn!(error = ?e, "portal template render error (redacted from user response)");
+    (
+        StatusCode::INTERNAL_SERVER_ERROR,
+        Html("<h1>Service Unavailable</h1><p>A rendering error occurred. Please try again later.</p>".to_string()),
+    )
+}
+
+/// White-label branding configuration for the portal.
+/// Loaded from environment variables or defaults to Quotey branding.
+#[derive(Debug, Clone, Serialize)]
+pub struct BrandingConfig {
+    pub company_name: String,
+    pub logo_url: Option<String>,
+    pub primary_color: String,
+    pub support_email: Option<String>,
+    pub terms_footer: Option<String>,
+    /// When true, "Powered by Quotey" footer text is hidden.
+    pub white_label: bool,
+}
+
+impl Default for BrandingConfig {
+    fn default() -> Self {
+        Self {
+            company_name: "Quotey".to_string(),
+            logo_url: None,
+            primary_color: "#2563eb".to_string(),
+            support_email: None,
+            terms_footer: None,
+            white_label: false,
+        }
+    }
+}
+
+impl BrandingConfig {
+    /// Load branding from environment variables, falling back to defaults.
+    pub fn from_env() -> Self {
+        Self {
+            company_name: std::env::var("QUOTEY_BRAND_NAME")
+                .unwrap_or_else(|_| "Quotey".to_string()),
+            logo_url: std::env::var("QUOTEY_BRAND_LOGO_URL").ok(),
+            primary_color: std::env::var("QUOTEY_BRAND_COLOR")
+                .unwrap_or_else(|_| "#2563eb".to_string()),
+            support_email: std::env::var("QUOTEY_BRAND_SUPPORT_EMAIL").ok(),
+            terms_footer: std::env::var("QUOTEY_BRAND_TERMS_FOOTER").ok(),
+            white_label: std::env::var("QUOTEY_WHITE_LABEL")
+                .map(|v| v == "1" || v.eq_ignore_ascii_case("true"))
+                .unwrap_or(false),
+        }
+    }
+}
+
 #[derive(Clone)]
 pub struct PortalState {
     db_pool: DbPool,
     templates: Arc<Tera>,
     pdf_generator: Option<Arc<PdfGenerator>>,
+    branding: BrandingConfig,
+    rep_notifications: PortalRepNotificationConfig,
+}
+
+#[derive(Debug, Clone, Default)]
+struct PortalRepNotificationConfig {
+    slack_bot_token: Option<String>,
+    fallback_channel: Option<String>,
+}
+
+impl PortalRepNotificationConfig {
+    fn from_env() -> Self {
+        let slack_bot_token = std::env::var("QUOTEY_SLACK_BOT_TOKEN")
+            .ok()
+            .or_else(|| std::env::var("SLACK_BOT_TOKEN").ok())
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        let fallback_channel = std::env::var("QUOTEY_PORTAL_REP_NOTIFICATION_CHANNEL")
+            .ok()
+            .map(|value| value.trim().to_string())
+            .filter(|value| !value.is_empty());
+
+        Self { slack_bot_token, fallback_channel }
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -70,11 +163,100 @@ pub struct ApproveRequest {
     #[serde(rename = "approverEmail")]
     pub approver_email: String,
     pub comments: Option<String>,
+    #[serde(rename = "authMethod", default)]
+    pub auth_method: Option<String>,
+    #[serde(rename = "biometricAssertion", default)]
+    pub biometric_assertion: Option<String>,
+    #[serde(rename = "fallbackPassword", default)]
+    pub fallback_password: Option<String>,
 }
 
 #[derive(Debug, Deserialize)]
 pub struct RejectRequest {
     pub reason: String,
+    #[serde(rename = "authMethod", default)]
+    pub auth_method: Option<String>,
+    #[serde(rename = "biometricAssertion", default)]
+    pub biometric_assertion: Option<String>,
+    #[serde(rename = "fallbackPassword", default)]
+    pub fallback_password: Option<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum ApprovalActionAuth {
+    None,
+    Biometric,
+    Password,
+}
+
+impl ApprovalActionAuth {
+    fn as_str(self) -> &'static str {
+        match self {
+            Self::None => "none",
+            Self::Biometric => "biometric",
+            Self::Password => "password",
+        }
+    }
+}
+
+fn validate_portal_approval_auth(
+    method_raw: &str,
+    biometric_assertion: Option<&str>,
+    fallback_password: Option<&str>,
+) -> Result<ApprovalActionAuth, (StatusCode, Json<PortalError>)> {
+    let method = method_raw.trim().to_ascii_lowercase();
+    match method.as_str() {
+        "biometric" => {
+            let assertion = biometric_assertion.unwrap_or("").trim();
+            if assertion.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(PortalError::validation(
+                        "biometricAssertion",
+                        "is required when authMethod=biometric",
+                    )),
+                ));
+            }
+            Ok(ApprovalActionAuth::Biometric)
+        }
+        "password" => {
+            let provided = fallback_password.unwrap_or("").trim();
+            if provided.is_empty() {
+                return Err((
+                    StatusCode::BAD_REQUEST,
+                    Json(PortalError::validation(
+                        "fallbackPassword",
+                        "is required when authMethod=password",
+                    )),
+                ));
+            }
+            let expected = std::env::var("QUOTEY_PORTAL_APPROVAL_FALLBACK_PASSWORD")
+                .ok()
+                .map(|value| value.trim().to_string())
+                .filter(|value| !value.is_empty());
+            if let Some(expected_password) = expected {
+                if provided != expected_password {
+                    return Err((
+                        StatusCode::UNAUTHORIZED,
+                        Json(PortalError {
+                            error: "Invalid fallback password".to_string(),
+                            category: Some(PortalErrorCategory::PermissionDenied),
+                            recovery_hint: Some(
+                                "Re-enter the fallback password or retry biometric authentication."
+                                    .to_string(),
+                            ),
+                            retry_after_seconds: None,
+                        }),
+                    ));
+                }
+            }
+            Ok(ApprovalActionAuth::Password)
+        }
+        _ => Err((
+            StatusCode::BAD_REQUEST,
+            Json(PortalError::validation("authMethod", "must be one of: biometric, password")),
+        )),
+    }
 }
 
 #[derive(Debug, Deserialize)]
@@ -201,11 +383,33 @@ impl PortalError {
     }
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, Default)]
 pub struct CreateLinkRequest {
     pub quote_id: String,
     pub expires_in_days: Option<u32>,
     pub created_by: Option<String>,
+    /// Optional navigation origin (e.g., "slack") carried into portal URL query params.
+    pub from: Option<String>,
+    /// Optional suggested action from handoff source (e.g., "review", "approve").
+    pub action: Option<String>,
+    /// Optional compact handoff summary shown in the portal banner.
+    pub context_summary: Option<String>,
+    /// Optional assumptions handoff summary shown in the portal banner.
+    pub assumptions_summary: Option<String>,
+    /// Optional primary action for continuity and auto-scroll behavior.
+    pub next_action: Option<String>,
+}
+
+impl CreateLinkRequest {
+    fn normalized_handoff(&self) -> PortalHandoffQuery {
+        PortalHandoffQuery {
+            from: normalize_handoff_from(self.from.as_deref()),
+            action: normalize_handoff_action(self.action.as_deref()),
+            context_summary: sanitize_handoff_text(self.context_summary.as_deref(), 280),
+            assumptions_summary: sanitize_handoff_text(self.assumptions_summary.as_deref(), 280),
+            next_action: normalize_handoff_action(self.next_action.as_deref()),
+        }
+    }
 }
 
 #[derive(Debug, Serialize)]
@@ -214,6 +418,8 @@ pub struct LinkResponse {
     pub token: String,
     pub quote_id: String,
     pub expires_at: String,
+    /// Relative portal URL (`/quote/{token}` + preserved handoff query params when present).
+    pub share_url: String,
 }
 
 #[derive(Debug, Deserialize)]
@@ -309,11 +515,23 @@ pub fn router(db_pool: DbPool) -> Router {
         .route("/quote/{token}/line/{line_id}/comment", post(add_line_comment))
         .route("/quote/{token}/assumptions", post(update_assumptions))
         .route("/api/v1/portal/links", post(create_link))
+        .route("/api/v1/portal/links/regenerate", post(regenerate_link))
         .route("/api/v1/portal/links/revoke", post(revoke_link))
         .route("/api/v1/portal/links/{quote_id}", get(list_links))
         .route("/api/v1/portal/push/subscribe", post(subscribe_push))
         .route("/api/v1/portal/push/unsubscribe", post(unsubscribe_push))
-        .with_state(PortalState { db_pool, templates, pdf_generator })
+        .route("/api/v1/portal/export/quotes", get(export_quotes_csv))
+        .route("/api/analytics/export", get(export_quotes_csv))
+        .route("/api/v1/portal/analytics/digest-schedule", get(get_digest_schedule))
+        .route("/api/v1/portal/analytics/digest-schedule", post(upsert_digest_schedule))
+        .route("/api/v1/portal/analytics/digest-dispatch/run", post(run_digest_dispatch))
+        .with_state(PortalState {
+            db_pool,
+            templates,
+            pdf_generator,
+            branding: BrandingConfig::from_env(),
+            rep_notifications: PortalRepNotificationConfig::from_env(),
+        })
 }
 
 // ---------------------------------------------------------------------------
@@ -366,14 +584,122 @@ fn selected_search(raw_search: Option<&str>) -> String {
     raw_search.map(|value| value.trim().to_string()).filter(|v| !v.is_empty()).unwrap_or_default()
 }
 
+#[derive(Debug, Clone, Default)]
+struct PortalHandoffQuery {
+    from: Option<String>,
+    action: Option<String>,
+    context_summary: Option<String>,
+    assumptions_summary: Option<String>,
+    next_action: Option<String>,
+}
+
+impl PortalHandoffQuery {
+    fn is_empty(&self) -> bool {
+        self.from.is_none()
+            && self.action.is_none()
+            && self.context_summary.is_none()
+            && self.assumptions_summary.is_none()
+            && self.next_action.is_none()
+    }
+
+    fn primary_action(&self) -> Option<&str> {
+        self.next_action.as_deref().or(self.action.as_deref())
+    }
+}
+
+fn sanitize_handoff_text(value: Option<&str>, max_chars: usize) -> Option<String> {
+    let trimmed = value?.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    Some(trimmed.chars().take(max_chars).collect())
+}
+
+fn normalize_handoff_from(value: Option<&str>) -> Option<String> {
+    sanitize_handoff_text(value, 32).map(|v| v.to_ascii_lowercase())
+}
+
+fn normalize_handoff_action(value: Option<&str>) -> Option<String> {
+    sanitize_handoff_text(value, 64).map(|v| v.to_ascii_lowercase())
+}
+
+fn build_quote_share_url(token: &str, handoff: &PortalHandoffQuery) -> String {
+    let Ok(mut url) = reqwest::Url::parse(&format!("https://portal.local/quote/{token}")) else {
+        return format!("/quote/{token}");
+    };
+
+    if !handoff.is_empty() {
+        let mut query = url.query_pairs_mut();
+        if let Some(from) = handoff.from.as_deref() {
+            query.append_pair("from", from);
+        }
+        if let Some(action) = handoff.action.as_deref() {
+            query.append_pair("action", action);
+        }
+        if let Some(next_action) = handoff.next_action.as_deref() {
+            query.append_pair("next_action", next_action);
+        }
+        if let Some(summary) = handoff.context_summary.as_deref() {
+            query.append_pair("context_summary", summary);
+        }
+        if let Some(summary) = handoff.assumptions_summary.as_deref() {
+            query.append_pair("assumptions_summary", summary);
+        }
+    }
+
+    match url.query() {
+        Some(query) => format!("{}?{query}", url.path()),
+        None => url.path().to_string(),
+    }
+}
+
 /// Render the quote viewer HTML page.
+#[derive(Debug, Deserialize, Default)]
+struct ViewQuoteParams {
+    /// Origin of the navigation (e.g., "slack")
+    from: Option<String>,
+    /// Suggested action for the viewer (e.g., "review", "approve", "comment")
+    action: Option<String>,
+    /// Optional context summary forwarded from the handoff source.
+    context_summary: Option<String>,
+    /// Optional assumptions summary forwarded from the handoff source.
+    assumptions_summary: Option<String>,
+    /// Optional normalized primary action for continuity/autoscroll.
+    next_action: Option<String>,
+}
+
+impl ViewQuoteParams {
+    fn normalized_handoff(&self) -> PortalHandoffQuery {
+        PortalHandoffQuery {
+            from: normalize_handoff_from(self.from.as_deref()),
+            action: normalize_handoff_action(self.action.as_deref()),
+            context_summary: sanitize_handoff_text(self.context_summary.as_deref(), 280),
+            assumptions_summary: sanitize_handoff_text(self.assumptions_summary.as_deref(), 280),
+            next_action: normalize_handoff_action(self.next_action.as_deref()),
+        }
+    }
+}
+
 async fn view_quote_page(
     Path(token): Path<String>,
+    params: Query<ViewQuoteParams>,
     State(state): State<PortalState>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
     let quote_id =
         resolve_quote_by_token(&state.db_pool, &token).await.map_err(|(status, err)| {
-            (status, Html(format!("<h1>Error</h1><p>{}</p>", escape_html(&err.0.error))))
+            let hint = err
+                .0
+                .recovery_hint
+                .as_deref()
+                .unwrap_or("Check the link or contact the sender for a new one.");
+            (
+                status,
+                Html(format!(
+                    "<h1>Quote Unavailable</h1><p>{}</p><p style=\"color:#666\">{}</p>",
+                    escape_html(&err.0.error),
+                    escape_html(hint),
+                )),
+            )
         })?;
 
     // Fetch quote details with assumption tracking
@@ -387,12 +713,7 @@ async fn view_quote_page(
     .bind(&quote_id)
     .fetch_optional(&state.db_pool)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))),
-        )
-    })?;
+    .map_err(redacted_db_error)?;
 
     let quote_row = match quote_row {
         Some(row) => row,
@@ -413,12 +734,7 @@ async fn view_quote_page(
     .bind(quote_version)
     .fetch_optional(&state.db_pool)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))),
-        )
-    })?;
+    .map_err(redacted_db_error)?;
 
     // Use authoritative totals from pricing snapshot when available
     let authoritative_subtotal: f64;
@@ -463,12 +779,7 @@ async fn view_quote_page(
     .bind(&quote_id)
     .fetch_all(&state.db_pool)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))),
-        )
-    })?;
+    .map_err(redacted_db_error)?;
 
     // Use authoritative totals from pricing snapshot, or compute from line items as fallback
     let (final_subtotal, final_discount, final_tax, final_total) = if has_snapshot {
@@ -526,12 +837,7 @@ async fn view_quote_page(
     .bind(&quote_id)
     .fetch_all(&state.db_pool)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))),
-        )
-    })?;
+    .map_err(redacted_db_error)?;
 
     let comments: Vec<serde_json::Value> = comment_rows
         .iter()
@@ -794,21 +1100,32 @@ async fn view_quote_page(
 
     context.insert("comments", &comments);
 
-    context.insert(
-        "branding",
-        &serde_json::json!({
-            "company_name": "Quotey",
-            "logo_url": Option::<String>::None,
-            "primary_color": "#2563eb",
-        }),
-    );
+    // Slack-to-portal state continuity: pass preserved navigation context to template.
+    let handoff = params.normalized_handoff();
+    if let Some(ref from) = handoff.from {
+        context.insert("from", from);
+    }
+    if let Some(ref action) = handoff.action {
+        context.insert("action", action);
+    }
+    if let Some(ref next_action) = handoff.next_action {
+        context.insert("next_action", next_action);
+    }
+    if let Some(ref context_summary) = handoff.context_summary {
+        context.insert("handoff_context_summary", context_summary);
+    }
+    if let Some(ref assumptions_summary) = handoff.assumptions_summary {
+        context.insert("handoff_assumptions_summary", assumptions_summary);
+    }
+    let handoff_action = handoff.primary_action().map(ToString::to_string);
+    if let Some(ref handoff_action) = handoff_action {
+        context.insert("handoff_action", handoff_action);
+    }
 
-    let html = state.templates.render("quote_viewer.html", &context).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
-        )
-    })?;
+    context.insert("branding", &state.branding);
+
+    let html =
+        state.templates.render("quote_viewer.html", &context).map_err(redacted_template_error)?;
 
     // Funnel telemetry: pricing rendered (quote viewed with pricing)
     record_funnel_event(
@@ -845,7 +1162,8 @@ async fn download_quote_pdf(
     })?;
 
     // Fetch complete quote data for PDF generation
-    let quote_data = fetch_quote_for_pdf(&state.db_pool, &quote_id).await?;
+    let quote_data =
+        fetch_quote_for_pdf(&state.db_pool, &quote_id, &state.branding.company_name).await?;
 
     // Generate PDF (or HTML if wkhtmltopdf not available)
     let filename = format!("Quote_{}.pdf", quote_id);
@@ -883,6 +1201,7 @@ async fn download_quote_pdf(
 async fn fetch_quote_for_pdf(
     pool: &DbPool,
     quote_id: &str,
+    company_name: &str,
 ) -> Result<serde_json::Value, (StatusCode, Json<PortalError>)> {
     // Fetch quote basic info
     let quote_row = sqlx::query(
@@ -993,7 +1312,7 @@ async fn fetch_quote_for_pdf(
             "tax_total": tax,
             "total": total,
         },
-        "company_name": "Quotey",
+        "company_name": company_name,
         "quote_id": quote_id,
         "status_text": canonical_quote_status(&raw_status),
     });
@@ -1062,12 +1381,8 @@ async fn portal_index_page(
 
     query_builder.push(" GROUP BY q.id ORDER BY q.created_at DESC LIMIT 100");
 
-    let quote_rows = query_builder.build().fetch_all(&state.db_pool).await.map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))),
-        )
-    })?;
+    let quote_rows =
+        query_builder.build().fetch_all(&state.db_pool).await.map_err(redacted_db_error)?;
 
     // Calculate stats
     let total_count: i64 = sqlx::query_scalar("SELECT COUNT(*) FROM quote")
@@ -1150,20 +1465,9 @@ async fn portal_index_page(
     context.insert("status_filter", &selected_filter);
     context.insert("search", &selected_search_value);
 
-    context.insert(
-        "branding",
-        &serde_json::json!({
-            "company_name": "Quotey",
-            "logo_url": Option::<String>::None,
-        }),
-    );
+    context.insert("branding", &state.branding);
 
-    let html = state.templates.render("index.html", &context).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
-        )
-    })?;
+    let html = state.templates.render("index.html", &context).map_err(redacted_template_error)?;
 
     Ok(Html(html))
 }
@@ -1231,12 +1535,7 @@ async fn approvals_index_page(
     .bind(now.as_str())
     .fetch_all(&state.db_pool)
     .await
-    .map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))),
-        )
-    })?;
+    .map_err(redacted_db_error)?;
 
     let approvals: Vec<serde_json::Value> = rows
         .iter()
@@ -1267,20 +1566,10 @@ async fn approvals_index_page(
     let mut context = Context::new();
     context.insert("approvals", &approvals);
     context.insert("count", &approvals.len());
-    context.insert(
-        "branding",
-        &serde_json::json!({
-            "company_name": "Quotey",
-            "logo_url": Option::<String>::None,
-        }),
-    );
+    context.insert("branding", &state.branding);
 
-    let html = state.templates.render("approvals.html", &context).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
-        )
-    })?;
+    let html =
+        state.templates.render("approvals.html", &context).map_err(redacted_template_error)?;
 
     Ok(Html(html))
 }
@@ -1292,9 +1581,10 @@ async fn approval_detail_page(
     State(state): State<PortalState>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
     let db_err = |e: sqlx::Error| {
+        warn!(error = %e, "approval_detail database error (redacted from user response)");
         (
             StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Database Error</h1><p>{}</p>", escape_html(&e.to_string()))),
+            Html("<h1>Service Unavailable</h1><p>A database error occurred. Please try again later.</p>".to_string()),
         )
     };
 
@@ -1444,12 +1734,10 @@ async fn approval_detail_page(
 
     context.insert("lines", &lines);
 
-    let html = state.templates.render("approval_detail.html", &context).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
-        )
-    })?;
+    let html = state
+        .templates
+        .render("approval_detail.html", &context)
+        .map_err(redacted_template_error)?;
 
     Ok(Html(html))
 }
@@ -1458,12 +1746,11 @@ async fn approval_detail_page(
 async fn approvals_settings_page(
     State(state): State<PortalState>,
 ) -> Result<Html<String>, (StatusCode, Html<String>)> {
-    let html = state.templates.render("settings.html", &Context::new()).map_err(|e| {
-        (
-            StatusCode::INTERNAL_SERVER_ERROR,
-            Html(format!("<h1>Template Error</h1><pre>{}</pre>", escape_html(&format!("{:?}", e)))),
-        )
-    })?;
+    let mut context = Context::new();
+    context.insert("branding", &state.branding);
+
+    let html =
+        state.templates.render("settings.html", &context).map_err(redacted_template_error)?;
 
     Ok(Html(html))
 }
@@ -1619,14 +1906,14 @@ fn build_pricing_rationale(
 
 async fn portal_manifest() -> impl IntoResponse {
     (
-        [(CONTENT_TYPE, "application/manifest+json; charset=utf-8")],
+        [(header::CONTENT_TYPE, "application/manifest+json; charset=utf-8")],
         include_str!("../../../templates/portal/manifest.webmanifest"),
     )
 }
 
 async fn portal_service_worker() -> impl IntoResponse {
     (
-        [(CONTENT_TYPE, "application/javascript; charset=utf-8")],
+        [(header::CONTENT_TYPE, "application/javascript; charset=utf-8")],
         include_str!("../../../templates/portal/sw.js"),
     )
 }
@@ -1755,6 +2042,15 @@ async fn approve_quote(
             Json(PortalError::validation("approver info", "name and email are required")),
         ));
     }
+    let auth_method =
+        match body.auth_method.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            Some(method) => validate_portal_approval_auth(
+                method,
+                body.biometric_assertion.as_deref(),
+                body.fallback_password.as_deref(),
+            )?,
+            None => ApprovalActionAuth::None,
+        };
 
     let now = Utc::now();
     let quote_version: i64 = sqlx::query_scalar("SELECT version FROM quote WHERE id = ?")
@@ -1771,6 +2067,13 @@ async fn approve_quote(
         "quote_version": quote_version,
         "requester_ip": requester_ip,
         "captured_at": now.to_rfc3339(),
+        "auth_method": auth_method.as_str(),
+        "biometric_assertion_present": body
+            .biometric_assertion
+            .as_deref()
+            .map(str::trim)
+            .is_some_and(|value| !value.is_empty()),
+        "fallback_password_used": matches!(auth_method, ApprovalActionAuth::Password),
     });
     let approval_id = format!("PAPR-{}", &uuid_v4()[..12]);
 
@@ -1805,8 +2108,12 @@ async fn approve_quote(
         Some(&quote_id),
         "portal.approval",
         &format!(
-            "Quote approved by {} ({}) via web portal [version={}, ip={}]",
-            approver_name, approver_email, quote_version, requester_ip
+            "Quote approved by {} ({}) via web portal [version={}, ip={}, auth={}]",
+            approver_name,
+            approver_email,
+            quote_version,
+            requester_ip,
+            auth_method.as_str()
         ),
     )
     .await;
@@ -1830,6 +2137,7 @@ async fn approve_quote(
         approver_email = %approver_email,
         requester_ip = %requester_ip,
         quote_version = %quote_version,
+        auth_method = %auth_method.as_str(),
         "quote approved via web portal"
     );
 
@@ -1855,6 +2163,15 @@ async fn reject_quote(
             Json(PortalError::validation("reason", "rejection reason is required")),
         ));
     }
+    let auth_method =
+        match body.auth_method.as_deref().map(str::trim).filter(|value| !value.is_empty()) {
+            Some(method) => validate_portal_approval_auth(
+                method,
+                body.biometric_assertion.as_deref(),
+                body.fallback_password.as_deref(),
+            )?,
+            None => ApprovalActionAuth::None,
+        };
 
     let now = Utc::now();
     let rejection_id = format!("PREJ-{}", &uuid_v4()[..12]);
@@ -1888,7 +2205,7 @@ async fn reject_quote(
         &state.db_pool,
         Some(&quote_id),
         "portal.rejection",
-        &format!("Quote declined via web portal: {reason}"),
+        &format!("Quote declined via web portal: {reason} [auth={}]", auth_method.as_str()),
     )
     .await;
 
@@ -1907,6 +2224,7 @@ async fn reject_quote(
         event_name = "portal.quote.rejected",
         correlation_id = %rejection_id,
         quote_id = %quote_id,
+        auth_method = %auth_method.as_str(),
         "quote rejected via web portal"
     );
 
@@ -1989,6 +2307,9 @@ async fn add_comment(
         quote_id = %quote_id,
         "customer comment added via web portal"
     );
+
+    notify_rep_about_comment(&state, &quote_id, "overall", None, &author_name, &author_email, text)
+        .await;
 
     Ok(Json(PortalResponse {
         success: true,
@@ -2129,9 +2450,20 @@ async fn add_line_comment(
     )
     .await;
 
+    notify_rep_about_comment(
+        &state,
+        &quote_id,
+        "line_item",
+        Some(&line_id),
+        &author_name,
+        &author_email,
+        text,
+    )
+    .await;
+
     Ok(Json(PortalResponse {
         success: true,
-        message: format!("Comment on line {line_id} recorded."),
+        message: format!("Comment on line {line_id} recorded. Your sales rep will be notified."),
     }))
 }
 
@@ -2402,6 +2734,8 @@ async fn create_link(
     let expires_at = now + chrono::Duration::days(expires_in_days as i64);
     let link_id = format!("PL-{}", &uuid_v4()[..12]);
     let token = generate_token();
+    let handoff = body.normalized_handoff();
+    let share_url = build_quote_share_url(&token, &handoff);
     let created_by = body.created_by.as_deref().unwrap_or("api");
 
     sqlx::query(
@@ -2461,6 +2795,7 @@ async fn create_link(
         token,
         quote_id: quote_id.clone(),
         expires_at: expires_at.to_rfc3339(),
+        share_url,
     }))
 }
 
@@ -2491,6 +2826,23 @@ async fn revoke_link(
     Ok(Json(PortalResponse { success: true, message: "Link revoked successfully.".to_string() }))
 }
 
+async fn regenerate_link(
+    State(state): State<PortalState>,
+    Json(body): Json<CreateLinkRequest>,
+) -> Result<Json<LinkResponse>, (StatusCode, Json<PortalError>)> {
+    let result = create_link(State(state.clone()), Json(body)).await?;
+
+    record_audit_event(
+        &state.db_pool,
+        Some(&result.0.quote_id),
+        "portal.link_regenerated",
+        "Portal link regenerated and prior active links revoked",
+    )
+    .await;
+
+    Ok(result)
+}
+
 async fn list_links(
     Path(quote_id): Path<String>,
     State(state): State<PortalState>,
@@ -2511,11 +2863,15 @@ async fn list_links(
 
     let links: Vec<LinkResponse> = rows
         .iter()
-        .map(|r| LinkResponse {
-            link_id: r.try_get("id").unwrap_or_default(),
-            token: r.try_get("token").unwrap_or_default(),
-            quote_id: r.try_get("quote_id").unwrap_or_default(),
-            expires_at: r.try_get("expires_at").unwrap_or_default(),
+        .map(|r| {
+            let token = r.try_get::<String, _>("token").unwrap_or_default();
+            LinkResponse {
+                link_id: r.try_get("id").unwrap_or_default(),
+                share_url: build_quote_share_url(&token, &PortalHandoffQuery::default()),
+                token,
+                quote_id: r.try_get("quote_id").unwrap_or_default(),
+                expires_at: r.try_get("expires_at").unwrap_or_default(),
+            }
         })
         .collect();
 
@@ -2524,6 +2880,667 @@ async fn list_links(
 
 // ---------------------------------------------------------------------------
 // Helpers
+// ---------------------------------------------------------------------------
+
+// ---------------------------------------------------------------------------
+// CSV Export
+// ---------------------------------------------------------------------------
+
+const DIGEST_SCHEDULE_SINGLETON_ID: i64 = 1;
+const DIGEST_DAYS: [&str; 7] =
+    ["monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"];
+
+#[derive(Debug, Deserialize)]
+struct DigestScheduleRequest {
+    enabled: bool,
+    day_of_week: String,
+    time_utc: String,
+    #[serde(default)]
+    recipient_email: Option<String>,
+}
+
+#[derive(Debug, Serialize, Clone, PartialEq, Eq)]
+struct DigestScheduleResponse {
+    enabled: bool,
+    day_of_week: String,
+    time_utc: String,
+    recipient_email: Option<String>,
+    updated_at: String,
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct DigestDispatchRequest {
+    #[serde(default)]
+    force: bool,
+}
+
+#[derive(Debug, Serialize)]
+struct DigestDispatchResponse {
+    executed: bool,
+    status: String,
+    reason: String,
+    recipient_email: Option<String>,
+    week_key: String,
+    sent_at: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct DigestMetrics {
+    total_quotes: i64,
+    approved_quotes_last_7_days: i64,
+    pending_quotes: i64,
+    total_pipeline_value: f64,
+}
+
+fn normalize_digest_day(raw: &str) -> Option<String> {
+    let normalized = raw.trim().to_ascii_lowercase();
+    if DIGEST_DAYS.contains(&normalized.as_str()) {
+        Some(normalized)
+    } else {
+        None
+    }
+}
+
+fn normalize_digest_time(raw: &str) -> Option<String> {
+    let trimmed = raw.trim();
+    let (hour_raw, minute_raw) = trimmed.split_once(':')?;
+    if hour_raw.len() != 2 || minute_raw.len() != 2 {
+        return None;
+    }
+    let hour = hour_raw.parse::<u8>().ok()?;
+    let minute = minute_raw.parse::<u8>().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some(format!("{hour:02}:{minute:02}"))
+}
+
+fn digest_time_components(time_utc: &str) -> Option<(u32, u32)> {
+    let (hour, minute) = time_utc.split_once(':')?;
+    let hour = hour.parse::<u32>().ok()?;
+    let minute = minute.parse::<u32>().ok()?;
+    if hour > 23 || minute > 59 {
+        return None;
+    }
+    Some((hour, minute))
+}
+
+fn weekday_name(weekday: chrono::Weekday) -> &'static str {
+    match weekday {
+        chrono::Weekday::Mon => "monday",
+        chrono::Weekday::Tue => "tuesday",
+        chrono::Weekday::Wed => "wednesday",
+        chrono::Weekday::Thu => "thursday",
+        chrono::Weekday::Fri => "friday",
+        chrono::Weekday::Sat => "saturday",
+        chrono::Weekday::Sun => "sunday",
+    }
+}
+
+fn digest_is_due(schedule: &DigestScheduleResponse, now: chrono::DateTime<Utc>) -> bool {
+    if weekday_name(now.weekday()) != schedule.day_of_week {
+        return false;
+    }
+
+    let Some((schedule_hour, schedule_minute)) = digest_time_components(&schedule.time_utc) else {
+        return false;
+    };
+    let now_minutes = now.hour() * 60 + now.minute();
+    let schedule_minutes = schedule_hour * 60 + schedule_minute;
+    now_minutes >= schedule_minutes
+}
+
+fn digest_week_key(now: chrono::DateTime<Utc>) -> String {
+    let week = now.iso_week();
+    format!("{}-W{:02}", week.year(), week.week())
+}
+
+async fn get_or_create_digest_schedule(
+    pool: &DbPool,
+) -> Result<DigestScheduleResponse, (StatusCode, Json<PortalError>)> {
+    ensure_digest_schedule_table(pool).await.map_err(db_error)?;
+
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO analytics_digest_schedule
+            (id, enabled, day_of_week, time_utc, recipient_email, updated_at)
+         VALUES (?, 0, 'monday', '09:00', NULL, ?)
+         ON CONFLICT(id) DO NOTHING",
+    )
+    .bind(DIGEST_SCHEDULE_SINGLETON_ID)
+    .bind(&now)
+    .execute(pool)
+    .await
+    .map_err(db_error)?;
+
+    let row = sqlx::query(
+        "SELECT enabled, day_of_week, time_utc, recipient_email, updated_at
+         FROM analytics_digest_schedule
+         WHERE id = ?",
+    )
+    .bind(DIGEST_SCHEDULE_SINGLETON_ID)
+    .fetch_one(pool)
+    .await
+    .map_err(db_error)?;
+
+    Ok(DigestScheduleResponse {
+        enabled: row.try_get::<i64, _>("enabled").unwrap_or(0) == 1,
+        day_of_week: row
+            .try_get::<String, _>("day_of_week")
+            .unwrap_or_else(|_| "monday".to_string()),
+        time_utc: row.try_get::<String, _>("time_utc").unwrap_or_else(|_| "09:00".to_string()),
+        recipient_email: row.try_get::<Option<String>, _>("recipient_email").unwrap_or(None),
+        updated_at: row.try_get::<String, _>("updated_at").unwrap_or(now),
+    })
+}
+
+async fn get_digest_schedule(
+    State(state): State<PortalState>,
+) -> Result<Json<DigestScheduleResponse>, (StatusCode, Json<PortalError>)> {
+    let schedule = get_or_create_digest_schedule(&state.db_pool).await?;
+    Ok(Json(schedule))
+}
+
+async fn upsert_digest_schedule(
+    State(state): State<PortalState>,
+    Json(body): Json<DigestScheduleRequest>,
+) -> Result<Json<DigestScheduleResponse>, (StatusCode, Json<PortalError>)> {
+    let day_of_week = normalize_digest_day(&body.day_of_week).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(PortalError::validation(
+                "day_of_week",
+                "day_of_week must be a valid weekday name (monday..sunday)",
+            )),
+        )
+    })?;
+    let time_utc = normalize_digest_time(&body.time_utc).ok_or_else(|| {
+        (
+            StatusCode::BAD_REQUEST,
+            Json(PortalError::validation("time_utc", "time_utc must use 24h HH:MM format in UTC")),
+        )
+    })?;
+
+    let recipient_email = body
+        .recipient_email
+        .as_deref()
+        .map(str::trim)
+        .filter(|value| !value.is_empty())
+        .map(str::to_owned);
+
+    if body.enabled && recipient_email.is_none() {
+        return Err((
+            StatusCode::BAD_REQUEST,
+            Json(PortalError::validation(
+                "recipient_email",
+                "recipient_email is required when digest scheduling is enabled",
+            )),
+        ));
+    }
+
+    ensure_digest_schedule_table(&state.db_pool).await.map_err(db_error)?;
+    let now = Utc::now().to_rfc3339();
+    sqlx::query(
+        "INSERT INTO analytics_digest_schedule
+            (id, enabled, day_of_week, time_utc, recipient_email, updated_at)
+         VALUES (?, ?, ?, ?, ?, ?)
+         ON CONFLICT(id) DO UPDATE SET
+            enabled = excluded.enabled,
+            day_of_week = excluded.day_of_week,
+            time_utc = excluded.time_utc,
+            recipient_email = excluded.recipient_email,
+            updated_at = excluded.updated_at",
+    )
+    .bind(DIGEST_SCHEDULE_SINGLETON_ID)
+    .bind(if body.enabled { 1_i64 } else { 0_i64 })
+    .bind(&day_of_week)
+    .bind(&time_utc)
+    .bind(recipient_email.as_deref())
+    .bind(&now)
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    record_audit_event(
+        &state.db_pool,
+        None,
+        "portal.analytics.digest_schedule.updated",
+        &format!(
+            "digest schedule updated: enabled={}, day={}, time_utc={}",
+            body.enabled, day_of_week, time_utc
+        ),
+    )
+    .await;
+
+    Ok(Json(DigestScheduleResponse {
+        enabled: body.enabled,
+        day_of_week,
+        time_utc,
+        recipient_email,
+        updated_at: now,
+    }))
+}
+
+async fn build_digest_metrics(pool: &DbPool, now: chrono::DateTime<Utc>) -> DigestMetrics {
+    let total_quotes: i64 =
+        match sqlx::query_scalar("SELECT COUNT(*) FROM quote").fetch_one(pool).await {
+            Ok(value) => value,
+            Err(error) => {
+                warn!(error = %error, "digest metrics fallback: total_quotes");
+                0
+            }
+        };
+
+    let approved_since = (now - Duration::days(7)).to_rfc3339();
+    let approved_quotes_last_7_days: i64 = match sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quote WHERE status = 'approved' AND created_at >= ?",
+    )
+    .bind(&approved_since)
+    .fetch_one(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(error = %error, "digest metrics fallback: approved_quotes_last_7_days");
+            0
+        }
+    };
+
+    let pending_quotes: i64 = match sqlx::query_scalar(
+        "SELECT COUNT(*) FROM quote WHERE status IN ('draft', 'pending', 'sent')",
+    )
+    .fetch_one(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(error = %error, "digest metrics fallback: pending_quotes");
+            0
+        }
+    };
+
+    let total_pipeline_value: f64 = match sqlx::query_scalar(
+        "SELECT COALESCE(SUM(ps.total), 0)
+         FROM quote q
+         LEFT JOIN quote_pricing_snapshot ps ON ps.quote_id = q.id AND ps.version = q.version
+         WHERE q.status IN ('draft', 'pending', 'sent')",
+    )
+    .fetch_one(pool)
+    .await
+    {
+        Ok(value) => value,
+        Err(error) => {
+            warn!(error = %error, "digest metrics fallback: total_pipeline_value");
+            0.0
+        }
+    };
+
+    DigestMetrics {
+        total_quotes,
+        approved_quotes_last_7_days,
+        pending_quotes,
+        total_pipeline_value,
+    }
+}
+
+async fn send_digest_via_webhook(
+    webhook_url: &str,
+    payload: &serde_json::Value,
+) -> Result<(), String> {
+    let response = reqwest::Client::new()
+        .post(webhook_url)
+        .json(payload)
+        .send()
+        .await
+        .map_err(|error| format!("request_failed: {error}"))?;
+
+    if !response.status().is_success() {
+        return Err(format!("http_status={}", response.status()));
+    }
+
+    Ok(())
+}
+
+async fn run_digest_dispatch(
+    State(state): State<PortalState>,
+    Json(body): Json<DigestDispatchRequest>,
+) -> Result<Json<DigestDispatchResponse>, (StatusCode, Json<PortalError>)> {
+    let schedule = get_or_create_digest_schedule(&state.db_pool).await?;
+    ensure_digest_delivery_table(&state.db_pool).await.map_err(db_error)?;
+
+    let now = Utc::now();
+    let now_rfc3339 = now.to_rfc3339();
+    let week_key = digest_week_key(now);
+    let recipient_email = schedule.recipient_email.clone();
+
+    if !schedule.enabled {
+        return Ok(Json(DigestDispatchResponse {
+            executed: false,
+            status: "skipped".to_string(),
+            reason: "digest scheduling is disabled".to_string(),
+            recipient_email,
+            week_key,
+            sent_at: None,
+        }));
+    }
+
+    let Some(recipient) = recipient_email.clone() else {
+        return Ok(Json(DigestDispatchResponse {
+            executed: false,
+            status: "skipped".to_string(),
+            reason: "recipient_email is not configured".to_string(),
+            recipient_email: None,
+            week_key,
+            sent_at: None,
+        }));
+    };
+
+    if !body.force && !digest_is_due(&schedule, now) {
+        return Ok(Json(DigestDispatchResponse {
+            executed: false,
+            status: "skipped".to_string(),
+            reason: "digest is not due yet for the configured schedule".to_string(),
+            recipient_email: Some(recipient),
+            week_key,
+            sent_at: None,
+        }));
+    }
+
+    if !body.force {
+        let already_sent: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*)
+             FROM analytics_digest_delivery
+             WHERE week_key = ? AND recipient_email = ? AND status = 'sent'",
+        )
+        .bind(&week_key)
+        .bind(&recipient)
+        .fetch_one(&state.db_pool)
+        .await
+        .map_err(db_error)?;
+
+        if already_sent > 0 {
+            return Ok(Json(DigestDispatchResponse {
+                executed: false,
+                status: "skipped".to_string(),
+                reason: "digest already sent for this recipient/week".to_string(),
+                recipient_email: Some(recipient),
+                week_key,
+                sent_at: None,
+            }));
+        }
+    }
+
+    let metrics = build_digest_metrics(&state.db_pool, now).await;
+    let base_url = std::env::var("QUOTEY_PORTAL_BASE_URL")
+        .unwrap_or_else(|_| "http://localhost:3000".to_string());
+    let export_link = format!("{base_url}/api/v1/portal/export/quotes?days=7");
+    let dashboard_link = format!("{base_url}/portal");
+
+    let digest_payload = serde_json::json!({
+        "recipient_email": recipient,
+        "subject": format!("Quotey weekly digest ({week_key})"),
+        "body": format!(
+            "Weekly Quotey digest\n\nTotal quotes: {}\nApproved last 7 days: {}\nPending quotes: {}\nPipeline value: {:.2}\n\nDashboard: {}\nCSV export (7d): {}",
+            metrics.total_quotes,
+            metrics.approved_quotes_last_7_days,
+            metrics.pending_quotes,
+            metrics.total_pipeline_value,
+            dashboard_link,
+            export_link
+        ),
+        "metrics": metrics,
+        "links": {
+            "dashboard": dashboard_link,
+            "export_csv_7d": export_link
+        },
+        "schedule": {
+            "day_of_week": schedule.day_of_week,
+            "time_utc": schedule.time_utc,
+            "force": body.force
+        }
+    });
+
+    let webhook_url = std::env::var("QUOTEY_ANALYTICS_DIGEST_WEBHOOK_URL")
+        .ok()
+        .map(|value| value.trim().to_string())
+        .filter(|value| !value.is_empty());
+
+    let (status, reason, executed) = match webhook_url {
+        Some(url) => match send_digest_via_webhook(&url, &digest_payload).await {
+            Ok(()) => ("sent".to_string(), "digest delivered via webhook".to_string(), true),
+            Err(error) => ("failed".to_string(), format!("digest delivery failed: {error}"), false),
+        },
+        None => (
+            "skipped".to_string(),
+            "missing QUOTEY_ANALYTICS_DIGEST_WEBHOOK_URL".to_string(),
+            false,
+        ),
+    };
+
+    let delivery_id = format!("PDIG-{}", &uuid_v4()[..12]);
+    sqlx::query(
+        "INSERT INTO analytics_digest_delivery
+            (id, week_key, recipient_email, status, reason, payload_json, sent_at)
+         VALUES (?, ?, ?, ?, ?, ?, ?)",
+    )
+    .bind(&delivery_id)
+    .bind(&week_key)
+    .bind(recipient_email.as_deref())
+    .bind(&status)
+    .bind(&reason)
+    .bind(digest_payload.to_string())
+    .bind(&now_rfc3339)
+    .execute(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    let event_type = match status.as_str() {
+        "sent" => "portal.analytics.digest.sent",
+        "failed" => "portal.analytics.digest.failed",
+        _ => "portal.analytics.digest.skipped",
+    };
+    record_audit_event(
+        &state.db_pool,
+        None,
+        event_type,
+        &format!("status={status}; reason={reason}; week_key={week_key}"),
+    )
+    .await;
+
+    Ok(Json(DigestDispatchResponse {
+        executed,
+        status,
+        reason,
+        recipient_email,
+        week_key,
+        sent_at: Some(now_rfc3339),
+    }))
+}
+
+#[derive(Debug, Deserialize, Default)]
+struct ExportQuotesQuery {
+    /// Optional start date (ISO 8601) for filtering
+    start: Option<String>,
+    /// Optional end date (ISO 8601) for filtering
+    end: Option<String>,
+    /// Optional relative lookback window in days when explicit start/end are absent
+    days: Option<i64>,
+    /// Optional status filter
+    status: Option<String>,
+    /// Optional comma-separated list of columns in desired output order.
+    /// Example: `quote_id,total,status`
+    columns: Option<String>,
+}
+
+const EXPORT_DEFAULT_COLUMNS: [&str; 12] = [
+    "quote_id",
+    "status",
+    "currency",
+    "created_by",
+    "account_id",
+    "created_at",
+    "updated_at",
+    "valid_until",
+    "subtotal",
+    "discount_total",
+    "tax_total",
+    "total",
+];
+
+fn parse_export_columns(raw: Option<&str>) -> Result<Vec<String>, PortalError> {
+    let Some(raw_columns) = raw.map(str::trim).filter(|value| !value.is_empty()) else {
+        return Ok(EXPORT_DEFAULT_COLUMNS.iter().map(|column| (*column).to_string()).collect());
+    };
+
+    let mut selected = Vec::new();
+    for candidate in raw_columns.split(',') {
+        let normalized = candidate.trim().to_ascii_lowercase();
+        if normalized.is_empty() {
+            continue;
+        }
+        if !EXPORT_DEFAULT_COLUMNS.contains(&normalized.as_str()) {
+            return Err(PortalError::validation(
+                "columns",
+                &format!(
+                    "unsupported column '{normalized}'. Supported columns: {}",
+                    EXPORT_DEFAULT_COLUMNS.join(", ")
+                ),
+            ));
+        }
+        if !selected.contains(&normalized) {
+            selected.push(normalized);
+        }
+    }
+
+    if selected.is_empty() {
+        return Err(PortalError::validation(
+            "columns",
+            "at least one valid export column is required",
+        ));
+    }
+
+    Ok(selected)
+}
+
+/// Export quotes as CSV with optional date range and status filter.
+async fn export_quotes_csv(
+    Query(params): Query<ExportQuotesQuery>,
+    State(state): State<PortalState>,
+) -> Result<impl IntoResponse, (StatusCode, Json<PortalError>)> {
+    let selected_columns = parse_export_columns(params.columns.as_deref())
+        .map_err(|error| (StatusCode::BAD_REQUEST, Json(error)))?;
+
+    let mut conditions = vec!["1=1".to_string()];
+    let mut binds: Vec<String> = Vec::new();
+
+    if let Some(ref start) = params.start {
+        conditions.push("q.created_at >= ?".to_string());
+        binds.push(start.clone());
+    }
+    if let Some(ref end) = params.end {
+        conditions.push("q.created_at <= ?".to_string());
+        binds.push(end.clone());
+    }
+    if params.start.is_none() && params.end.is_none() {
+        if let Some(days) = params.days.filter(|value| *value > 0 && *value <= 3650) {
+            let start = (Utc::now() - Duration::days(days)).to_rfc3339();
+            conditions.push("q.created_at >= ?".to_string());
+            binds.push(start);
+        }
+    }
+    if let Some(ref status) = params.status {
+        conditions.push("q.status = ?".to_string());
+        binds.push(status.clone());
+    }
+
+    let sql = format!(
+        "SELECT q.id, q.status, q.currency, q.created_by, q.account_id,
+                q.created_at, q.updated_at, q.valid_until,
+                COALESCE(ps.subtotal, 0) AS subtotal,
+                COALESCE(ps.discount_total, 0) AS discount_total,
+                COALESCE(ps.tax_total, 0) AS tax_total,
+                COALESCE(ps.total, 0) AS total
+         FROM quote q
+         LEFT JOIN quote_pricing_snapshot ps ON ps.quote_id = q.id AND ps.version = q.version
+         WHERE {}
+         ORDER BY q.created_at DESC",
+        conditions.join(" AND ")
+    );
+
+    let mut query = sqlx::query(&sql);
+    for bind in &binds {
+        query = query.bind(bind);
+    }
+
+    let rows = query.fetch_all(&state.db_pool).await.map_err(|e| {
+        warn!(error = %e, "export_quotes_csv: database error");
+        (StatusCode::INTERNAL_SERVER_ERROR, Json(PortalError::service_unavailable("database")))
+    })?;
+
+    let mut csv = format!("{}\n", selected_columns.join(","));
+
+    for row in &rows {
+        let mut values = Vec::with_capacity(selected_columns.len());
+        for column in &selected_columns {
+            let value = match column.as_str() {
+                "quote_id" => row.try_get::<String, _>("id").unwrap_or_default(),
+                "status" => row.try_get::<String, _>("status").unwrap_or_default(),
+                "currency" => row.try_get::<String, _>("currency").unwrap_or_default(),
+                "created_by" => row.try_get::<String, _>("created_by").unwrap_or_default(),
+                "account_id" => row
+                    .try_get::<Option<String>, _>("account_id")
+                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                "created_at" => row.try_get::<String, _>("created_at").unwrap_or_default(),
+                "updated_at" => row.try_get::<String, _>("updated_at").unwrap_or_default(),
+                "valid_until" => row
+                    .try_get::<Option<String>, _>("valid_until")
+                    .unwrap_or_default()
+                    .unwrap_or_default(),
+                "subtotal" => format!("{:.2}", row.try_get::<f64, _>("subtotal").unwrap_or(0.0)),
+                "discount_total" => {
+                    format!("{:.2}", row.try_get::<f64, _>("discount_total").unwrap_or(0.0))
+                }
+                "tax_total" => format!("{:.2}", row.try_get::<f64, _>("tax_total").unwrap_or(0.0)),
+                "total" => format!("{:.2}", row.try_get::<f64, _>("total").unwrap_or(0.0)),
+                _ => String::new(),
+            };
+            values.push(csv_escape(&value));
+        }
+        csv.push_str(&values.join(","));
+        csv.push('\n');
+    }
+
+    let filename = format!("quotey-quotes-export-{}.csv", Utc::now().format("%Y%m%d-%H%M%S"));
+
+    let mut headers = HeaderMap::new();
+    headers
+        .insert(header::CONTENT_TYPE, header::HeaderValue::from_static("text/csv; charset=utf-8"));
+    let disposition = header::HeaderValue::from_str(&format!(
+        "attachment; filename=\"{filename}\""
+    ))
+    .map_err(|_| {
+        (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(PortalError::service_unavailable("response headers")),
+        )
+    })?;
+    headers.insert(header::CONTENT_DISPOSITION, disposition);
+
+    Ok((StatusCode::OK, headers, csv))
+}
+
+/// Escape a value for CSV output (RFC 4180 compliant).
+fn csv_escape(value: &str) -> String {
+    if value.contains(',') || value.contains('"') || value.contains('\n') {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Token Resolution
 // ---------------------------------------------------------------------------
 
 /// Resolve a sharing token to a quote ID.
@@ -2636,6 +3653,178 @@ async fn record_audit_event(pool: &DbPool, quote_id: Option<&str>, event_type: &
     }
 }
 
+fn looks_like_slack_member_id(value: &str) -> bool {
+    if value.len() < 9 {
+        return false;
+    }
+
+    let mut chars = value.chars();
+    match chars.next() {
+        Some('U' | 'W') => chars.all(|ch| ch.is_ascii_uppercase() || ch.is_ascii_digit()),
+        _ => false,
+    }
+}
+
+fn compact_comment_text(text: &str, max_len: usize) -> String {
+    let compacted = text.split_whitespace().collect::<Vec<_>>().join(" ");
+    if compacted.chars().count() <= max_len {
+        return compacted;
+    }
+
+    let mut truncated = compacted.chars().take(max_len).collect::<String>();
+    truncated.push_str("...");
+    truncated
+}
+
+async fn send_slack_rep_notification(
+    bot_token: &str,
+    channel: &str,
+    message: &str,
+) -> Result<(), String> {
+    let response = reqwest::Client::new()
+        .post("https://slack.com/api/chat.postMessage")
+        .bearer_auth(bot_token)
+        .json(&serde_json::json!({
+            "channel": channel,
+            "text": message,
+            "mrkdwn": true,
+            "unfurl_links": false,
+            "unfurl_media": false
+        }))
+        .send()
+        .await
+        .map_err(|error| format!("request_failed: {error}"))?;
+
+    let status = response.status();
+    let payload: serde_json::Value =
+        response.json().await.map_err(|error| format!("response_parse_failed: {error}"))?;
+
+    if !status.is_success() {
+        return Err(format!("slack_http_status={status}"));
+    }
+
+    if !payload.get("ok").and_then(serde_json::Value::as_bool).unwrap_or(false) {
+        let api_error =
+            payload.get("error").and_then(serde_json::Value::as_str).unwrap_or("unknown_error");
+        return Err(format!("slack_api_error={api_error}"));
+    }
+
+    Ok(())
+}
+
+async fn notify_rep_about_comment(
+    state: &PortalState,
+    quote_id: &str,
+    comment_type: &str,
+    line_id: Option<&str>,
+    author_name: &str,
+    author_email: &str,
+    text: &str,
+) {
+    let rep_id = match sqlx::query_scalar::<_, String>("SELECT created_by FROM quote WHERE id = ?")
+        .bind(quote_id)
+        .fetch_optional(&state.db_pool)
+        .await
+    {
+        Ok(rep) => rep.unwrap_or_else(|| "unknown-rep".to_string()),
+        Err(error) => {
+            warn!(
+                event_name = "portal.rep_notification.resolve_failed",
+                quote_id = %quote_id,
+                error = %error,
+                "failed to resolve quote owner for rep notification"
+            );
+            record_audit_event(
+                &state.db_pool,
+                Some(quote_id),
+                "portal.rep_notification.failed",
+                "unable to resolve quote owner",
+            )
+            .await;
+            return;
+        }
+    };
+
+    let queue_detail = match line_id {
+        Some(line) => {
+            format!("queued rep notification ({comment_type}) for {rep_id} on line {line}")
+        }
+        None => format!("queued rep notification ({comment_type}) for {rep_id}"),
+    };
+    record_audit_event(
+        &state.db_pool,
+        Some(quote_id),
+        "portal.rep_notification.queued",
+        &queue_detail,
+    )
+    .await;
+
+    let Some(bot_token) = &state.rep_notifications.slack_bot_token else {
+        record_audit_event(
+            &state.db_pool,
+            Some(quote_id),
+            "portal.rep_notification.skipped",
+            "missing QUOTEY_SLACK_BOT_TOKEN/SLACK_BOT_TOKEN",
+        )
+        .await;
+        return;
+    };
+
+    let destination = if looks_like_slack_member_id(&rep_id) {
+        Some(rep_id.clone())
+    } else {
+        state.rep_notifications.fallback_channel.clone()
+    };
+
+    let Some(channel) = destination else {
+        record_audit_event(
+            &state.db_pool,
+            Some(quote_id),
+            "portal.rep_notification.skipped",
+            "quote owner is not a Slack member id and no QUOTEY_PORTAL_REP_NOTIFICATION_CHANNEL is configured",
+        )
+        .await;
+        return;
+    };
+
+    let comment_preview = compact_comment_text(text, 220);
+    let scope = match line_id {
+        Some(line) => format!("line `{line}`"),
+        None => "overall quote".to_string(),
+    };
+    let message = format!(
+        ":speech_balloon: New portal customer comment on quote `{quote_id}` ({scope})\nAuthor: {author_name} <{author_email}>\n>{comment_preview}"
+    );
+
+    match send_slack_rep_notification(bot_token, &channel, &message).await {
+        Ok(()) => {
+            record_audit_event(
+                &state.db_pool,
+                Some(quote_id),
+                "portal.rep_notification.sent",
+                &format!("delivered rep notification to {channel}"),
+            )
+            .await;
+        }
+        Err(error) => {
+            warn!(
+                event_name = "portal.rep_notification.failed",
+                quote_id = %quote_id,
+                channel = %channel,
+                error = %error,
+                "failed to deliver Slack rep notification"
+            );
+            record_audit_event(
+                &state.db_pool,
+                Some(quote_id),
+                "portal.rep_notification.failed",
+                &format!("delivery failed for {channel}: {error}"),
+            )
+            .await;
+        }
+    }
+}
+
 /// Persist a funnel telemetry event to the audit_event table.
 ///
 /// Funnel events track UX transitions (view, approve, comment, etc.)
@@ -2724,6 +3913,48 @@ async fn ensure_push_subscription_table(pool: &DbPool) -> Result<(), sqlx::Error
     sqlx::query(
         "CREATE INDEX IF NOT EXISTS idx_portal_push_subscription_revoked
          ON portal_push_subscription(revoked)",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn ensure_digest_schedule_table(pool: &DbPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS analytics_digest_schedule (
+            id              INTEGER PRIMARY KEY NOT NULL,
+            enabled         INTEGER NOT NULL DEFAULT 0,
+            day_of_week     TEXT NOT NULL DEFAULT 'monday',
+            time_utc        TEXT NOT NULL DEFAULT '09:00',
+            recipient_email TEXT,
+            updated_at      TEXT NOT NULL DEFAULT (datetime('now'))
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    Ok(())
+}
+
+async fn ensure_digest_delivery_table(pool: &DbPool) -> Result<(), sqlx::Error> {
+    sqlx::query(
+        "CREATE TABLE IF NOT EXISTS analytics_digest_delivery (
+            id              TEXT PRIMARY KEY NOT NULL,
+            week_key        TEXT NOT NULL,
+            recipient_email TEXT,
+            status          TEXT NOT NULL,
+            reason          TEXT NOT NULL,
+            payload_json    TEXT NOT NULL,
+            sent_at         TEXT NOT NULL
+        )",
+    )
+    .execute(pool)
+    .await?;
+
+    sqlx::query(
+        "CREATE INDEX IF NOT EXISTS idx_analytics_digest_delivery_week_recipient
+         ON analytics_digest_delivery(week_key, recipient_email, status)",
     )
     .execute(pool)
     .await?;
@@ -2828,11 +4059,23 @@ mod tests {
         )
         .ok();
 
-        State(PortalState { db_pool: pool, templates: Arc::new(tera), pdf_generator: None })
+        State(PortalState {
+            db_pool: pool,
+            templates: Arc::new(tera),
+            pdf_generator: None,
+            branding: BrandingConfig::default(),
+            rep_notifications: PortalRepNotificationConfig::default(),
+        })
     }
 
     fn state_with_real_templates(pool: sqlx::SqlitePool) -> State<PortalState> {
-        State(PortalState { db_pool: pool, templates: init_templates(), pdf_generator: None })
+        State(PortalState {
+            db_pool: pool,
+            templates: init_templates(),
+            pdf_generator: None,
+            branding: BrandingConfig::default(),
+            rep_notifications: PortalRepNotificationConfig::default(),
+        })
     }
 
     fn forwarded_headers(ip: &str) -> HeaderMap {
@@ -2853,6 +4096,9 @@ mod tests {
                 approver_name: "Jane Doe".to_string(),
                 approver_email: "jane@acme.com".to_string(),
                 comments: Some("Looks great!".to_string()),
+                auth_method: Some("password".to_string()),
+                biometric_assertion: None,
+                fallback_password: Some("local-test-pass".to_string()),
             }),
         )
         .await
@@ -2915,6 +4161,9 @@ mod tests {
                 approver_name: "  ".to_string(),
                 approver_email: "jane@acme.com".to_string(),
                 comments: None,
+                auth_method: Some("password".to_string()),
+                biometric_assertion: None,
+                fallback_password: Some("local-test-pass".to_string()),
             }),
         )
         .await;
@@ -2925,13 +4174,132 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn approve_quote_allows_legacy_payload_without_auth_method() {
+        let (pool, quote_id, token) = setup().await;
+
+        let result = approve_quote(
+            axum::extract::Path(token),
+            state(pool.clone()),
+            HeaderMap::new(),
+            Json(ApproveRequest {
+                approver_name: "Legacy Approver".to_string(),
+                approver_email: "legacy@example.com".to_string(),
+                comments: None,
+                auth_method: None,
+                biometric_assertion: None,
+                fallback_password: None,
+            }),
+        )
+        .await
+        .expect("legacy approval should continue to succeed");
+
+        assert!(result.0.success);
+        let status: String = sqlx::query_scalar("SELECT status FROM quote WHERE id = ?")
+            .bind(&quote_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch quote status");
+        assert_eq!(status, "approved");
+    }
+
+    #[tokio::test]
+    async fn approve_quote_rejects_unknown_auth_method() {
+        let (pool, _, token) = setup().await;
+
+        let result = approve_quote(
+            axum::extract::Path(token),
+            state(pool),
+            HeaderMap::new(),
+            Json(ApproveRequest {
+                approver_name: "Jane Doe".to_string(),
+                approver_email: "jane@acme.com".to_string(),
+                comments: None,
+                auth_method: Some("magic".to_string()),
+                biometric_assertion: None,
+                fallback_password: None,
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let (status, body) = result.expect_err("unknown auth method must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.error.contains("authMethod"));
+    }
+
+    #[tokio::test]
+    async fn approve_quote_rejects_biometric_without_assertion() {
+        let (pool, _, token) = setup().await;
+
+        let result = approve_quote(
+            axum::extract::Path(token),
+            state(pool),
+            HeaderMap::new(),
+            Json(ApproveRequest {
+                approver_name: "Jane Doe".to_string(),
+                approver_email: "jane@acme.com".to_string(),
+                comments: None,
+                auth_method: Some("biometric".to_string()),
+                biometric_assertion: None,
+                fallback_password: None,
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let (status, body) = result.expect_err("missing biometric assertion must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.error.contains("biometricAssertion"));
+    }
+
+    #[tokio::test]
+    async fn approve_quote_records_biometric_auth_metadata() {
+        let (pool, quote_id, token) = setup().await;
+
+        let result = approve_quote(
+            axum::extract::Path(token),
+            state(pool.clone()),
+            HeaderMap::new(),
+            Json(ApproveRequest {
+                approver_name: "Jane Doe".to_string(),
+                approver_email: "jane@acme.com".to_string(),
+                comments: Some("Biometric flow".to_string()),
+                auth_method: Some("biometric".to_string()),
+                biometric_assertion: Some("assertion-token-123".to_string()),
+                fallback_password: None,
+            }),
+        )
+        .await
+        .expect("biometric approval should succeed");
+
+        assert!(result.0.success);
+        let justification: String = sqlx::query_scalar(
+            "SELECT justification FROM approval_request WHERE quote_id = ? ORDER BY created_at DESC LIMIT 1",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch biometric justification");
+        let metadata: serde_json::Value =
+            serde_json::from_str(&justification).expect("justification should be json");
+        assert_eq!(metadata["auth_method"], serde_json::json!("biometric"));
+        assert_eq!(metadata["biometric_assertion_present"], serde_json::json!(true));
+        assert_eq!(metadata["fallback_password_used"], serde_json::json!(false));
+    }
+
+    #[tokio::test]
     async fn reject_quote_records_rejection_and_updates_status() {
         let (pool, quote_id, token) = setup().await;
 
         let result = reject_quote(
             axum::extract::Path(token.clone()),
             state(pool.clone()),
-            Json(RejectRequest { reason: "Pricing too high for our budget".to_string() }),
+            Json(RejectRequest {
+                reason: "Pricing too high for our budget".to_string(),
+                auth_method: Some("password".to_string()),
+                biometric_assertion: None,
+                fallback_password: Some("local-test-pass".to_string()),
+            }),
         )
         .await
         .expect("should succeed");
@@ -2958,19 +4326,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn reject_quote_rejects_unknown_auth_method() {
+        let (pool, _, token) = setup().await;
+
+        let result = reject_quote(
+            axum::extract::Path(token),
+            state(pool),
+            Json(RejectRequest {
+                reason: "Missing terms".to_string(),
+                auth_method: Some("magic".to_string()),
+                biometric_assertion: None,
+                fallback_password: None,
+            }),
+        )
+        .await;
+
+        assert!(result.is_err());
+        let (status, body) = result.expect_err("unknown auth method should fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.error.contains("authMethod"));
+    }
+
+    #[tokio::test]
     async fn reject_quote_rejects_empty_reason() {
         let (pool, _, token) = setup().await;
 
         let result = reject_quote(
             axum::extract::Path(token),
             state(pool),
-            Json(RejectRequest { reason: "".to_string() }),
+            Json(RejectRequest {
+                reason: "".to_string(),
+                auth_method: Some("password".to_string()),
+                biometric_assertion: None,
+                fallback_password: Some("local-test-pass".to_string()),
+            }),
         )
         .await;
 
         assert!(result.is_err());
         let (status, _) = result.unwrap_err();
         assert_eq!(status, StatusCode::BAD_REQUEST);
+    }
+
+    #[tokio::test]
+    async fn reject_quote_allows_legacy_payload_without_auth_method() {
+        let (pool, quote_id, token) = setup().await;
+
+        let result = reject_quote(
+            axum::extract::Path(token),
+            state(pool.clone()),
+            Json(RejectRequest {
+                reason: "legacy rejection path".to_string(),
+                auth_method: None,
+                biometric_assertion: None,
+                fallback_password: None,
+            }),
+        )
+        .await
+        .expect("legacy rejection should continue to succeed");
+
+        assert!(result.0.success);
+        let status: String = sqlx::query_scalar("SELECT status FROM quote WHERE id = ?")
+            .bind(&quote_id)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch rejected status");
+        assert_eq!(status, "rejected");
     }
 
     #[tokio::test]
@@ -3004,6 +4425,33 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn add_comment_queues_rep_notification_event() {
+        let (pool, quote_id, token) = setup().await;
+
+        let _ = add_comment(
+            axum::extract::Path(token),
+            state(pool.clone()),
+            Json(CommentRequest {
+                text: "Need legal language for cancellation clause.".to_string(),
+                author_name: None,
+                author_email: None,
+                parent_id: None,
+            }),
+        )
+        .await
+        .expect("comment succeeds");
+
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event WHERE quote_id = ? AND event_type = 'portal.rep_notification.queued'",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count queued notifications");
+        assert_eq!(queued, 1);
+    }
+
+    #[tokio::test]
     async fn add_comment_rejects_empty_text() {
         let (pool, _, token) = setup().await;
 
@@ -3034,6 +4482,9 @@ mod tests {
                 approver_name: "Jane".to_string(),
                 approver_email: "jane@test.com".to_string(),
                 comments: None,
+                auth_method: Some("password".to_string()),
+                biometric_assertion: None,
+                fallback_password: Some("local-test-pass".to_string()),
             }),
         )
         .await;
@@ -3056,6 +4507,9 @@ mod tests {
                 approver_name: "Jane Doe".to_string(),
                 approver_email: "jane@acme.com".to_string(),
                 comments: Some("LGTM".to_string()),
+                auth_method: Some("password".to_string()),
+                biometric_assertion: None,
+                fallback_password: Some("local-test-pass".to_string()),
             }),
         )
         .await
@@ -3136,10 +4590,14 @@ mod tests {
         .await
         .expect("seed similar deal");
 
-        let html = view_quote_page(axum::extract::Path(token), state_with_real_templates(pool))
-            .await
-            .expect("render quote page")
-            .0;
+        let html = view_quote_page(
+            axum::extract::Path(token),
+            axum::extract::Query(ViewQuoteParams::default()),
+            state_with_real_templates(pool),
+        )
+        .await
+        .expect("render quote page")
+        .0;
 
         assert!(html.contains("Quote for"));
         assert!(html.contains("Acme Corp"));
@@ -3174,15 +4632,45 @@ mod tests {
         .await
         .expect("update quote to approved");
 
-        let html = view_quote_page(axum::extract::Path(token), state_with_real_templates(pool))
-            .await
-            .expect("render quote page")
-            .0;
+        let html = view_quote_page(
+            axum::extract::Path(token),
+            axum::extract::Query(ViewQuoteParams::default()),
+            state_with_real_templates(pool),
+        )
+        .await
+        .expect("render quote page")
+        .0;
 
         assert!(html.contains("Quote Approved"));
         assert!(html.contains("This quote has been approved."));
         assert!(html.contains("Download PDF"));
         assert!(!html.contains("Quote Actions"));
+    }
+
+    #[tokio::test]
+    async fn view_quote_page_slack_handoff_renders_banner() {
+        let (pool, _quote_id, token) = setup().await;
+
+        let html = view_quote_page(
+            axum::extract::Path(token),
+            axum::extract::Query(ViewQuoteParams {
+                from: Some("slack".to_string()),
+                action: Some("review".to_string()),
+                context_summary: Some("Customer asked to confirm annual commitment scope".to_string()),
+                assumptions_summary: Some("Tax remains assumed at 0% until billing country confirmed".to_string()),
+                next_action: Some("comment".to_string()),
+            }),
+            state_with_real_templates(pool),
+        )
+        .await
+        .expect("render quote page with slack handoff")
+        .0;
+
+        assert!(html.contains("Opened from Slack"));
+        assert!(html.contains("next action:"));
+        assert!(html.contains("comment"));
+        assert!(html.contains("Customer asked to confirm annual commitment scope"));
+        assert!(html.contains("Tax remains assumed at 0% until billing country confirmed"));
     }
 
     #[tokio::test]
@@ -3256,6 +4744,19 @@ mod tests {
         assert!(!html.contains("Pending Approvals"));
     }
 
+    #[tokio::test]
+    async fn approvals_settings_page_renders_with_branding() {
+        let (pool, _quote_id, _token) = setup().await;
+
+        let html = approvals_settings_page(state_with_real_templates(pool))
+            .await
+            .expect("render settings page")
+            .0;
+
+        assert!(html.contains("Quotey Approvals Settings"));
+        assert!(html.contains("Notification Settings"));
+    }
+
     // -----------------------------------------------------------------------
     // Link management tests
     // -----------------------------------------------------------------------
@@ -3270,6 +4771,11 @@ mod tests {
                 quote_id: quote_id.clone(),
                 expires_in_days: Some(7),
                 created_by: Some("rep@acme.com".to_string()),
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
             }),
         )
         .await
@@ -3280,6 +4786,47 @@ mod tests {
         assert!(!resp.token.is_empty());
         assert!(!resp.link_id.is_empty());
         assert!(!resp.expires_at.is_empty());
+        assert_eq!(resp.share_url, format!("/quote/{}", resp.token));
+    }
+
+    #[tokio::test]
+    async fn create_link_preserves_handoff_query_state_in_share_url() {
+        let (pool, quote_id, _token) = setup().await;
+
+        let result = create_link(
+            state(pool),
+            Json(CreateLinkRequest {
+                quote_id,
+                expires_in_days: Some(7),
+                created_by: Some("rep@acme.com".to_string()),
+                from: Some(" Slack ".to_string()),
+                action: Some("Review".to_string()),
+                context_summary: Some("Customer asked for annual prepay options.".to_string()),
+                assumptions_summary: Some("Tax is assumed 0% until billing country is set.".to_string()),
+                next_action: Some("Approve".to_string()),
+            }),
+        )
+        .await
+        .expect("create_link should succeed");
+
+        let resp = result.0;
+        let parsed = reqwest::Url::parse(&format!("https://portal.local{}", resp.share_url))
+            .expect("parse share URL");
+        let pairs =
+            parsed.query_pairs().into_owned().collect::<std::collections::HashMap<String, String>>();
+
+        assert_eq!(parsed.path(), format!("/quote/{}", resp.token));
+        assert_eq!(pairs.get("from").map(String::as_str), Some("slack"));
+        assert_eq!(pairs.get("action").map(String::as_str), Some("review"));
+        assert_eq!(pairs.get("next_action").map(String::as_str), Some("approve"));
+        assert_eq!(
+            pairs.get("context_summary").map(String::as_str),
+            Some("Customer asked for annual prepay options.")
+        );
+        assert_eq!(
+            pairs.get("assumptions_summary").map(String::as_str),
+            Some("Tax is assumed 0% until billing country is set.")
+        );
     }
 
     #[tokio::test]
@@ -3292,6 +4839,11 @@ mod tests {
                 quote_id: "Q-FAKE".to_string(),
                 expires_in_days: None,
                 created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
             }),
         )
         .await;
@@ -3312,6 +4864,11 @@ mod tests {
                 quote_id: quote_id.clone(),
                 expires_in_days: Some(30),
                 created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
             }),
         )
         .await
@@ -3325,6 +4882,11 @@ mod tests {
                 quote_id: quote_id.clone(),
                 expires_in_days: Some(30),
                 created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
             }),
         )
         .await
@@ -3340,12 +4902,82 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn regenerate_link_returns_fresh_token_and_revokes_previous() {
+        let (pool, quote_id, _token) = setup().await;
+
+        let first = create_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest {
+                quote_id: quote_id.clone(),
+                expires_in_days: Some(30),
+                created_by: Some("regen-test".to_string()),
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
+            }),
+        )
+        .await
+        .expect("first link");
+
+        let regenerated = regenerate_link(
+            state(pool.clone()),
+            Json(CreateLinkRequest {
+                quote_id: quote_id.clone(),
+                expires_in_days: Some(45),
+                created_by: Some("regen-test".to_string()),
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
+            }),
+        )
+        .await
+        .expect("regenerated link");
+
+        assert_ne!(first.0.token, regenerated.0.token);
+
+        let revoked: i64 = sqlx::query_scalar("SELECT revoked FROM portal_link WHERE token = ?")
+            .bind(&first.0.token)
+            .fetch_one(&pool)
+            .await
+            .expect("fetch first revoked status");
+        assert_eq!(revoked, 1);
+
+        let links = list_links(axum::extract::Path(quote_id.clone()), state(pool.clone()))
+            .await
+            .expect("list links");
+        assert_eq!(links.0.len(), 1, "only regenerated link should remain active");
+        assert_eq!(links.0[0].token, regenerated.0.token);
+
+        let regen_audit_count: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event WHERE quote_id = ? AND event_type = 'portal.link_regenerated'",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("fetch regenerate audit count");
+        assert!(regen_audit_count >= 1);
+    }
+
+    #[tokio::test]
     async fn revoke_link_succeeds() {
         let (pool, quote_id, _token) = setup().await;
 
         let link = create_link(
             state(pool.clone()),
-            Json(CreateLinkRequest { quote_id, expires_in_days: Some(7), created_by: None }),
+            Json(CreateLinkRequest {
+                quote_id,
+                expires_in_days: Some(7),
+                created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
+            }),
         )
         .await
         .expect("create link");
@@ -3366,7 +4998,16 @@ mod tests {
 
         let link = create_link(
             state(pool.clone()),
-            Json(CreateLinkRequest { quote_id, expires_in_days: Some(7), created_by: None }),
+            Json(CreateLinkRequest {
+                quote_id,
+                expires_in_days: Some(7),
+                created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
+            }),
         )
         .await
         .expect("create link");
@@ -3414,6 +5055,11 @@ mod tests {
                 quote_id: quote_id.clone(),
                 expires_in_days: Some(30),
                 created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
             }),
         )
         .await
@@ -3425,6 +5071,11 @@ mod tests {
                 quote_id: quote_id.clone(),
                 expires_in_days: Some(30),
                 created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
             }),
         )
         .await
@@ -3436,6 +5087,7 @@ mod tests {
         let links = result.0;
         assert_eq!(links.len(), 1, "only the active (non-revoked) link should appear");
         assert_eq!(links[0].token, second.0.token);
+        assert_eq!(links[0].share_url, format!("/quote/{}", links[0].token));
     }
 
     #[tokio::test]
@@ -3448,6 +5100,11 @@ mod tests {
                 quote_id: quote_id.clone(),
                 expires_in_days: Some(7),
                 created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
             }),
         )
         .await
@@ -3464,7 +5121,16 @@ mod tests {
 
         let link = create_link(
             state(pool.clone()),
-            Json(CreateLinkRequest { quote_id, expires_in_days: Some(7), created_by: None }),
+            Json(CreateLinkRequest {
+                quote_id,
+                expires_in_days: Some(7),
+                created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
+            }),
         )
         .await
         .expect("create link");
@@ -3525,6 +5191,11 @@ mod tests {
                 quote_id: quote_id.clone(),
                 expires_in_days: Some(1),
                 created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
             }),
         )
         .await
@@ -3540,7 +5211,16 @@ mod tests {
 
         let active = create_link(
             state(pool.clone()),
-            Json(CreateLinkRequest { quote_id, expires_in_days: Some(1), created_by: None }),
+            Json(CreateLinkRequest {
+                quote_id,
+                expires_in_days: Some(1),
+                created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
+            }),
         )
         .await
         .expect("active link");
@@ -3695,6 +5375,15 @@ mod tests {
                 .await
                 .expect("fetch line_id");
         assert_eq!(line_id, Some("QL-001".to_string()));
+
+        let queued: i64 = sqlx::query_scalar(
+            "SELECT COUNT(*) FROM audit_event WHERE quote_id = ? AND event_type = 'portal.rep_notification.queued'",
+        )
+        .bind(&quote_id)
+        .fetch_one(&pool)
+        .await
+        .expect("count queued line notifications");
+        assert_eq!(queued, 1);
     }
 
     #[tokio::test]
@@ -3799,7 +5488,7 @@ mod tests {
         .await
         .expect("seed line 2");
 
-        let payload = fetch_quote_for_pdf(&pool, &quote_id).await.expect("fetch pdf");
+        let payload = fetch_quote_for_pdf(&pool, &quote_id, "Quotey").await.expect("fetch pdf");
         let lines = payload["lines"].as_array().expect("lines array");
         assert_eq!(lines.len(), 2);
 
@@ -3879,6 +5568,11 @@ mod tests {
                 quote_id: quote_id.clone(),
                 expires_in_days: Some(7),
                 created_by: None,
+                from: None,
+                action: None,
+                context_summary: None,
+                assumptions_summary: None,
+                next_action: None,
             }),
         )
         .await
@@ -4185,7 +5879,7 @@ mod tests {
         let response = portal_manifest().await.into_response();
         let content_type = response
             .headers()
-            .get(CONTENT_TYPE)
+            .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .unwrap_or("");
         assert!(content_type.contains("application/manifest+json"));
@@ -4196,7 +5890,7 @@ mod tests {
         let response = portal_service_worker().await.into_response();
         let content_type = response
             .headers()
-            .get(CONTENT_TYPE)
+            .get(header::CONTENT_TYPE)
             .and_then(|value| value.to_str().ok())
             .unwrap_or("");
         assert!(content_type.contains("application/javascript"));
@@ -4240,7 +5934,7 @@ mod tests {
         .await
         .expect("seed line with NULL subtotal");
 
-        let payload = fetch_quote_for_pdf(&pool, &quote_id).await.expect("fetch pdf");
+        let payload = fetch_quote_for_pdf(&pool, &quote_id, "Quotey").await.expect("fetch pdf");
         let lines = payload["lines"].as_array().expect("lines array");
         assert_eq!(lines.len(), 1);
 
@@ -4307,7 +6001,7 @@ mod tests {
         .await
         .expect("seed line B (100% discount)");
 
-        let payload = fetch_quote_for_pdf(&pool, &quote_id).await.expect("fetch pdf");
+        let payload = fetch_quote_for_pdf(&pool, &quote_id, "Quotey").await.expect("fetch pdf");
         let lines = payload["lines"].as_array().expect("lines array");
         assert_eq!(lines.len(), 2);
 
@@ -4461,6 +6155,7 @@ mod tests {
         // Step 1: View quote page (triggers PRICING_RENDERED funnel event)
         let _ = view_quote_page(
             axum::extract::Path(token.clone()),
+            axum::extract::Query(ViewQuoteParams::default()),
             state_with_real_templates(pool.clone()),
         )
         .await;
@@ -4474,6 +6169,9 @@ mod tests {
                 approver_name: "Regression Tester".to_string(),
                 approver_email: "regtest@example.com".to_string(),
                 comments: Some("LGTM".to_string()),
+                auth_method: Some("password".to_string()),
+                biometric_assertion: None,
+                fallback_password: Some("local-test-pass".to_string()),
             }),
         )
         .await;
@@ -4511,5 +6209,281 @@ mod tests {
             "missing funnel.approval_action event, got: {:?}",
             event_types
         );
+    }
+
+    #[tokio::test]
+    async fn export_quotes_csv_returns_csv_with_headers() {
+        let (pool, _quote_id, _token) = setup().await;
+
+        let resp = export_quotes_csv(
+            axum::extract::Query(ExportQuotesQuery::default()),
+            State(PortalState {
+                db_pool: pool,
+                templates: init_templates(),
+                pdf_generator: None,
+                branding: BrandingConfig::default(),
+                rep_notifications: PortalRepNotificationConfig::default(),
+            }),
+        )
+        .await
+        .expect("export csv");
+
+        let resp = resp.into_response();
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let content_type = resp
+            .headers()
+            .get(header::CONTENT_TYPE)
+            .expect("content-type header")
+            .to_str()
+            .unwrap();
+        assert!(content_type.contains("text/csv"));
+
+        let disposition = resp
+            .headers()
+            .get(header::CONTENT_DISPOSITION)
+            .expect("content-disposition header")
+            .to_str()
+            .unwrap();
+        assert!(disposition.contains("attachment"));
+        assert!(disposition.contains(".csv"));
+
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.expect("read body");
+        let csv_str = String::from_utf8(body.to_vec()).expect("utf8");
+
+        // Should have header row
+        assert!(csv_str.starts_with("quote_id,"));
+        // Should have at least one data row (from setup)
+        let lines: Vec<&str> = csv_str.trim().lines().collect();
+        assert!(lines.len() >= 2, "CSV should have header + at least 1 row, got {}", lines.len());
+    }
+
+    #[tokio::test]
+    async fn export_quotes_csv_respects_column_selection_and_order() {
+        let (pool, _quote_id, _token) = setup().await;
+
+        let resp = export_quotes_csv(
+            axum::extract::Query(ExportQuotesQuery {
+                columns: Some("quote_id,total,status".to_string()),
+                ..ExportQuotesQuery::default()
+            }),
+            State(PortalState {
+                db_pool: pool,
+                templates: init_templates(),
+                pdf_generator: None,
+                branding: BrandingConfig::default(),
+                rep_notifications: PortalRepNotificationConfig::default(),
+            }),
+        )
+        .await
+        .expect("export csv with custom columns")
+        .into_response();
+
+        assert_eq!(resp.status(), StatusCode::OK);
+
+        let body = axum::body::to_bytes(resp.into_body(), 1_000_000).await.expect("read body");
+        let csv_str = String::from_utf8(body.to_vec()).expect("utf8");
+        let mut lines = csv_str.trim().lines();
+        assert_eq!(lines.next().expect("header"), "quote_id,total,status");
+
+        let first_row = lines.next().expect("first data row");
+        let fields: Vec<&str> = first_row.split(',').collect();
+        assert_eq!(fields.len(), 3, "expected exactly 3 selected columns in data row");
+    }
+
+    #[tokio::test]
+    async fn export_quotes_csv_rejects_unknown_columns() {
+        let (pool, _quote_id, _token) = setup().await;
+
+        let result = export_quotes_csv(
+            axum::extract::Query(ExportQuotesQuery {
+                columns: Some("quote_id,totally_not_real".to_string()),
+                ..ExportQuotesQuery::default()
+            }),
+            State(PortalState {
+                db_pool: pool,
+                templates: init_templates(),
+                pdf_generator: None,
+                branding: BrandingConfig::default(),
+                rep_notifications: PortalRepNotificationConfig::default(),
+            }),
+        )
+        .await;
+
+        assert!(result.is_err(), "invalid columns should fail");
+        let (status, Json(error)) = result.err().expect("invalid column error payload");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(error.error.contains("columns"));
+    }
+
+    #[tokio::test]
+    async fn digest_schedule_defaults_then_persists_updates() {
+        let (pool, _quote_id, _token) = setup().await;
+        let state = PortalState {
+            db_pool: pool.clone(),
+            templates: init_templates(),
+            pdf_generator: None,
+            branding: BrandingConfig::default(),
+            rep_notifications: PortalRepNotificationConfig::default(),
+        };
+
+        let initial = get_digest_schedule(State(state.clone())).await.expect("get digest").0;
+        assert!(!initial.enabled);
+        assert_eq!(initial.day_of_week, "monday");
+        assert_eq!(initial.time_utc, "09:00");
+
+        let updated = upsert_digest_schedule(
+            State(state.clone()),
+            Json(DigestScheduleRequest {
+                enabled: true,
+                day_of_week: "wednesday".to_string(),
+                time_utc: "14:30".to_string(),
+                recipient_email: Some("ops@example.com".to_string()),
+            }),
+        )
+        .await
+        .expect("upsert digest")
+        .0;
+        assert!(updated.enabled);
+        assert_eq!(updated.day_of_week, "wednesday");
+        assert_eq!(updated.time_utc, "14:30");
+        assert_eq!(updated.recipient_email.as_deref(), Some("ops@example.com"));
+
+        let loaded = get_digest_schedule(State(state)).await.expect("reload digest").0;
+        assert!(loaded.enabled);
+        assert_eq!(loaded.day_of_week, "wednesday");
+        assert_eq!(loaded.time_utc, "14:30");
+        assert_eq!(loaded.recipient_email.as_deref(), Some("ops@example.com"));
+    }
+
+    #[tokio::test]
+    async fn digest_schedule_rejects_invalid_time_and_missing_email_when_enabled() {
+        let (pool, _quote_id, _token) = setup().await;
+        let state = PortalState {
+            db_pool: pool,
+            templates: init_templates(),
+            pdf_generator: None,
+            branding: BrandingConfig::default(),
+            rep_notifications: PortalRepNotificationConfig::default(),
+        };
+
+        let invalid_time = upsert_digest_schedule(
+            State(state.clone()),
+            Json(DigestScheduleRequest {
+                enabled: false,
+                day_of_week: "monday".to_string(),
+                time_utc: "99:99".to_string(),
+                recipient_email: None,
+            }),
+        )
+        .await;
+        assert!(invalid_time.is_err());
+        let (status, body) = invalid_time.expect_err("invalid time must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.error.contains("time_utc"));
+
+        let missing_email = upsert_digest_schedule(
+            State(state),
+            Json(DigestScheduleRequest {
+                enabled: true,
+                day_of_week: "monday".to_string(),
+                time_utc: "09:00".to_string(),
+                recipient_email: None,
+            }),
+        )
+        .await;
+        assert!(missing_email.is_err());
+        let (status, body) = missing_email.expect_err("missing email must fail");
+        assert_eq!(status, StatusCode::BAD_REQUEST);
+        assert!(body.error.contains("recipient_email"));
+    }
+
+    #[tokio::test]
+    async fn run_digest_dispatch_skips_when_schedule_is_not_due() {
+        let (pool, _quote_id, _token) = setup().await;
+        let state = PortalState {
+            db_pool: pool,
+            templates: init_templates(),
+            pdf_generator: None,
+            branding: BrandingConfig::default(),
+            rep_notifications: PortalRepNotificationConfig::default(),
+        };
+
+        let today = weekday_name(Utc::now().weekday()).to_string();
+        let not_today = DIGEST_DAYS
+            .iter()
+            .find(|day| **day != today)
+            .expect("an alternate weekday must exist")
+            .to_string();
+
+        let _ = upsert_digest_schedule(
+            State(state.clone()),
+            Json(DigestScheduleRequest {
+                enabled: true,
+                day_of_week: not_today,
+                time_utc: "00:00".to_string(),
+                recipient_email: Some("ops@example.com".to_string()),
+            }),
+        )
+        .await
+        .expect("save digest schedule");
+
+        let response =
+            run_digest_dispatch(State(state), Json(DigestDispatchRequest { force: false }))
+                .await
+                .expect("dispatch response");
+
+        assert!(!response.0.executed);
+        assert_eq!(response.0.status, "skipped");
+        assert!(response.0.reason.contains("not due"));
+    }
+
+    #[tokio::test]
+    async fn run_digest_dispatch_force_records_delivery_attempt() {
+        let (pool, _quote_id, _token) = setup().await;
+        let state = PortalState {
+            db_pool: pool.clone(),
+            templates: init_templates(),
+            pdf_generator: None,
+            branding: BrandingConfig::default(),
+            rep_notifications: PortalRepNotificationConfig::default(),
+        };
+
+        let today = weekday_name(Utc::now().weekday()).to_string();
+        let _ = upsert_digest_schedule(
+            State(state.clone()),
+            Json(DigestScheduleRequest {
+                enabled: true,
+                day_of_week: today,
+                time_utc: "00:00".to_string(),
+                recipient_email: Some("ops@example.com".to_string()),
+            }),
+        )
+        .await
+        .expect("save digest schedule");
+
+        let previous_webhook = std::env::var("QUOTEY_ANALYTICS_DIGEST_WEBHOOK_URL").ok();
+        std::env::set_var("QUOTEY_ANALYTICS_DIGEST_WEBHOOK_URL", "http://127.0.0.1:1/unreachable");
+
+        let response =
+            run_digest_dispatch(State(state), Json(DigestDispatchRequest { force: true }))
+                .await
+                .expect("forced dispatch response");
+
+        if let Some(value) = previous_webhook {
+            std::env::set_var("QUOTEY_ANALYTICS_DIGEST_WEBHOOK_URL", value);
+        } else {
+            std::env::remove_var("QUOTEY_ANALYTICS_DIGEST_WEBHOOK_URL");
+        }
+
+        assert!(!response.0.executed);
+        assert_eq!(response.0.status, "failed");
+
+        let delivery_count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM analytics_digest_delivery")
+                .fetch_one(&pool)
+                .await
+                .expect("count digest deliveries");
+        assert_eq!(delivery_count, 1);
     }
 }

@@ -31,3 +31,12 @@ callback_base_url = "https://crm.example.internal"
 # hubspot_client_id = "..."
 # hubspot_client_secret = "..."
 # webhook_secret = "..."
+
+[mcp.auth]
+enabled = false
+rate_limit_window_secs = 60
+
+[[mcp.auth.api_keys]]
+key = "${MCP_API_KEY}"
+name = "agent-default"
+requests_per_minute = 60

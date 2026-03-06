@@ -151,6 +151,54 @@ Validation is fail-fast and actionable. Startup fails if critical fields are inv
 
 Reference file: `config/quotey.example.toml`.
 
+## MCP Auth and Rate Limits
+
+`quotey-mcp` supports API-key auth and request throttling via environment variables:
+
+- `MCP_API_KEY`: enable single-key mode.
+- `MCP_API_KEYS`: JSON array for multi-key mode, for example:
+  `[{\"key\":\"agent-key\",\"name\":\"Agent\",\"requests_per_minute\":120}]`
+- `MCP_RATE_LIMIT_WINDOW_SECS`: auth rate-limit window in seconds (default: `60`).
+- `MCP_DEFAULT_REQUESTS_PER_MINUTE`: default RPM for `MCP_API_KEY` single-key mode (default: `60`).
+
+Tool calls can supply keys through MCP request metadata using:
+
+- `_meta.api_key`
+- `_meta.x-api-key` (or `_meta.x_api_key`)
+- `_meta.authorization` (`Bearer <token>`, `ApiKey <token>`, `Token <token>`, or raw key)
+
+When rate limits are exceeded, MCP errors include `retry_after` and `http_status: 429` in error data.
+
+AI-agent smoke workflow test (catalog -> quote create/price -> approval -> PDF):
+
+```bash
+cargo test -p quotey-mcp test_ai_agent_quote_workflow_smoke -- --nocapture
+```
+
+## CRM Sync Monitoring API
+
+`quotey-server` exposes CRM sync observability endpoints for monitoring and recovery:
+
+- `GET /api/v1/crm/events` - sync history log with filters (`provider`, `direction`, `status`, `quote_id`)
+- `GET /api/v1/crm/events/stats` - aggregate counts by status/provider/direction plus 24h success/failure totals
+- `GET /api/v1/crm/events/alerts` - actionable alert feed (failed spikes, stale retries, retry-budget pressure)
+- `POST /api/v1/crm/events/{event_id}/retry` - deterministic single-event replay
+- `POST /api/v1/crm/sync/batch` and `POST /api/v1/crm/sync/inbound/batch` - bounded batch replay
+
+The alerts feed is designed for Slack/operator surfaces and includes sample event IDs and suggested recovery actions.
+
+Slack operator shortcut:
+- `/quotey crm-status [failed=<n> stale=<n> near=<n>]` renders a compact CRM sync alert summary card with deterministic recovery actions.
+
+## Portal Approval Auth
+
+Mobile approval actions now support explicit auth method metadata (`biometric` or `password`) on
+`POST /quote/{token}/approve` and `POST /quote/{token}/reject`.
+
+- Legacy payloads without `authMethod` remain accepted for compatibility.
+- Set `QUOTEY_PORTAL_APPROVAL_FALLBACK_PASSWORD` to enforce server-side verification when `authMethod=password`.
+- Use `/settings` in the portal to register Face ID / Touch ID on-device and manage fallback credentials.
+
 ## Troubleshooting
 
 ### QA Gate Triage (Local + CI)

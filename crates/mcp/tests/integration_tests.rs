@@ -1447,3 +1447,152 @@ async fn test_audit_trail_approval_tools() -> TestResult {
 
     Ok(())
 }
+
+// ============================================================================
+// AI Agent Workflow Smoke Test
+// ============================================================================
+
+#[tokio::test]
+async fn test_ai_agent_quote_workflow_smoke() -> TestResult {
+    let pool = setup_pool().await?;
+    seed_product(&pool, "PROD-AI-1", "SKU-AI-1", "AI Workflow Core", 2500).await?;
+    seed_product(&pool, "PROD-AI-2", "SKU-AI-2", "AI Workflow Add-on", 1200).await?;
+
+    let server = QuoteyMcpServer::new(pool.clone());
+
+    // 1) Agent searches catalog
+    let search_output = server
+        .catalog_search(rmcp::handler::server::wrapper::Parameters(
+            quotey_mcp::server::CatalogSearchInput {
+                query: "AI Workflow".to_string(),
+                category: None,
+                active_only: true,
+                limit: 10,
+                page: 1,
+            },
+        ))
+        .await;
+    let search_parsed = parse_output(&search_output);
+    assert!(search_parsed.get("error").is_none(), "catalog search failed: {search_parsed}");
+    let first_product_id = search_parsed
+        .get("items")
+        .and_then(|v| v.as_array())
+        .and_then(|items| items.first())
+        .and_then(|item| item.get("id"))
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "catalog search returned no products".to_string())?
+        .to_string();
+
+    // 2) Agent creates quote
+    let create_output = server
+        .quote_create(rmcp::handler::server::wrapper::Parameters(
+            quotey_mcp::server::QuoteCreateInput {
+                account_id: "ACCT-AI-SMOKE".to_string(),
+                deal_id: Some("DEAL-AI-SMOKE".to_string()),
+                currency: "USD".to_string(),
+                term_months: Some(12),
+                start_date: None,
+                notes: Some("AI workflow smoke test".to_string()),
+                line_items: vec![quotey_mcp::server::LineItemInput {
+                    product_id: first_product_id,
+                    quantity: 4,
+                    discount_pct: 0.0,
+                    attributes: None,
+                    notes: Some("line added by agent flow".to_string()),
+                }],
+                idempotency_key: Some("ai-workflow-smoke".to_string()),
+            },
+        ))
+        .await;
+    let create_parsed = parse_output(&create_output);
+    assert!(create_parsed.get("error").is_none(), "quote create failed: {create_parsed}");
+    let quote_id = create_parsed
+        .get("quote_id")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "quote_create missing quote_id".to_string())?
+        .to_string();
+
+    // 3) Agent runs pricing with discount request
+    let price_output = server
+        .quote_price(rmcp::handler::server::wrapper::Parameters(
+            quotey_mcp::server::QuotePriceInput {
+                quote_id: quote_id.clone(),
+                requested_discount_pct: 12.5,
+            },
+        ))
+        .await;
+    let price_parsed = parse_output(&price_output);
+    assert!(price_parsed.get("error").is_none(), "quote price failed: {price_parsed}");
+
+    // 4) Agent checks approval status before request
+    let status_before_output = server
+        .approval_status(rmcp::handler::server::wrapper::Parameters(
+            quotey_mcp::server::ApprovalStatusInput { quote_id: quote_id.clone() },
+        ))
+        .await;
+    let status_before_parsed = parse_output(&status_before_output);
+    assert!(
+        status_before_parsed.get("error").is_none(),
+        "approval status (pre-request) failed: {status_before_parsed}"
+    );
+
+    // 5) Agent requests approval
+    let request_output = server
+        .approval_request(rmcp::handler::server::wrapper::Parameters(
+            quotey_mcp::server::ApprovalRequestInput {
+                quote_id: quote_id.clone(),
+                justification: "Agent workflow smoke approval request".to_string(),
+                approver_role: Some("manager".to_string()),
+            },
+        ))
+        .await;
+    let request_parsed = parse_output(&request_output);
+    assert!(request_parsed.get("error").is_none(), "approval request failed: {request_parsed}");
+
+    // 6) Agent verifies pending queue visibility
+    let pending_output = server
+        .approval_pending(rmcp::handler::server::wrapper::Parameters(
+            quotey_mcp::server::ApprovalPendingInput {
+                approver_role: Some("manager".to_string()),
+                limit: 20,
+            },
+        ))
+        .await;
+    let pending_parsed = parse_output(&pending_output);
+    assert!(pending_parsed.get("error").is_none(), "approval pending failed: {pending_parsed}");
+
+    // 7) Agent requests PDF artifact
+    let pdf_output = server
+        .quote_pdf(rmcp::handler::server::wrapper::Parameters(quotey_mcp::server::QuotePdfInput {
+            quote_id: quote_id.clone(),
+            template: "detailed".to_string(),
+        }))
+        .await;
+    let pdf_parsed = parse_output(&pdf_output);
+    if pdf_parsed.get("error").is_some() {
+        assert_eq!(error_code(&pdf_parsed), Some("INTERNAL_ERROR"));
+    } else {
+        assert_eq!(pdf_parsed.get("quote_id").and_then(|v| v.as_str()), Some(quote_id.as_str()));
+    }
+
+    // 8) Verify core audit trail footprint across the workflow
+    for event_type in [
+        "mcp.catalog_search.invoked",
+        "mcp.quote_create.invoked",
+        "mcp.quote_price.invoked",
+        "mcp.approval_status.invoked",
+        "mcp.approval_request.invoked",
+        "mcp.approval_pending.invoked",
+        "mcp.quote_pdf.invoked",
+    ] {
+        let count: i64 =
+            sqlx::query_scalar("SELECT COUNT(*) FROM audit_event WHERE event_type = ?")
+                .bind(event_type)
+                .fetch_one(&pool)
+                .await
+                .map_err(|e| format!("audit count for {event_type}: {e}"))?;
+        assert!(count > 0, "expected at least one audit event for {event_type}");
+    }
+
+    Ok(())
+}

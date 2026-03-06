@@ -1,7 +1,19 @@
+use std::sync::Arc;
+
+use chrono::Utc;
 use quotey_agent::{guardrails::GuardrailPolicy, runtime::AgentRuntime};
 use quotey_core::config::{AppConfig, ConfigError, LoadOptions};
+use quotey_core::suggestions::{SuggestionFeedback, SuggestionFeedbackEvent};
+use quotey_db::repositories::{SqlSuggestionFeedbackRepository, SuggestionFeedbackRepository};
 use quotey_db::{connect_with_settings, migrations, DbPool};
-use quotey_slack::socket::SocketModeRunner;
+use quotey_slack::commands::NoopQuoteCommandService;
+use quotey_slack::events::{
+    BlockActionHandler, EventDispatcher, EventHandlerError, NoopBlockActionService,
+    NoopReactionApprovalService, NoopThreadMessageService, ReactionAddedHandler,
+    SlashCommandHandler, SuggestionFeedbackRecorder, SuggestionShownRecord,
+    SuggestionShownRecorder, ThreadMessageHandler,
+};
+use quotey_slack::socket::{NoopSocketTransport, ReconnectPolicy, SocketModeRunner};
 use thiserror::Error;
 use tracing::info;
 
@@ -20,6 +32,85 @@ pub enum BootstrapError {
     DatabaseConnect(#[source] sqlx::Error),
     #[error("database migration failed: {0}")]
     Migration(#[source] sqlx::migrate::MigrateError),
+}
+
+#[derive(Clone)]
+struct DbSuggestionFeedbackRecorder {
+    pool: DbPool,
+}
+
+#[async_trait::async_trait]
+impl SuggestionFeedbackRecorder for DbSuggestionFeedbackRecorder {
+    async fn record_feedback(
+        &self,
+        event: SuggestionFeedbackEvent,
+    ) -> Result<(), EventHandlerError> {
+        let repo = SqlSuggestionFeedbackRepository::new(self.pool.clone());
+        match event {
+            SuggestionFeedbackEvent::Added { request_id, product_id, .. } => {
+                repo.record_added(&request_id, &product_id).await.map_err(|error| {
+                    EventHandlerError::BlockAction(format!(
+                        "failed to persist suggestion-added feedback: {error}"
+                    ))
+                })?;
+            }
+            SuggestionFeedbackEvent::Clicked { request_id, product_id } => {
+                repo.record_clicked(&request_id, &product_id).await.map_err(|error| {
+                    EventHandlerError::BlockAction(format!(
+                        "failed to persist suggestion-clicked feedback: {error}"
+                    ))
+                })?;
+            }
+            SuggestionFeedbackEvent::Hidden { request_id, product_id } => {
+                repo.record_hidden(&request_id, &product_id).await.map_err(|error| {
+                    EventHandlerError::BlockAction(format!(
+                        "failed to persist suggestion-hidden feedback: {error}"
+                    ))
+                })?;
+            }
+        }
+        Ok(())
+    }
+}
+
+#[async_trait::async_trait]
+impl SuggestionShownRecorder for DbSuggestionFeedbackRecorder {
+    async fn record_shown(
+        &self,
+        records: Vec<SuggestionShownRecord>,
+    ) -> Result<(), EventHandlerError> {
+        if records.is_empty() {
+            return Ok(());
+        }
+
+        let feedbacks = records
+            .into_iter()
+            .map(|record| SuggestionFeedback {
+                id: format!("{}:{}", record.request_id, record.product_id),
+                request_id: record.request_id,
+                customer_id: record.customer_hint,
+                product_id: record.product_id,
+                product_sku: record.product_sku,
+                score: record.score.unwrap_or(0.0),
+                confidence: record.confidence.unwrap_or_else(|| "Unknown".to_owned()),
+                category: record.category_description.unwrap_or_else(|| "Suggestion".to_owned()),
+                quote_id: record.quote_id,
+                suggested_at: Utc::now(),
+                was_shown: true,
+                was_clicked: false,
+                was_added_to_quote: false,
+                was_hidden: false,
+                context: None,
+            })
+            .collect();
+
+        let repo = SqlSuggestionFeedbackRepository::new(self.pool.clone());
+        repo.record_shown(feedbacks).await.map_err(|error| {
+            EventHandlerError::BlockAction(format!(
+                "failed to persist suggestion-shown feedback: {error}"
+            ))
+        })
+    }
 }
 
 /// Bootstrap with a pre-loaded config - avoids double config loading
@@ -68,12 +159,34 @@ async fn bootstrap_from_config(config: AppConfig) -> Result<Application, Bootstr
         "database migrations applied"
     );
 
+    let feedback_recorder = DbSuggestionFeedbackRecorder { pool: db_pool.clone() };
+    let dispatcher = build_slack_dispatcher(feedback_recorder);
+    let slack_runner = SocketModeRunner::new(
+        Arc::new(NoopSocketTransport),
+        dispatcher,
+        ReconnectPolicy::default(),
+    );
+
     Ok(Application {
         config,
         db_pool,
         agent_runtime: AgentRuntime::new(GuardrailPolicy::default()),
-        slack_runner: SocketModeRunner::default(),
+        slack_runner,
     })
+}
+
+fn build_slack_dispatcher(feedback_recorder: DbSuggestionFeedbackRecorder) -> EventDispatcher {
+    let mut dispatcher = EventDispatcher::new();
+    dispatcher.register(SlashCommandHandler::with_shown_recorder(
+        NoopQuoteCommandService,
+        feedback_recorder.clone(),
+    ));
+    dispatcher.register(ThreadMessageHandler::new(NoopThreadMessageService::new()));
+    dispatcher.register(ReactionAddedHandler::new(NoopReactionApprovalService));
+    dispatcher.register(BlockActionHandler::new(NoopBlockActionService::with_feedback_recorder(
+        feedback_recorder,
+    )));
+    dispatcher
 }
 
 #[cfg(test)]

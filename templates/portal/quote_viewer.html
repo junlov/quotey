@@ -28,7 +28,7 @@
             --bg-elevated: #f8fafc;
             --text-primary: #0f172a;
             --text-secondary: #475569;
-            --text-tertiary: #94a3b8;
+            --text-tertiary: #64748b;
             --border-color: #e2e8f0;
             --border-light: #f1f5f9;
             --shadow-sm: 0 1px 2px rgba(0, 0, 0, 0.04);
@@ -159,9 +159,9 @@
             background: currentColor;
         }
 
-        .status-draft { background: var(--warning-light); color: #b45309; }
+        .status-draft { background: var(--warning-light); color: #92400e; }
         .status-sent { background: var(--info-light); color: #1d4ed8; }
-        .status-pending { background: var(--warning-light); color: #b45309; }
+        .status-pending { background: var(--warning-light); color: #92400e; }
         .status-approved { background: var(--success-light); color: #047857; }
         .status-declined { background: var(--danger-light); color: #b91c1c; }
         .status-expired { background: var(--bg-elevated); color: var(--text-tertiary); }
@@ -1352,6 +1352,43 @@
             }
         }
 
+        /* ========== HANDOFF BANNER ========== */
+        .handoff-banner {
+            background: var(--info-light);
+            border-bottom: 1px solid #93c5fd;
+            padding: 10px 24px;
+            display: flex;
+            align-items: flex-start;
+            gap: 8px;
+            font-size: 14px;
+            color: #1e40af;
+        }
+
+        .handoff-banner svg {
+            flex-shrink: 0;
+            width: 18px;
+            height: 18px;
+        }
+
+        .handoff-banner-content {
+            display: grid;
+            gap: 6px;
+        }
+
+        .handoff-banner-summary {
+            margin: 0;
+        }
+
+        .handoff-banner-meta {
+            margin: 0;
+            color: #1d4ed8;
+            font-size: 13px;
+        }
+
+        .handoff-banner-meta strong {
+            color: #1e3a8a;
+        }
+
         /* ========== HIGH CONTRAST ========== */
         @media (prefers-contrast: high) {
             :root {
@@ -1377,6 +1414,28 @@
             </div>
         </div>
     </header>
+
+    {% if from is defined and from == "slack" %}
+    <div class="handoff-banner" role="status">
+        <svg aria-hidden="true" fill="none" stroke="currentColor" viewBox="0 0 24 24"><path stroke-linecap="round" stroke-linejoin="round" stroke-width="2" d="M13 16h-1v-4h-1m1-4h.01M21 12a9 9 0 11-18 0 9 9 0 0118 0z"/></svg>
+        <div class="handoff-banner-content">
+            <p class="handoff-banner-summary">
+                Opened from Slack
+                {% if next_action is defined %}
+                    &mdash; next action: <strong>{{ next_action }}</strong>
+                {% elif action is defined %}
+                    &mdash; suggested action: <strong>{{ action }}</strong>
+                {% endif %}
+            </p>
+            {% if handoff_context_summary is defined %}
+            <p class="handoff-banner-meta"><strong>Context:</strong> {{ handoff_context_summary }}</p>
+            {% endif %}
+            {% if handoff_assumptions_summary is defined %}
+            <p class="handoff-banner-meta"><strong>Assumptions:</strong> {{ handoff_assumptions_summary }}</p>
+            {% endif %}
+        </div>
+    </div>
+    {% endif %}
 
     <!-- Hero Section -->
     <section class="hero-section">
@@ -2091,8 +2150,8 @@
             
             const titles = {
                 success: 'Success',
-                error: 'Error',
-                warning: 'Warning',
+                error: 'Something went wrong',
+                warning: 'Heads up',
                 info: 'Info'
             };
             
@@ -2118,19 +2177,24 @@
         }
 
         // Modal functions
+        let _lastModalTrigger = null;
+
         function openApproveModal() {
+            _lastModalTrigger = document.activeElement;
             document.getElementById('approveModal').classList.add('active');
             document.getElementById('approverName').focus();
             document.body.style.overflow = 'hidden';
         }
 
         function openRejectModal() {
+            _lastModalTrigger = document.activeElement;
             document.getElementById('rejectModal').classList.add('active');
             document.getElementById('rejectionReason').focus();
             document.body.style.overflow = 'hidden';
         }
 
         function openAssumptionsModal() {
+            _lastModalTrigger = document.activeElement;
             document.getElementById('assumptionsModal').classList.add('active');
             document.getElementById('taxRate').focus();
             document.body.style.overflow = 'hidden';
@@ -2158,6 +2222,7 @@
         function closeModal(modalId) {
             document.getElementById(modalId).classList.remove('active');
             document.body.style.overflow = '';
+            if (_lastModalTrigger) { _lastModalTrigger.focus(); _lastModalTrigger = null; }
         }
 
         // Toggle pricing rationale panel
@@ -2218,12 +2283,12 @@
                 } else {
                     const errorMsg = data.recovery_hint 
                         ? `${data.message || 'Error'} ${data.recovery_hint}` 
-                        : (data.message || 'Failed to approve quote. Please try again.');
+                        : (data.message || 'Could not approve this quote. Reload the page and try again.');
                     showToast(errorMsg, 'error');
                 }
             } catch (error) {
-                console.error('Error:', error);
-                showToast('Connection error. Please check your network and try again.', 'error');
+                console.error('Approval error:', error);
+                showToast('Unable to reach the server. Check your connection and try again.', 'error');
             } finally {
                 setLoading(submitBtn, false);
             }
@@ -2257,12 +2322,12 @@
                 } else {
                     const errorMsg = data.recovery_hint 
                         ? `${data.message || 'Error'} ${data.recovery_hint}` 
-                        : (data.message || 'Failed to submit response. Please try again.');
+                        : (data.message || 'Could not submit your response. Reload the page and try again.');
                     showToast(errorMsg, 'error');
                 }
             } catch (error) {
-                console.error('Error:', error);
-                showToast('Connection error. Please check your network and try again.', 'error');
+                console.error('Rejection error:', error);
+                showToast('Unable to reach the server. Check your connection and try again.', 'error');
             } finally {
                 setLoading(submitBtn, false);
             }
@@ -2318,12 +2383,12 @@
                 } else {
                     const errorMsg = data.recovery_hint 
                         ? `${data.message || 'Error'} ${data.recovery_hint}` 
-                        : (data.message || 'Failed to post comment. Please try again.');
+                        : (data.message || 'Could not post your comment. Check your connection and try again.');
                     showToast(errorMsg, 'error');
                 }
             } catch (error) {
-                console.error('Error:', error);
-                showToast('Connection error. Please check your network and try again.', 'error');
+                console.error('Comment error:', error);
+                showToast('Unable to reach the server. Check your connection and try again.', 'error');
             } finally {
                 setLoading(submitBtn, false);
             }
@@ -2370,12 +2435,12 @@
                 } else {
                     const errorMsg = data.recovery_hint 
                         ? `${data.message || 'Error'} ${data.recovery_hint}` 
-                        : (data.message || 'Failed to update assumptions. Please try again.');
+                        : (data.message || 'Could not update the quote assumptions. Reload the page and try again.');
                     showToast(errorMsg, 'error');
                 }
             } catch (error) {
-                console.error('Error:', error);
-                showToast('Connection error. Please check your network and try again.', 'error');
+                console.error('Assumptions error:', error);
+                showToast('Unable to reach the server. Check your connection and try again.', 'error');
             } finally {
                 setLoading(submitBtn, false);
             }
@@ -2414,6 +2479,29 @@
         window.addEventListener('online', () => {
             showToast('You are back online!', 'success');
         });
+
+        // Slack-to-portal auto-scroll: scroll to relevant section based on preserved handoff action
+        {% if handoff_action is defined %}
+        (function() {
+            var targets = {
+                'approve': 'approveModal',
+                'review': 'pricingRationaleCard',
+                'comment': 'comments-heading',
+            };
+            var target = targets['{{ handoff_action }}'];
+            if (target) {
+                var el = document.getElementById(target);
+                if (el) {
+                    {% if handoff_action == "approve" %}
+                    // For approve action, open the modal directly.
+                    setTimeout(function() { openApproveModal(); }, 300);
+                    {% else %}
+                    setTimeout(function() { el.scrollIntoView({ behavior: 'smooth', block: 'center' }); }, 300);
+                    {% endif %}
+                }
+            }
+        })();
+        {% endif %}
     </script>
 </body>
 </html>

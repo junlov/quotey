@@ -1350,6 +1350,9 @@
             if (dateRange === 'custom' && startDate && endDate) {
                 params.set('start', startDate);
                 params.set('end', endDate);
+            } else if (dateRange === 'custom') {
+                showError('Choose both start and end dates before exporting a custom range.');
+                return;
             } else {
                 params.set('days', dateRange);
             }

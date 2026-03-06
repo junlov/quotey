@@ -1792,6 +1792,7 @@ dependencies = [
  "thiserror",
  "tokio",
  "tokio-test",
+ "toml",
  "tracing",
  "tracing-subscriber",
  "uuid",
@@ -1802,6 +1803,7 @@ name = "quotey-server"
 version = "0.1.2"
 dependencies = [
  "anyhow",
+ "async-trait",
  "axum",
  "chrono",
  "quotey-agent",

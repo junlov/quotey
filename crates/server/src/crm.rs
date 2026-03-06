@@ -43,6 +43,9 @@ const CRM_SYNC_MAX_RETRY_DELAY_SECONDS: i64 = 3600;
 const CRM_INBOUND_DEDUPE_WINDOW_MINUTES: i64 = 30;
 const CRM_SYNC_OPERATION_KIND: &str = "crm.quote_sync";
 const CRM_SYNC_WORKER_ID: &str = "crm-worker";
+const CRM_SYNC_ALERT_SAMPLE_LIMIT: i64 = 5;
+const CRM_SYNC_FAILED_CRITICAL_THRESHOLD: i64 = 10;
+const CRM_SYNC_STALE_RETRY_MINUTES: i64 = 30;
 
 #[derive(Clone, Debug)]
 struct CrmRuntimeConfig {
@@ -708,6 +711,31 @@ struct SyncEventStatsResponse {
     success_last_24h: i64,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+enum SyncAlertSeverity {
+    Info,
+    Warning,
+    Critical,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncEventAlert {
+    severity: SyncAlertSeverity,
+    code: String,
+    message: String,
+    affected_events: i64,
+    sample_event_ids: Vec<String>,
+    suggested_action: Option<String>,
+}
+
+#[derive(Debug, Serialize)]
+struct SyncEventAlertsResponse {
+    generated_at: String,
+    healthy: bool,
+    alerts: Vec<SyncEventAlert>,
+}
+
 #[derive(Debug, Deserialize)]
 struct SyncEventsQuery {
     #[serde(default)]
@@ -1042,6 +1070,7 @@ pub fn router(db_pool: DbPool, config: CrmConfig) -> Router {
         .route("/api/v1/crm/mappings", get(list_mappings).post(upsert_mappings))
         .route("/api/v1/crm/events", get(list_sync_events))
         .route("/api/v1/crm/events/stats", get(sync_event_stats))
+        .route("/api/v1/crm/events/alerts", get(sync_event_alerts))
         .route("/api/v1/crm/events/{event_id}/retry", post(retry_sync_event))
         .route("/api/v1/crm/status", get(crm_status))
         .route("/api/v1/crm/webhook/{provider}", post(webhook_ingest))
@@ -2480,6 +2509,174 @@ async fn sync_event_stats(
     }))
 }
 
+async fn sync_event_alerts(
+    State(state): State<CrmState>,
+) -> Result<Json<SyncEventAlertsResponse>, (StatusCode, Json<CrmError>)> {
+    crm_state_guard(&HeaderMap::new(), &state, None, false).await?;
+
+    let now = Utc::now();
+    let cutoff_24h = (now - Duration::hours(24)).to_rfc3339();
+    let stale_retry_cutoff = (now - Duration::minutes(CRM_SYNC_STALE_RETRY_MINUTES)).to_rfc3339();
+
+    let failed_last_24h: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)\n         FROM crm_sync_event\n         WHERE status = 'failed' AND updated_at >= ?",
+    )
+    .bind(&cutoff_24h)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    let stale_retrying: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)\n         FROM crm_sync_event\n         WHERE status = 'retrying' AND updated_at <= ? AND attempts < ?",
+    )
+    .bind(&stale_retry_cutoff)
+    .bind(MAX_SYNC_ATTEMPTS)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    let near_retry_limit: i64 = sqlx::query_scalar(
+        "SELECT COUNT(*)\n         FROM crm_sync_event\n         WHERE status IN ('queued', 'failed', 'retrying', 'skipped')\n           AND attempts = ?",
+    )
+    .bind(MAX_SYNC_ATTEMPTS - 1)
+    .fetch_one(&state.db_pool)
+    .await
+    .map_err(db_error)?;
+
+    let mut alerts = Vec::new();
+
+    if failed_last_24h > 0 {
+        let severity = if failed_last_24h >= CRM_SYNC_FAILED_CRITICAL_THRESHOLD {
+            SyncAlertSeverity::Critical
+        } else {
+            SyncAlertSeverity::Warning
+        };
+        let sample_event_ids =
+            fetch_recent_failed_event_ids(&state, &cutoff_24h, CRM_SYNC_ALERT_SAMPLE_LIMIT).await?;
+        alerts.push(SyncEventAlert {
+            severity,
+            code: "failed_events_24h".to_string(),
+            message: format!(
+                "{} CRM sync event(s) failed in the last 24 hours.",
+                failed_last_24h
+            ),
+            affected_events: failed_last_24h,
+            sample_event_ids,
+            suggested_action: Some(
+                "Inspect /api/v1/crm/events?status=failed then replay with POST /api/v1/crm/events/{event_id}/retry or POST /api/v1/crm/sync/batch."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if stale_retrying > 0 {
+        let sample_event_ids = fetch_stale_retrying_event_ids(
+            &state,
+            &stale_retry_cutoff,
+            MAX_SYNC_ATTEMPTS,
+            CRM_SYNC_ALERT_SAMPLE_LIMIT,
+        )
+        .await?;
+        alerts.push(SyncEventAlert {
+            severity: SyncAlertSeverity::Warning,
+            code: "stale_retrying_events".to_string(),
+            message: format!(
+                "{} CRM sync event(s) have been retrying for over {} minutes.",
+                stale_retrying, CRM_SYNC_STALE_RETRY_MINUTES
+            ),
+            affected_events: stale_retrying,
+            sample_event_ids,
+            suggested_action: Some(
+                "Check provider connectivity/token health, then run a targeted retry for affected events."
+                    .to_string(),
+            ),
+        });
+    }
+
+    if near_retry_limit > 0 {
+        let sample_event_ids = fetch_retry_budget_event_ids(
+            &state,
+            MAX_SYNC_ATTEMPTS - 1,
+            CRM_SYNC_ALERT_SAMPLE_LIMIT,
+        )
+        .await?;
+        alerts.push(SyncEventAlert {
+            severity: SyncAlertSeverity::Warning,
+            code: "retry_budget_exhausting".to_string(),
+            message: format!(
+                "{} CRM sync event(s) are one attempt away from terminal failure.",
+                near_retry_limit
+            ),
+            affected_events: near_retry_limit,
+            sample_event_ids,
+            suggested_action: Some(
+                "Prioritize manual replay now to avoid exhausting retry budget.".to_string(),
+            ),
+        });
+    }
+
+    if alerts.is_empty() {
+        alerts.push(SyncEventAlert {
+            severity: SyncAlertSeverity::Info,
+            code: "sync_healthy".to_string(),
+            message: "No active CRM sync alerts.".to_string(),
+            affected_events: 0,
+            sample_event_ids: Vec::new(),
+            suggested_action: None,
+        });
+    }
+
+    let healthy = !alerts.iter().any(|alert| alert.code != "sync_healthy");
+    Ok(Json(SyncEventAlertsResponse { generated_at: now.to_rfc3339(), healthy, alerts }))
+}
+
+async fn fetch_recent_failed_event_ids(
+    state: &CrmState,
+    cutoff_24h: &str,
+    limit: i64,
+) -> Result<Vec<String>, (StatusCode, Json<CrmError>)> {
+    let statement = "SELECT id\n         FROM crm_sync_event\n         WHERE status = 'failed' AND updated_at >= ?\n         ORDER BY updated_at DESC\n         LIMIT ?";
+    let rows = sqlx::query(statement)
+        .bind(cutoff_24h)
+        .bind(limit)
+        .fetch_all(&state.db_pool)
+        .await
+        .map_err(db_error)?;
+    Ok(rows.into_iter().filter_map(|row| row.try_get::<String, _>("id").ok()).collect())
+}
+
+async fn fetch_stale_retrying_event_ids(
+    state: &CrmState,
+    stale_retry_cutoff: &str,
+    max_attempts: i32,
+    limit: i64,
+) -> Result<Vec<String>, (StatusCode, Json<CrmError>)> {
+    let statement = "SELECT id\n         FROM crm_sync_event\n         WHERE status = 'retrying' AND updated_at <= ? AND attempts < ?\n         ORDER BY updated_at DESC\n         LIMIT ?";
+    let rows = sqlx::query(statement)
+        .bind(stale_retry_cutoff)
+        .bind(max_attempts)
+        .bind(limit)
+        .fetch_all(&state.db_pool)
+        .await
+        .map_err(db_error)?;
+    Ok(rows.into_iter().filter_map(|row| row.try_get::<String, _>("id").ok()).collect())
+}
+
+async fn fetch_retry_budget_event_ids(
+    state: &CrmState,
+    attempts: i32,
+    limit: i64,
+) -> Result<Vec<String>, (StatusCode, Json<CrmError>)> {
+    let statement = "SELECT id\n         FROM crm_sync_event\n         WHERE status IN ('queued', 'failed', 'retrying', 'skipped')\n           AND attempts = ?\n         ORDER BY updated_at DESC\n         LIMIT ?";
+    let rows = sqlx::query(statement)
+        .bind(attempts)
+        .bind(limit)
+        .fetch_all(&state.db_pool)
+        .await
+        .map_err(db_error)?;
+    Ok(rows.into_iter().filter_map(|row| row.try_get::<String, _>("id").ok()).collect())
+}
+
 async fn inbound_event_is_duplicate(
     state: &CrmState,
     provider: CrmProvider,
@@ -3671,9 +3868,9 @@ mod tests {
     use super::{
         batch_retry_inbound_sync_events, batch_retry_quotey_sync_events, encode_query,
         fetch_and_reserve_oauth_state, oauth_callback, outbound_sync_semantics_for_status,
-        retry_sync_event, start_oauth, sync_quote_to_crm, webhook_ingest, BatchSyncQuery,
-        CrmProvider, CrmRuntimeConfig, CrmState, OAuthCallbackQuery, OAuthConnectRequest,
-        SyncEventPayloadRequest, WebhookPayload,
+        retry_sync_event, start_oauth, sync_event_alerts, sync_quote_to_crm, webhook_ingest,
+        BatchSyncQuery, CrmProvider, CrmRuntimeConfig, CrmState, OAuthCallbackQuery,
+        OAuthConnectRequest, SyncEventPayloadRequest, WebhookPayload,
     };
 
     async fn setup_state() -> CrmState {
@@ -4272,6 +4469,91 @@ mod tests {
         assert_eq!(batch.succeeded + batch.failed + batch.skipped, 1);
         assert_eq!(batch.provider_results.len(), 1);
         assert_eq!(batch.provider_results[0].event_id, "CRMEV-INBATCH-001");
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sync_event_alerts_surfaces_actionable_failure_signals() {
+        let state = setup_state().await;
+        seed_quote_with_line(&state, "Q-ALERT-1", "draft").await;
+        seed_quote_with_line(&state, "Q-ALERT-2", "draft").await;
+        seed_quote_with_line(&state, "Q-ALERT-3", "draft").await;
+
+        let now = Utc::now().to_rfc3339();
+        let stale =
+            (Utc::now() - Duration::minutes(super::CRM_SYNC_STALE_RETRY_MINUTES + 5)).to_rfc3339();
+
+        sqlx::query(
+            "INSERT INTO crm_sync_event
+                (id, provider, direction, event_type, quote_id, crm_object_type, crm_object_id, payload_json, status, attempts, error_message, created_at, updated_at)
+             VALUES
+                ('CRMEV-ALERT-FAILED', 'salesforce', 'quotey_to_crm', 'quote_updated', 'Q-ALERT-1', 'deal', 'D-ALERT-1', '{}', 'failed', 1, 'transport failure', ?, ?)",
+        )
+        .bind(&now)
+        .bind(&now)
+        .execute(&state.db_pool)
+        .await
+        .expect("seed failed sync event");
+
+        sqlx::query(
+            "INSERT INTO crm_sync_event
+                (id, provider, direction, event_type, quote_id, crm_object_type, crm_object_id, payload_json, status, attempts, error_message, created_at, updated_at)
+             VALUES
+                ('CRMEV-ALERT-RETRY', 'salesforce', 'quotey_to_crm', 'quote_updated', 'Q-ALERT-2', 'deal', 'D-ALERT-2', '{}', 'retrying', 2, 'waiting for retry', ?, ?)",
+        )
+        .bind(&stale)
+        .bind(&stale)
+        .execute(&state.db_pool)
+        .await
+        .expect("seed stale retrying sync event");
+
+        sqlx::query(
+            "INSERT INTO crm_sync_event
+                (id, provider, direction, event_type, quote_id, crm_object_type, crm_object_id, payload_json, status, attempts, error_message, created_at, updated_at)
+             VALUES
+                ('CRMEV-ALERT-BUDGET', 'hubspot', 'crm_to_quotey', 'account_updated', 'Q-ALERT-3', 'account', 'A-ALERT-3', '{}', 'failed', ?, 'near retry exhaustion', ?, ?)",
+        )
+        .bind(super::MAX_SYNC_ATTEMPTS - 1)
+        .bind(&now)
+        .bind(&now)
+        .execute(&state.db_pool)
+        .await
+        .expect("seed near retry budget sync event");
+
+        let Json(alerts) =
+            sync_event_alerts(State(state.clone())).await.expect("sync alerts should load");
+
+        assert!(!alerts.healthy, "expected unhealthy alert response");
+        assert!(
+            alerts.alerts.iter().any(|alert| alert.code == "failed_events_24h"
+                && alert.sample_event_ids.iter().any(|id| id == "CRMEV-ALERT-FAILED")),
+            "expected failed events alert with sample ids"
+        );
+        assert!(
+            alerts.alerts.iter().any(|alert| alert.code == "stale_retrying_events"
+                && alert.sample_event_ids.iter().any(|id| id == "CRMEV-ALERT-RETRY")),
+            "expected stale retrying alert"
+        );
+        assert!(
+            alerts.alerts.iter().any(|alert| alert.code == "retry_budget_exhausting"
+                && alert.sample_event_ids.iter().any(|id| id == "CRMEV-ALERT-BUDGET")),
+            "expected retry budget alert"
+        );
+
+        state.db_pool.close().await;
+    }
+
+    #[tokio::test]
+    async fn sync_event_alerts_reports_healthy_when_no_active_alerts_exist() {
+        let state = setup_state().await;
+        let Json(alerts) =
+            sync_event_alerts(State(state.clone())).await.expect("sync alerts should load");
+
+        assert!(alerts.healthy, "expected healthy alert response");
+        assert_eq!(alerts.alerts.len(), 1, "healthy payload should emit one info alert");
+        assert_eq!(alerts.alerts[0].code, "sync_healthy");
+        assert_eq!(alerts.alerts[0].sample_event_ids.len(), 0);
 
         state.db_pool.close().await;
     }
